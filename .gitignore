@@ -2,6 +2,13 @@
 /bin/
 **/target/
 *.dSYM
+/.tooling/
+**/node_modules/
+*.tsbuildinfo
+**/bin/
+**/obj/
+/platform/windows/LoreShell/build*/
+/platform/windows/bin/
 
 /.bin/
 

@@ -39,9 +39,12 @@ pub const SESSION_LIFETIME: Duration = Duration::from_secs(150);
 /// `ucs-auth://auth.example.com` -> `https://auth.example.com`
 /// `https://auth.example.com` -> `https://auth.example.com` (unchanged)
 /// `http://127.0.0.1:41339` -> `http://127.0.0.1:41339` (unchanged)
+/// `http+insecure://registry.internal` -> `http://registry.internal`
 /// `http://auth.example.com` -> `https://auth.example.com` (upgraded)
 ///
-/// Plaintext `http` is honoured only for loopback hosts, where the traffic
+/// The explicit `http+insecure` scheme is for trusted development environments;
+/// production deployments must use HTTPS. Plaintext `http` is honoured only for
+/// loopback hosts, where the traffic
 /// never leaves the machine — this lets a local test auth service run
 /// without a certificate. For any other host the scheme is upgraded to
 /// `https`: the auth URL arrives in the *remote server's* advertised
@@ -50,6 +53,7 @@ pub const SESSION_LIFETIME: Duration = Duration::from_secs(150);
 pub fn grpc_endpoint(auth_url: &str) -> String {
     match auth_url.split_once("://") {
         Some(("https", _)) => auth_url.to_string(),
+        Some(("http+insecure", rest)) => format!("http://{rest}"),
         Some(("http", _))
             if url::Url::parse(auth_url).is_ok_and(|url| super::is_loopback_http_url(&url)) =>
         {

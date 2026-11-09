@@ -93,6 +93,14 @@ fn grpc_endpoint_custom_scheme() {
 }
 
 #[test]
+fn grpc_endpoint_explicit_insecure_scheme() {
+    assert_eq!(
+        grpc_endpoint("http+insecure://control-plane:9090"),
+        "http://control-plane:9090"
+    );
+}
+
+#[test]
 fn resource_id_format() {
     let repo_id = RepositoryId::default();
     let rid = resource_id(repo_id);

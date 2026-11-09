@@ -1,2 +1,7 @@
 target/
 **/target/
+.git
+.tooling
+**/node_modules
+**/dist
+docs

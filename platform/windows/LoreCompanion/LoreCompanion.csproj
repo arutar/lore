@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>LoreCompanion</AssemblyName>
+    <ApplicationIcon>../shared/Lore.ico</ApplicationIcon>
+    <RootNamespace>LoreCompanion</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Include="System.IO" />
+    <Resource Include="../shared/Lore.ico" Link="Lore.ico" />
+    <Resource Include="../shared/LoreClone.ico" Link="LoreClone.ico" />
+    <Resource Include="../shared/LoreSync.ico" Link="LoreSync.ico" />
+    <Resource Include="../shared/LoreCommit.ico" Link="LoreCommit.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="LoreVcs" Version="0.12.0" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,29 @@
+[immutable_store.local]
+path = "/data"
+
+[mutable_store.local]
+path = "/data"
+
+[lock_store.local]
+path = "/data"
+
+[server.auth]
+jwt_issuer = ["http://host.docker.internal:8080/auth/realms/lore"]
+jwt_audience = ["lore-server"]
+resource_claim = "lore_access"
+resource_id_template = "lore-{id}"
+resource_wildcard = "lore-*"
+repository_catalog = "user_service"
+
+[server.auth.jwk]
+endpoint = "http://keycloak:8080/auth/realms/lore/protocol/openid-connect/certs"
+
+[server.auth.oidc]
+client_id = "lore-native"
+preferred = true
+scopes = ["openid", "profile"]
+resource_template = "lore-{id}"
+token_exchange_issuer = "http://host.docker.internal:8080/web/v1/lore-oidc"
+
+[environment.endpoint]
+user_url = "http+insecure://control-plane:9090"

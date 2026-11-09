@@ -1,0 +1,5 @@
+#include "Resource.h"
+IDI_LORE ICON "../shared/Lore.ico"
+IDI_LORE_CLONE ICON "../shared/LoreClone.ico"
+IDI_LORE_SYNC ICON "../shared/LoreSync.ico"
+IDI_LORE_COMMIT ICON "../shared/LoreCommit.ico"

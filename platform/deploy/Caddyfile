@@ -1,0 +1,11 @@
+{$LORE_PUBLIC_ADDRESS:http://host.docker.internal:8080}
+
+handle /auth* {
+    reverse_proxy keycloak:8080
+}
+
+handle {
+    reverse_proxy control-plane:8080
+}
+
+import /etc/caddy/conf.d/*.conf

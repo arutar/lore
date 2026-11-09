@@ -1,0 +1,6 @@
+services:
+  lore:
+    environment:
+      SSL_CERT_FILE: /tls/caddy/pki/authorities/local/root.crt
+    volumes:
+      - ${LORE_DATA_ROOT:-./data}/caddy:/tls:ro

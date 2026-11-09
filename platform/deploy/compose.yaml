@@ -1,0 +1,137 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: lore
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lore-dev-only}
+      POSTGRES_DB: lore
+    volumes:
+      - ${LORE_DATA_ROOT:-./data}/postgres:/var/lib/postgresql
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lore -d lore"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4
+    command: ["start-dev", "--import-realm", "--health-enabled=true"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin-dev-only}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: lore
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-lore-dev-only}
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-http://host.docker.internal:8080/auth}
+      KC_HTTP_RELATIVE_PATH: /auth
+    ports:
+      - "${LORE_KEYCLOAK_BIND:-127.0.0.1}:8081:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${LORE_REALM_FILE:-./keycloak/lore-realm.json}:/opt/keycloak/data/import/lore-realm.json:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000 && printf "GET /auth/health/ready HTTP/1.0\r\n\r\n" >&3 && IFS= read -r line <&3 && [[ "$$line" == *"200"* ]]'
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: platform/Dockerfile
+    environment:
+      DATABASE_URL: postgres://lore:${POSTGRES_PASSWORD:-lore-dev-only}@postgres:5432/lore?sslmode=disable
+      OIDC_ISSUER: ${KEYCLOAK_PUBLIC_URL:-http://host.docker.internal:8080/auth}/realms/lore
+      OIDC_INTERNAL_ISSUER: http://keycloak:8080/auth/realms/lore
+      OIDC_CLIENT_ID: lore-web
+      OIDC_REDIRECT_URL: ${LORE_WEB_PUBLIC_URL:-http://host.docker.internal:8080}/web/v1/oidc/callback
+      EXTERNAL_URL: ${LORE_WEB_PUBLIC_URL:-http://host.docker.internal:8080}
+      BOOTSTRAP_ADMIN: admin
+      SECURE_COOKIES: ${SECURE_COOKIES:-false}
+      SESSION_TTL: 8h
+      LORE_GRPC_ADDR: :9090
+      LORE_REPOSITORY_ADDR: lore:41337
+      LORE_SERVICE_TOKEN_URL: http://keycloak:8080/realms/lore/protocol/openid-connect/token
+      LORE_SERVICE_CLIENT_ID: lore-control-plane
+      LORE_SERVICE_CLIENT_SECRET: ${LORE_SERVICE_CLIENT_SECRET:-lore-service-dev-only}
+      LORE_GRPC_SECURE: "false"
+      LORE_TOKEN_EXCHANGE_ISSUER: ${LORE_EXCHANGE_PUBLIC_URL:-http://host.docker.internal:8080}/web/v1/lore-oidc
+      LORE_TOKEN_SIGNING_KEY_FILE: ${LORE_TOKEN_SIGNING_KEY_FILE:-/data/token-exchange-signing.pem}
+    expose:
+      - "8080"
+      - "9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${LORE_DATA_ROOT:-./data}/control-plane:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+
+  lore:
+    build:
+      context: ../..
+      dockerfile: lore-server/Dockerfile
+    volumes:
+      - ${LORE_DATA_ROOT:-./data}/lore:/data
+      - ${LORE_CONFIG_FILE:-./lore/docker.toml}:/etc/lore/config/docker.toml:ro
+    ports:
+      - "41337:41337/tcp"
+      - "41337:41337/udp"
+      - "41339:41339"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bash -c 'exec 3<>/dev/tcp/127.0.0.1/41339 && printf "GET /health_check HTTP/1.0\r\n\r\n" >&3 && IFS= read -r line <&3 && [[ "$$line" == *"200"* ]]'
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      LORE_PUBLIC_ADDRESS: ${LORE_PUBLIC_ADDRESS:-http://host.docker.internal:8080}
+    ports:
+      - "${LORE_PROXY_BIND:-0.0.0.0}:8080:8080"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${LORE_DATA_ROOT:-./data}/generated/caddy:/etc/caddy/conf.d:ro
+      - ${LORE_DATA_ROOT:-./data}/caddy:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2019/config/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      default:
+        aliases:
+          - ${LORE_PUBLIC_HOST:-host.docker.internal}
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    restart: unless-stopped
+
