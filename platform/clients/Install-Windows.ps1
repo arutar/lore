@@ -2,6 +2,7 @@
 param(
     [string]$BundlePath = "",
     [string]$Destination = "",
+    [string]$WebView2Bootstrapper = "",
     [switch]$NoShell,
     [switch]$AllUsers
 )
@@ -14,7 +15,7 @@ if ($AllUsers) {
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $isAdmin) {
         $script = $MyInvocation.MyCommand.Path
-        $arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$script`"", "-AllUsers", "-BundlePath", "`"$BundlePath`"", "-Destination", "`"$Destination`"")
+        $arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$script`"", "-AllUsers", "-BundlePath", "`"$BundlePath`"", "-Destination", "`"$Destination`"", "-WebView2Bootstrapper", "`"$WebView2Bootstrapper`"")
         if ($NoShell) { $arguments += "-NoShell" }
         $process = Start-Process powershell.exe -Verb RunAs -ArgumentList $arguments -Wait -PassThru
         if ($process.ExitCode -ne 0) { throw "Elevated installation failed" }
@@ -23,8 +24,34 @@ if ($AllUsers) {
 }
 if (-not $BundlePath) { $BundlePath = Join-Path $PSScriptRoot "../windows/bin/client" }
 $source = (Resolve-Path $BundlePath).Path
-foreach ($file in @("lore.exe", "LoreCompanion.exe", "LoreShell.dll")) {
+foreach ($file in @("lore.exe", "LoreCompanion.exe", "LoreShell.dll", "Web/index.html")) {
     if (-not (Test-Path "$source/$file")) { throw "$file is missing from the client bundle" }
+}
+$runtimeClient = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+$runtimePaths = @(
+    "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$runtimeClient",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$runtimeClient",
+    "HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$runtimeClient"
+)
+$runtimeVersion = $runtimePaths | ForEach-Object {
+    (Get-ItemProperty $_ -Name pv -ErrorAction SilentlyContinue).pv
+} | Where-Object { $_ } | Select-Object -First 1
+if (-not $runtimeVersion) {
+    $bootstrapper = $WebView2Bootstrapper
+    $downloaded = ""
+    try {
+        if (-not $bootstrapper) {
+            $downloaded = Join-Path ([IO.Path]::GetTempPath()) "MicrosoftEdgeWebview2Setup-$([Guid]::NewGuid().ToString('N')).exe"
+            Write-Host "Downloading WebView2 Runtime..."
+            Invoke-WebRequest "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $downloaded
+            $bootstrapper = $downloaded
+        }
+        $process = Start-Process $bootstrapper -ArgumentList "/silent", "/install" -Wait -PassThru
+        if ($process.ExitCode -ne 0) { throw "WebView2 Runtime installation failed with exit code $($process.ExitCode)" }
+    }
+    finally {
+        if ($downloaded) { Remove-Item $downloaded -Force -ErrorAction SilentlyContinue }
+    }
 }
 $legacy = "$env:LOCALAPPDATA/Programs/Lore/LoreShell.dll"
 if ($AllUsers -and (Test-Path $legacy)) {
@@ -38,14 +65,14 @@ Stop-Process -Name LoreCompanion -Force -ErrorAction SilentlyContinue
 if (-not $NoShell) { Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue }
 $backups = @()
 try {
-    foreach ($file in Get-ChildItem $source -File) {
-        $target = Join-Path $Destination $file.Name
+    foreach ($item in Get-ChildItem $source) {
+        $target = Join-Path $Destination $item.Name
         if (Test-Path $target) {
             $backup = "$target.$([Guid]::NewGuid().ToString('N')).old"
             Move-Item $target $backup -Force
             $backups += $backup
         }
-        Copy-Item $file.FullName $target -Force
+        Copy-Item $item.FullName $target -Recurse -Force
     }
 
     $pathScope = if ($AllUsers) { "Machine" } else { "User" }
@@ -62,7 +89,7 @@ try {
 }
 finally {
     if (-not $NoShell) { Start-Process "$env:WINDIR/explorer.exe" }
-    foreach ($backup in $backups) { Remove-Item $backup -Force -ErrorAction SilentlyContinue }
+    foreach ($backup in $backups) { Remove-Item $backup -Recurse -Force -ErrorAction SilentlyContinue }
     Remove-Item "$installRoot/versions" -Recurse -Force -ErrorAction SilentlyContinue
 }
 Start-Process "$Destination/LoreCompanion.exe"

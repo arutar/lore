@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Error</title>
+  <desc>Red cross.</desc>
+  <circle cx="256" cy="256" r="216" fill="#CF222E"/>
+  <g transform="translate(256 256) scale(1.6)" fill="none" stroke="#FFFFFF" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"><path d="M-42 -42 L42 42"/><path d="M42 -42 L-42 42"/></g>
+</svg>

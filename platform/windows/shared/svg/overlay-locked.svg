@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Lore locked</title>
+  <desc>Closed padlock overlay for the lower left corner of a file icon.</desc>
+  <circle cx="150" cy="362" r="132" fill="#D29922" stroke="#FFFFFF" stroke-width="24"/>
+  <g transform="translate(150 362) scale(1.15)" fill="none" stroke="#FFFFFF" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"><rect x="-46" y="-6" width="92" height="70" rx="14" fill="#FFFFFF" stroke="none"/>
+  <path d="M-26 -6 V-40 A26 26 0 0 1 26 -40 V-6" stroke-width="20"/></g>
+</svg>

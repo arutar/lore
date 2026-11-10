@@ -7,17 +7,18 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>LoreCompanion</AssemblyName>
-    <ApplicationIcon>../shared/Lore.ico</ApplicationIcon>
+    <ApplicationIcon>../shared/ico/app.ico</ApplicationIcon>
     <RootNamespace>LoreCompanion</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
     <Using Include="System.IO" />
-    <Resource Include="../shared/Lore.ico" Link="Lore.ico" />
-    <Resource Include="../shared/LoreClone.ico" Link="LoreClone.ico" />
-    <Resource Include="../shared/LoreSync.ico" Link="LoreSync.ico" />
-    <Resource Include="../shared/LoreCommit.ico" Link="LoreCommit.ico" />
+    <Resource Include="../shared/ico/*.ico" Link="%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="../LoreCompanion.Web/dist/**" Link="Web/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="LoreVcs" Version="0.12.0" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
   </ItemGroup>
 </Project>

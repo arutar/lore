@@ -36,6 +36,13 @@ public sealed class RequestContractTests
     }
 
     [TestMethod]
+    public void ShellOperationNumbersMatchTheRequestContract()
+    {
+        Assert.AreEqual(CompanionOperation.Stage, OperationRequest.Parse("""{"Operation":3,"Paths":["C:\\work"]}""").Operation);
+        Assert.AreEqual(CompanionOperation.Status, OperationRequest.Parse("""{"Operation":4,"Paths":["C:\\work"]}""").Operation);
+    }
+
+    [TestMethod]
     public void HashPathIsCaseAndTrailingSlashInsensitive()
     {
         Assert.AreEqual(OverlayCache.HashPath(@"C:\Work\Repo\"), OverlayCache.HashPath(@"c:\work\repo"));
@@ -45,5 +52,28 @@ public sealed class RequestContractTests
     public void HashPathDistinguishesFiles()
     {
         Assert.AreNotEqual(OverlayCache.HashPath(@"C:\Work\a.bin"), OverlayCache.HashPath(@"C:\Work\b.bin"));
+    }
+
+    [TestMethod]
+    public void ProtocolErrorIsReadableAndDoesNotExposeInternalTrace()
+    {
+        var error = new Exception("Lore error -1: protocol https was not recognized at lore-transport/src/connection.rs:73:21");
+        var message = OperationError.UserMessage(error, CompanionOperation.Clone);
+        StringAssert.Contains(message, "unsupported protocol");
+        Assert.DoesNotContain("lore-transport", message);
+    }
+
+    [TestMethod]
+    public void PermissionErrorSuggestsHowToResolveIt()
+    {
+        var message = OperationError.UserMessage(new Exception("HTTP 403 Forbidden"), CompanionOperation.Commit);
+        StringAssert.Contains(message, "repository administrator");
+    }
+
+    [TestMethod]
+    public void ValidationErrorTextIsPreserved()
+    {
+        var message = OperationError.UserMessage(new InvalidDataException("Enter a commit message"), CompanionOperation.Commit);
+        Assert.AreEqual("Enter a commit message", message);
     }
 }

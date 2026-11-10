@@ -24,6 +24,12 @@ Its changes are not intended for upstream submission by default.
 An upstream contribution follows the upstream `GOVERNANCE.md`, `CONTRIBUTING.md`, and
 review requirements instead of this fork workflow.
 
+## Continue platform work
+
+- When starting work from this repository, read `platform/docs/current-status.md` before planning or asking for requirements again. It records the current implementation state and next steps.
+- Use existing code, tests, deployment files and `platform/docs/architecture.md` as the primary context. Do not restart the design or repeat completed review rounds unless the requirements changed.
+- Update `current-status.md` at implementation milestones and whenever the next task or verification state changes.
+
 ## Team workspace
 
 When `context/team-workspace.md` exists, read it before non-trivial work and follow

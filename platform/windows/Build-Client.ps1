@@ -13,6 +13,16 @@ $cliChecksum = "26b84459fd6ab2faa10d5f8eb8393848286935414210d7070dafffd97e4c1343
 
 Remove-Item $OutputDirectory -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
+Push-Location "$PSScriptRoot/LoreCompanion.Web"
+try {
+    & npm ci
+    if ($LASTEXITCODE -ne 0) { throw "Companion Web UI dependency installation failed" }
+    & npm run build
+    if ($LASTEXITCODE -ne 0) { throw "Companion Web UI build failed" }
+}
+finally {
+    Pop-Location
+}
 & $dotnet publish "$PSScriptRoot/LoreCompanion/LoreCompanion.csproj" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o "$OutputDirectory"
 if ($LASTEXITCODE -ne 0) { throw "Companion publish failed" }
 & $cmake -S "$PSScriptRoot/LoreShell" -B "$PSScriptRoot/LoreShell/build" -G "Visual Studio 17 2022" -A x64

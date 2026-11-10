@@ -1,6 +1,5 @@
 #include "LoreShell.h"
-#include <shellapi.h>
-#include <string_view>
+#include "Resource.h"
 
 namespace
 {
@@ -96,11 +95,10 @@ STDMETHODIMP OverlayHandler::IsMemberOf(PCWSTR path, DWORD)
 STDMETHODIMP OverlayHandler::GetOverlayInfo(PWSTR path, int pathSize, int* index, DWORD* flags)
 {
     if (!path || !index || !flags) return E_POINTER;
-    const auto result = GetSystemDirectoryW(path, pathSize);
+    if (state_ < 1 || state_ > 6) return E_UNEXPECTED;
+    const auto result = GetModuleFileNameW(g_instance, path, pathSize);
     if (!result || result >= static_cast<UINT>(pathSize)) return E_FAIL;
-    if (pathSize - result < 13) return E_FAIL;
-    wcscat_s(path, pathSize, L"\\shell32.dll");
-    *index = -static_cast<int>(state_);
+    *index = -(200 + state_);
     *flags = ISIOI_ICONFILE | ISIOI_ICONINDEX;
     return S_OK;
 }

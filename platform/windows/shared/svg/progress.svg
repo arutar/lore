@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Running operation</title>
+  <desc>Spinner, used only where a spinner is shown.</desc>
+  <circle cx="256" cy="256" r="176" fill="none" stroke="#58A6FF" stroke-opacity="0.22" stroke-width="48"/>
+  <path d="M256 80 A176 176 0 1 1 80 256" fill="none" stroke="#58A6FF" stroke-width="48" stroke-linecap="round"/>
+</svg>

@@ -25,7 +25,12 @@ internal static class Program
             }
             var json = File.ReadAllText(path, Encoding.UTF8);
             File.Delete(path);
-            new Application().Run(new OperationWindow(OperationRequest.Parse(json)));
+            var request = OperationRequest.Parse(json);
+            if (!WebViewOperationWindow.IsRuntimeAvailable())
+            {
+                throw new InvalidOperationException("WebView2 Runtime is required. Run the Lore installer to install it, then try again.");
+            }
+            new Application().Run(new WebViewOperationWindow(request));
         }
         catch (Exception exception)
         {

@@ -55,10 +55,16 @@ struct Invocation
 
 HBITMAP LoreMenuBitmap(int operation = -1)
 {
-    static HBITMAP bitmaps[4];
+    constexpr int operationCount = 8;
+    if (operation < -1 || operation >= operationCount) return nullptr;
+    static HBITMAP bitmaps[operationCount + 1]{};
+    constexpr int resources[operationCount + 1]{
+        IDI_LORE, IDI_LORE_CLONE, IDI_LORE_SYNC, IDI_LORE_COMMIT,
+        IDI_LORE_STAGE, IDI_LORE_STATUS, IDI_LORE_HISTORY, IDI_LORE_LOCK, IDI_LORE_UNLOCK,
+    };
     auto& bitmap = bitmaps[operation + 1];
     if (bitmap) return bitmap;
-    const auto resource = operation == 0 ? IDI_LORE_CLONE : operation == 1 ? IDI_LORE_SYNC : operation == 2 ? IDI_LORE_COMMIT : IDI_LORE;
+    const auto resource = resources[operation + 1];
     bitmap = [resource]
     {
         BITMAPINFO info{};
@@ -73,7 +79,7 @@ HBITMAP LoreMenuBitmap(int operation = -1)
         if (!created) return static_cast<HBITMAP>(nullptr);
         HDC dc = CreateCompatibleDC(nullptr);
         auto old = SelectObject(dc, created);
-        HBRUSH background = CreateSolidBrush(RGB(88, 166, 255));
+        HBRUSH background = CreateSolidBrush(GetSysColor(COLOR_MENU));
         RECT rectangle{0, 0, 16, 16};
         FillRect(dc, &rectangle, background);
         DeleteObject(background);
@@ -225,11 +231,16 @@ STDMETHODIMP ContextMenu::QueryContextMenu(HMENU menu, UINT index, UINT first, U
     SetLoreMenuIcon(menu, first + CommandCommit, CommandCommit);
     HMENU submenu = CreatePopupMenu();
     AppendMenuW(submenu, MF_STRING, first + CommandStage, L"Stage selected paths");
+    SetLoreMenuIcon(submenu, first + CommandStage, CommandStage);
     AppendMenuW(submenu, MF_STRING, first + CommandStatus, L"Status");
+    SetLoreMenuIcon(submenu, first + CommandStatus, CommandStatus);
     AppendMenuW(submenu, MF_STRING, first + CommandHistory, L"History");
+    SetLoreMenuIcon(submenu, first + CommandHistory, CommandHistory);
     AppendMenuW(submenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(submenu, MF_STRING, first + CommandLock, L"Acquire locks");
+    SetLoreMenuIcon(submenu, first + CommandLock, CommandLock);
     AppendMenuW(submenu, MF_STRING, first + CommandUnlock, L"Release locks");
+    SetLoreMenuIcon(submenu, first + CommandUnlock, CommandUnlock);
     InsertMenuW(menu, next, MF_BYPOSITION | MF_STRING | MF_POPUP, reinterpret_cast<UINT_PTR>(submenu), L"Lore");
     MENUITEMINFOW submenuInfo{sizeof(submenuInfo)};
     submenuInfo.fMask = MIIM_BITMAP;

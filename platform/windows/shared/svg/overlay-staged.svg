@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Lore staged</title>
+  <desc>Blue plus overlay for the lower left corner of a file icon.</desc>
+  <circle cx="150" cy="362" r="132" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="24"/>
+  <g transform="translate(150 362) scale(1.15)" fill="none" stroke="#FFFFFF" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"><path d="M0 -56 V56"/><path d="M-56 0 H56"/></g>
+</svg>
