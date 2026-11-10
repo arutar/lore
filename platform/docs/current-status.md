@@ -22,6 +22,7 @@ Self-hosted Lore с React WebUI, Go control plane, PostgreSQL, Keycloak, AD/LDAP
 - JSON request files вместо named pipe, all-users/per-user installers, проверка WebView2 Runtime и выбор локального bootstrapper, читаемые ошибки операций.
 - Полный набор из 28 SVG-иконок, PNG/ICO exports, воспроизводимые генераторы и автономный просмотрщик: `platform/windows/shared/svg/preview.html`.
 - Per-machine MSI на WiX 7.0.1: нативная регистрация shell/COM, machine PATH, стабильный UpgradeCode. GitHub Actions собирает MSI/ZIP/SHA256SUMS, тестирует install/uninstall и публикует по `platform-v*` через `platform-release` environment. Workflow прошёл actionlint.
+- Upstream contribution для `http+insecure`: открыт EpicGames/lore#278. До ответа maintainers PR не создаётся; затем patch, release note, DCO и Rust проверки на свежем `upstream/main`.
 
 ## Важные ограничения
 
