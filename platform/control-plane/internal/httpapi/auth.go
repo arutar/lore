@@ -25,6 +25,10 @@ const (
 	verifierCookie = "lore_oidc_verifier"
 )
 
+type GroupDirectory interface {
+	GroupIDs(ctx context.Context, username string) ([]string, error)
+}
+
 type AuthConfig struct {
 	Issuer         string
 	InternalIssuer string
@@ -34,6 +38,7 @@ type AuthConfig struct {
 	SecureCookies  bool
 	SessionTTL     time.Duration
 	BootstrapAdmin string
+	GroupDirectory GroupDirectory
 }
 
 type Authenticator struct {
@@ -212,13 +217,18 @@ func (a *Authenticator) callback(w http.ResponseWriter, r *http.Request) {
 	if claims.Source == "" {
 		claims.Source = "oidc"
 	}
+	groups, err := a.groupIDs(r.Context(), claims.Username, claims.Groups)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "directory_sync_failed", "Couldn't read directory groups")
+		return
+	}
 	user, err := a.store.UpsertUser(r.Context(), model.User{
 		ID:          idToken.Subject,
 		Username:    claims.Username,
 		Email:       claims.Email,
 		DisplayName: claims.Name,
 		Role:        model.RoleUser,
-		Groups:      claims.Groups,
+		Groups:      groups,
 		Source:      claims.Source,
 	})
 	if err != nil {
@@ -259,6 +269,13 @@ func (a *Authenticator) AuthenticateBearer(ctx context.Context, token string) (m
 	return model.User{}, errors.New("bearer token is invalid")
 }
 
+func (a *Authenticator) groupIDs(ctx context.Context, username string, fallback []string) ([]string, error) {
+	if a.config.GroupDirectory == nil {
+		return fallback, nil
+	}
+	return a.config.GroupDirectory.GroupIDs(ctx, username)
+}
+
 func (a *Authenticator) SetTokenExchange(exchange *TokenExchange) {
 	a.tokenExchange = exchange
 }
@@ -296,9 +313,13 @@ func (a *Authenticator) authenticateOIDCBearer(ctx context.Context, token string
 	if claims.Name == "" {
 		claims.Name = claims.Username
 	}
+	groups, err := a.groupIDs(ctx, claims.Username, claims.Groups)
+	if err != nil {
+		return model.User{}, err
+	}
 	user, err = a.store.UpsertUser(ctx, model.User{
 		ID: idToken.Subject, Username: claims.Username, Email: claims.Email,
-		DisplayName: claims.Name, Role: model.RoleUser, Groups: claims.Groups, Source: "oidc",
+		DisplayName: claims.Name, Role: model.RoleUser, Groups: groups, Source: "oidc",
 	})
 	if err != nil {
 		return model.User{}, err

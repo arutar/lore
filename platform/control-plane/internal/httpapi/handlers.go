@@ -311,9 +311,20 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor, _ := currentUser(r.Context())
+	registrationChanged := settings.RegistrationEnabled != input.RegistrationEnabled
+	previousRegistration := settings.RegistrationEnabled
+	if registrationChanged && s.config.RegistrationRealm != nil {
+		if err := s.config.RegistrationRealm.SetRegistrationAllowed(r.Context(), input.RegistrationEnabled); err != nil {
+			writeError(w, http.StatusBadGateway, "registration_sync_failed", "Couldn't update registration in Keycloak")
+			return
+		}
+	}
 	settings.RegistrationEnabled = input.RegistrationEnabled
 	settings.Theme = input.Theme
 	if err := s.store.UpdateSettings(r.Context(), actor.ID, settings); err != nil {
+		if registrationChanged && s.config.RegistrationRealm != nil {
+			_ = s.config.RegistrationRealm.SetRegistrationAllowed(r.Context(), previousRegistration)
+		}
 		writeStoreError(w, err)
 		return
 	}

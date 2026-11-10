@@ -7,6 +7,7 @@
   "resetPasswordAllowed": false,
   "sslRequired": "none",
   "smtpServer": {},
+  "components": {},
   "clients": [
     {
       "clientId": "lore-web",

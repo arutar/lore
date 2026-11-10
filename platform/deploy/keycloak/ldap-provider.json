@@ -1,0 +1,26 @@
+{
+  "name": "burut-ad",
+  "providerId": "ldap",
+  "providerType": "org.keycloak.storage.UserStorageProvider",
+  "config": {
+    "enabled": ["true"],
+    "priority": ["0"],
+    "editMode": ["READ_ONLY"],
+    "syncRegistrations": ["false"],
+    "trustEmail": ["true"],
+    "vendor": ["ad"],
+    "usernameLDAPAttribute": ["sAMAccountName"],
+    "rdnLDAPAttribute": ["cn"],
+    "uuidLDAPAttribute": ["objectGUID"],
+    "userObjectClasses": ["person,organizationalPerson,user"],
+    "connectionUrl": ["__LORE_LDAP_URL__"],
+    "usersDn": ["__LORE_LDAP_BASE_DN__"],
+    "bindDn": ["__LORE_LDAP_BIND_DN__"],
+    "bindCredential": ["__LORE_LDAP_BIND_PASSWORD__"],
+    "connectionTimeout": ["60000"],
+    "readTimeout": ["60000"],
+    "startTls": ["__LORE_LDAP_STARTTLS__"],
+    "useTruststoreSpi": ["__LORE_LDAP_USE_TRUSTSTORE__"],
+    "authType": ["simple"]
+  }
+}

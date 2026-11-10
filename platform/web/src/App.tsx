@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useParams } from "react-router-dom";
 import { api, setCSRFToken } from "./api";
+import { RepositoryFiles, RepositoryHistory, RepositoryLocks } from "./RepositoryContent";
 import type { AuditEvent, BulkResult, GlobalSettings, Grant, Permission, PublicConfig, Repository, Session, SubjectType, User } from "./types";
 
 const emptySession: Session = { authenticated: false };
@@ -281,6 +282,7 @@ function RepositoryAccess() {
   const [subjectType, setSubjectType] = useState<SubjectType>("user");
   const [subject, setSubject] = useState("");
   const [permission, setPermission] = useState<Permission>("read");
+  const [tab, setTab] = useState<"files" | "history" | "locks" | "access">("files");
   const [error, setError] = useState("");
   const [forbidden, setForbidden] = useState(false);
 
@@ -288,12 +290,18 @@ function RepositoryAccess() {
     try {
       const repo = await api.repository(id);
       setRepository(repo);
-      const result = await api.grants(id);
-      setGrants(result.items);
+      try {
+        const result = await api.grants(id);
+        setGrants(result.items);
+        setForbidden(false);
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : "";
+        if (!message.includes("owner access")) throw cause;
+        setForbidden(true);
+      }
+      setError("");
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : "Couldn't load repository";
-      if (message.includes("owner access")) setForbidden(true);
-      setError(message);
+      setError(cause instanceof Error ? cause.message : "Couldn't load repository");
     }
   }
   useEffect(() => { void load(); }, [id]);
@@ -321,10 +329,13 @@ function RepositoryAccess() {
   if (!repository) return <><ErrorMessage message={error} /><div className="loading">Loading repository…</div></>;
   return (
     <>
-      <PageHeader eyebrow="Repository" title={repository.name} description={repository.description || "Repository access and clone information."} />
-      <ErrorMessage message={error} />
+      <PageHeader eyebrow="Repository" title={repository.name} description={repository.description || "Browse content, history and repository access."} />
       <section className="panel detail-panel"><div><span className="muted">Repository ID</span><div className="mono copy-value">{repository.id}</div></div><button className="button ghost" onClick={() => void navigator.clipboard.writeText(repository.id)}>Copy ID</button></section>
-      {forbidden ? <EmptyState title="Read access" text="Only a repository owner or administrator can manage grants." /> : <>
+      <div className="repository-tabs">{(["files", "history", "locks", "access"] as const).map((item) => <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>{item.charAt(0).toUpperCase() + item.slice(1)}</button>)}</div>
+      {tab === "files" && <RepositoryFiles id={id} />}
+      {tab === "history" && <RepositoryHistory id={id} />}
+      {tab === "locks" && <RepositoryLocks id={id} />}
+      {tab === "access" && <><ErrorMessage message={error} />{forbidden ? <EmptyState title="Read access" text="Only a repository owner or administrator can manage grants." /> : <>
         <section className="panel"><h2>Access grants</h2><p className="muted">Users receive the highest permission from their direct and group grants. Public read never includes write access.</p>
           <form className="grant-form" onSubmit={(event) => void addGrant(event)}>
             <select value={subjectType} onChange={(event) => setSubjectType(event.target.value as SubjectType)}><option value="user">User</option><option value="group">AD / local group</option><option value="authenticated">All authenticated users</option><option value="anonymous">Public (anonymous)</option></select>
@@ -335,7 +346,7 @@ function RepositoryAccess() {
           <BulkActions exportPath={`/repositories/${id}/grants/export`} onImport={(body, csv) => api.importGrants(id, body, csv)} onDone={load} />
           <div className="grant-list">{grants.map((grant) => <div className="grant-row" key={`${grant.subjectType}:${grant.subject}`}><span className="tag">{grant.subjectType}</span><span className="grant-subject">{grant.subject || (grant.subjectType === "anonymous" ? "Anyone" : "Any signed-in user")}</span><span className="permission">{grant.permission}</span><button className="button danger small" onClick={() => void remove(grant)}>Remove</button></div>)}</div>
         </section>
-      </>}
+      </>}</>}
     </>
   );
 }
@@ -396,7 +407,7 @@ function Settings({ config, onSaved }: { config: PublicConfig | null; onSaved: (
       </button>)}</div>
     </section>
     <section className="panel settings-panel">
-      <div><h2>Self-registration</h2><p>New users register through Keycloak and receive the ordinary user role. Repository access still requires a grant.</p><p className="muted">Also enable registration in the Keycloak realm. Current OIDC status: {config?.oidcEnabled ? "configured" : "not configured"}.</p></div>
+      <div><h2>Self-registration</h2><p>New users register through Keycloak and receive the ordinary user role. Repository access still requires a grant.</p><p className="muted">This also updates the Keycloak realm. Current OIDC status: {config?.oidcEnabled ? "configured" : "not configured"}.</p></div>
       <label className="switch"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /><span>Registration enabled</span></label>
       <button className="button primary" disabled={saving} onClick={() => void save()}>{saving ? "Saving…" : "Save settings"}</button>
     </section>

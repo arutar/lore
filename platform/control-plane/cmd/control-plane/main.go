@@ -14,6 +14,7 @@ import (
 	"golang.org/x/oauth2/clientcredentials"
 
 	"github.com/arutar/lore/platform/control-plane/internal/config"
+	"github.com/arutar/lore/platform/control-plane/internal/directory"
 	"github.com/arutar/lore/platform/control-plane/internal/httpapi"
 	"github.com/arutar/lore/platform/control-plane/internal/loreclient"
 	"github.com/arutar/lore/platform/control-plane/internal/loregrpc"
@@ -48,6 +49,10 @@ func run() error {
 	}
 	defer func() { _ = storage.Close() }()
 
+	groupDirectory, err := directory.NewLDAPFromEnv()
+	if err != nil {
+		return err
+	}
 	auth, err := httpapi.NewAuthenticator(ctx, storage, httpapi.AuthConfig{
 		Issuer:         settings.OIDCIssuer,
 		InternalIssuer: settings.OIDCInternalIssuer,
@@ -57,11 +62,13 @@ func run() error {
 		SecureCookies:  settings.SecureCookies,
 		SessionTTL:     settings.SessionTTL,
 		BootstrapAdmin: settings.BootstrapAdmin,
+		GroupDirectory: groupDirectory,
 	})
 	if err != nil {
 		return err
 	}
 	var repositories httpapi.RepositoryCreator
+	var content httpapi.RepositoryContent
 	if settings.LoreRepositoryAddress != "" {
 		oauth := clientcredentials.Config{
 			ClientID: settings.LoreServiceClientID, ClientSecret: settings.LoreServiceSecret, TokenURL: settings.LoreServiceTokenURL,
@@ -73,6 +80,7 @@ func run() error {
 		}
 		defer func() { _ = client.Close() }()
 		repositories = client
+		content = client
 	}
 	var exchange *httpapi.TokenExchange
 	if settings.TokenExchangeIssuer != "" {
@@ -85,14 +93,27 @@ func run() error {
 			log.Print("token exchange uses an ephemeral development signing key")
 		}
 	}
+	var registrationRealm httpapi.RegistrationRealm
+	oidcAdminIssuer := settings.OIDCInternalIssuer
+	if oidcAdminIssuer == "" {
+		oidcAdminIssuer = settings.OIDCIssuer
+	}
+	if oidcAdminIssuer != "" {
+		registrationRealm, err = httpapi.NewKeycloakRealmAdmin(oidcAdminIssuer, settings.LoreServiceTokenURL, settings.LoreServiceClientID, settings.LoreServiceSecret)
+		if err != nil {
+			return err
+		}
+	}
 	handler := httpapi.NewServer(storage, auth, httpapi.Config{
-		Repositories:  repositories,
-		TokenExchange: exchange,
-		StaticDir:     settings.StaticDir,
-		DevAuth:       settings.DevAuth,
-		DevUser:       model.User{ID: settings.DevUserID, Username: settings.DevUsername, DisplayName: settings.DevUsername, Role: model.RoleAdmin, Source: "local"},
-		OIDC:          httpapi.AuthConfig{},
-		ExternalURL:   settings.ExternalURL,
+		Repositories:      repositories,
+		Content:           content,
+		TokenExchange:     exchange,
+		RegistrationRealm: registrationRealm,
+		StaticDir:         settings.StaticDir,
+		DevAuth:           settings.DevAuth,
+		DevUser:           model.User{ID: settings.DevUserID, Username: settings.DevUsername, DisplayName: settings.DevUsername, Role: model.RoleAdmin, Source: "local"},
+		OIDC:              httpapi.AuthConfig{},
+		ExternalURL:       settings.ExternalURL,
 	})
 
 	server := &http.Server{
@@ -100,7 +121,7 @@ func run() error {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
+		WriteTimeout:      0,
 		IdleTimeout:       90 * time.Second,
 	}
 	grpcListener, err := net.Listen("tcp", settings.GRPCAddress)

@@ -1,4 +1,4 @@
-import type { AuditEvent, BulkResult, GlobalSettings, Grant, Page, PublicConfig, Repository, Session, User } from "./types";
+import type { AuditEvent, BulkResult, GlobalSettings, Grant, Page, PublicConfig, Repository, RepositoryLock, RepositoryTree, Revision, Session, User } from "./types";
 
 let csrfToken = "";
 
@@ -42,6 +42,9 @@ export const api = {
   logout: () => request<void>("/logout", { method: "POST" }),
   catalog: (cursor = "") => request<Page<Repository>>(`/catalog?pageSize=50&cursor=${encodeURIComponent(cursor)}`),
   repository: (id: string) => request<Repository>(`/repositories/${id}`),
+  tree: (id: string, path = "", revision = "") => request<RepositoryTree>(`/repositories/${id}/tree?path=${encodeURIComponent(path)}&revision=${encodeURIComponent(revision)}`),
+  history: (id: string, cursor = "") => request<Page<Revision>>(`/repositories/${id}/history?cursor=${encodeURIComponent(cursor)}`),
+  locks: (id: string) => request<{ items: RepositoryLock[] }>(`/repositories/${id}/locks`),
   grants: (id: string) => request<{ items: Grant[] }>(`/repositories/${id}/grants/`),
   setGrant: (grant: Grant) => request<Grant>(`/repositories/${grant.repositoryId}/grants/`, { method: "PUT", body: JSON.stringify(grant) }),
   removeGrant: (grant: Grant) => request<void>(`/repositories/${grant.repositoryId}/grants/`, { method: "DELETE", body: JSON.stringify(grant) }),

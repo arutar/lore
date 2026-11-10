@@ -18,8 +18,9 @@ if ($LASTEXITCODE -ne 0) { throw "Docker engine isn't running" }
 
 function New-HexSecret {
     $bytes = [byte[]]::new(32)
-    [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-    return [Convert]::ToHexString($bytes).ToLowerInvariant()
+    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $random.GetBytes($bytes) } finally { $random.Dispose() }
+    return -join ($bytes | ForEach-Object { $_.ToString("x2") })
 }
 function Write-Utf8NoBom([string]$Path, [Parameter(ValueFromPipeline = $true)][string]$Text) {
     process {
@@ -73,10 +74,12 @@ New-Item -ItemType Directory -Force -Path "$generated/caddy", "data/postgres", "
 $realm = Get-Content "$generated/lore-realm.json" -Raw | ConvertFrom-Json
 if ($Scheme -eq "https") { $realm.sslRequired = "external" }
 if ($env:LORE_SMTP_HOST) {
+    $smtpFrom = $env:LORE_SMTP_FROM
+    if ($smtpFrom -match "<([^>]+)>") { $smtpFrom = $matches[1] }
     $realm.smtpServer = [ordered]@{
         host = $env:LORE_SMTP_HOST
         port = $(if ($env:LORE_SMTP_PORT) { $env:LORE_SMTP_PORT } else { "587" })
-        from = $env:LORE_SMTP_FROM
+        from = $smtpFrom
         fromDisplayName = $(if ($env:LORE_SMTP_FROM_NAME) { $env:LORE_SMTP_FROM_NAME } else { "Lore" })
         starttls = $(if ($env:LORE_SMTP_STARTTLS) { $env:LORE_SMTP_STARTTLS } else { "true" })
         ssl = $(if ($env:LORE_SMTP_SSL) { $env:LORE_SMTP_SSL } else { "false" })
@@ -85,6 +88,24 @@ if ($env:LORE_SMTP_HOST) {
         password = $env:LORE_SMTP_PASSWORD
     }
     $realm.resetPasswordAllowed = $true
+}
+if ($env:LORE_LDAP_URL) {
+    $startTls = $(if ($env:LORE_LDAP_STARTTLS) { $env:LORE_LDAP_STARTTLS } else { "false" })
+    $truststore = $(if ($env:LORE_LDAP_INSECURE_SKIP_VERIFY -eq "true") { "never" } else { "always" })
+    $providerJson = Get-Content keycloak/ldap-provider.json -Raw
+    $ldapValues = [ordered]@{
+        "__LORE_LDAP_URL__" = $env:LORE_LDAP_URL
+        "__LORE_LDAP_BASE_DN__" = $env:LORE_LDAP_BASE_DN
+        "__LORE_LDAP_BIND_DN__" = $env:LORE_LDAP_BIND_DN
+        "__LORE_LDAP_BIND_PASSWORD__" = $env:LORE_LDAP_BIND_PASSWORD
+        "__LORE_LDAP_STARTTLS__" = $startTls
+        "__LORE_LDAP_USE_TRUSTSTORE__" = $truststore
+    }
+    foreach ($entry in $ldapValues.GetEnumerator()) {
+        $providerJson = $providerJson.Replace('"' + $entry.Key + '"', ($entry.Value | ConvertTo-Json -Compress))
+    }
+    $provider = $providerJson | ConvertFrom-Json
+    $realm.components = @{ "org.keycloak.storage.UserStorageProvider" = @($provider) }
 }
 $realm | ConvertTo-Json -Depth 100 | Write-Utf8NoBom "$generated/lore-realm.json"
 Remove-Item "$generated/caddy/auth.conf" -ErrorAction SilentlyContinue
@@ -121,5 +142,7 @@ if ($localCa) {
 }
 & docker @composeFiles @arguments
 if ($LASTEXITCODE -ne 0) { throw "Docker Compose failed" }
+& docker @composeFiles exec -T keycloak bash -c 'set -e; KC=/opt/keycloak/bin/kcadm.sh; "$KC" config credentials --server http://127.0.0.1:8080/auth --realm master --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD"; "$KC" add-roles -r lore --uusername service-account-lore-control-plane --cclientid realm-management --rolename manage-realm'
+if ($LASTEXITCODE -ne 0) { throw "Keycloak service account configuration failed" }
 
 Write-Host "`nLore is ready.`nWebUI: $PublicUrl`nKeycloak: $AuthUrl`nAdministrator: admin`nInitial administrator password: $($settings.LORE_ADMIN_PASSWORD)`nData: $PSScriptRoot/data"

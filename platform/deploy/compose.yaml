@@ -62,12 +62,20 @@ services:
       SESSION_TTL: 8h
       LORE_GRPC_ADDR: :9090
       LORE_REPOSITORY_ADDR: lore:41337
-      LORE_SERVICE_TOKEN_URL: http://keycloak:8080/realms/lore/protocol/openid-connect/token
+      LORE_SERVICE_TOKEN_URL: http://keycloak:8080/auth/realms/lore/protocol/openid-connect/token
       LORE_SERVICE_CLIENT_ID: lore-control-plane
       LORE_SERVICE_CLIENT_SECRET: ${LORE_SERVICE_CLIENT_SECRET:-lore-service-dev-only}
       LORE_GRPC_SECURE: "false"
       LORE_TOKEN_EXCHANGE_ISSUER: ${LORE_EXCHANGE_PUBLIC_URL:-http://host.docker.internal:8080}/web/v1/lore-oidc
       LORE_TOKEN_SIGNING_KEY_FILE: ${LORE_TOKEN_SIGNING_KEY_FILE:-/data/token-exchange-signing.pem}
+      LORE_LDAP_URL: ${LORE_LDAP_URL:-}
+      LORE_LDAP_BIND_DN: ${LORE_LDAP_BIND_DN:-}
+      LORE_LDAP_BIND_PASSWORD: ${LORE_LDAP_BIND_PASSWORD:-}
+      LORE_LDAP_BASE_DN: ${LORE_LDAP_BASE_DN:-}
+      LORE_LDAP_USERNAME_ATTRIBUTE: ${LORE_LDAP_USERNAME_ATTRIBUTE:-}
+      LORE_LDAP_STARTTLS: ${LORE_LDAP_STARTTLS:-}
+      LORE_LDAP_INSECURE_SKIP_VERIFY: ${LORE_LDAP_INSECURE_SKIP_VERIFY:-}
+      LORE_LDAP_TIMEOUT: ${LORE_LDAP_TIMEOUT:-}
     expose:
       - "8080"
       - "9090"

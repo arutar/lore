@@ -66,3 +66,34 @@ export interface Page<T> {
   items: T[];
   nextCursor?: string;
 }
+
+export interface TreeNode {
+  path: string;
+  type: "directory" | "file" | "link";
+  size: number;
+  mode: number;
+  executable: boolean;
+}
+
+export interface RepositoryTree {
+  revision: string;
+  branchId: string;
+  items: TreeNode[];
+}
+
+export interface Revision {
+  number: number;
+  signature: string;
+  message: string;
+  author: string;
+  committer: string;
+  committedAt: string;
+}
+
+export interface RepositoryLock {
+  branchId: string;
+  path: string;
+  hash: string;
+  owner: string;
+  lockedAt: string;
+}

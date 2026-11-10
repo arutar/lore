@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/arutar/lore/platform/control-plane/internal/loreclient"
 	"github.com/arutar/lore/platform/control-plane/internal/model"
 	"github.com/arutar/lore/platform/control-plane/internal/store"
 )
@@ -17,14 +18,23 @@ type RepositoryCreator interface {
 	CreateRepository(ctx context.Context, repository model.Repository) error
 }
 
+type RepositoryContent interface {
+	Tree(ctx context.Context, repositoryID, revision, path string) (loreclient.RepositoryTree, error)
+	History(ctx context.Context, repositoryID, cursor string) (loreclient.HistoryPage, error)
+	Locks(ctx context.Context, repositoryID string) ([]loreclient.RepositoryLock, error)
+	Download(ctx context.Context, repositoryID, revision, path string) (*loreclient.Download, error)
+}
+
 type Config struct {
-	Repositories  RepositoryCreator
-	TokenExchange *TokenExchange
-	StaticDir     string
-	DevAuth       bool
-	DevUser       model.User
-	OIDC          AuthConfig
-	ExternalURL   string
+	Repositories      RepositoryCreator
+	Content           RepositoryContent
+	TokenExchange     *TokenExchange
+	RegistrationRealm RegistrationRealm
+	StaticDir         string
+	DevAuth           bool
+	DevUser           model.User
+	OIDC              AuthConfig
+	ExternalURL       string
 }
 
 type Server struct {
@@ -39,7 +49,16 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 	router.Use(middleware.RequestID)
 	router.Use(middleware.RealIP)
 	router.Use(middleware.Recoverer)
-	router.Use(middleware.Timeout(30 * time.Second))
+	router.Use(func(next http.Handler) http.Handler {
+		withTimeout := middleware.Timeout(30 * time.Second)(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/download") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			withTimeout.ServeHTTP(w, r)
+		})
+	})
 	router.Use(auth.middleware)
 	router.Get("/healthz", server.health)
 	router.Route("/web/v1", func(router chi.Router) {
@@ -58,6 +77,10 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 		}
 		router.Get("/catalog", server.catalog)
 		router.Get("/repositories/{id}", server.repository)
+		router.Get("/repositories/{id}/tree", server.repositoryTree)
+		router.Get("/repositories/{id}/history", server.repositoryHistory)
+		router.Get("/repositories/{id}/locks", server.repositoryLocks)
+		router.Get("/repositories/{id}/download", server.repositoryDownload)
 		router.Route("/repositories/{id}/grants", func(router chi.Router) {
 			router.Get("/", server.grants)
 			router.With(requireCSRF).Put("/", server.setGrant)
