@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$Version = "v0.13.0",
-    [string]$OutputDirectory = ""
+    [string]$OutputDirectory = "",
+    [string]$Generator = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,6 +11,15 @@ $root = (Resolve-Path "$PSScriptRoot/../..").Path
 $dotnet = if (Get-Command dotnet -ErrorAction SilentlyContinue) { "dotnet" } else { "$root/.tooling/dotnet/dotnet.exe" }
 $cmake = if (Get-Command cmake -ErrorAction SilentlyContinue) { "cmake" } else { "C:/CMake/bin/cmake.exe" }
 $cliChecksum = "26b84459fd6ab2faa10d5f8eb8393848286935414210d7070dafffd97e4c1343"
+if (-not $Generator) {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $visualStudioVersion = if (Test-Path $vswhere) { & $vswhere -latest -property installationVersion } else { $null }
+    $Generator = switch -Regex ($visualStudioVersion) {
+        '^18\.' { "Visual Studio 18 2026"; break }
+        '^17\.' { "Visual Studio 17 2022"; break }
+        default { throw "Visual Studio 2022 or 2026 is required" }
+    }
+}
 
 Remove-Item $OutputDirectory -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
@@ -25,7 +35,7 @@ finally {
 }
 & $dotnet publish "$PSScriptRoot/LoreCompanion/LoreCompanion.csproj" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o "$OutputDirectory"
 if ($LASTEXITCODE -ne 0) { throw "Companion publish failed" }
-& $cmake -S "$PSScriptRoot/LoreShell" -B "$PSScriptRoot/LoreShell/build" -G "Visual Studio 17 2022" -A x64
+& $cmake -S "$PSScriptRoot/LoreShell" -B "$PSScriptRoot/LoreShell/build" -G $Generator -A x64
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 & $cmake --build "$PSScriptRoot/LoreShell/build" --config Release
 if ($LASTEXITCODE -ne 0) { throw "Shell extension build failed" }
