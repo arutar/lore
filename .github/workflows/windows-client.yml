@@ -61,7 +61,7 @@ jobs:
 
       - name: Build the client
         shell: pwsh
-        run: platform/windows/Build-Client.ps1
+        run: platform/windows/Build-Client.ps1 -PlatformVersion ${{ steps.version.outputs.version }}
 
       - name: Test the companion
         shell: pwsh

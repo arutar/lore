@@ -147,6 +147,37 @@ pub async fn exchange(
     authorization_token(response)
 }
 
+/// Requests a short-lived authorization token for an anonymous caller.
+pub async fn exchange_anonymous(
+    oidc: &Oidc,
+    target: Target,
+) -> Result<AuthorizationToken, ProtocolError> {
+    let exchange_issuer = oidc
+        .token_exchange_issuer
+        .as_deref()
+        .unwrap_or(&oidc.issuer);
+    let document = discovery::discover(exchange_issuer).await?;
+    let mut form = vec![
+        ("grant_type", "urn:lore:grant-type:anonymous".to_owned()),
+        ("client_id", oidc.client_id.clone()),
+        ("requested_token_type", ACCESS_TOKEN_TYPE.to_owned()),
+    ];
+    match &target {
+        Target::Resources(resources) => form.extend(
+            resources
+                .iter()
+                .map(|resource| ("resource", resource.clone())),
+        ),
+        Target::Scope(scope) => form.push(("scope", scope.clone())),
+    }
+    let response: ExchangeResponse =
+        match token::request("anonymous token exchange", &document.token_endpoint, form).await? {
+            Outcome::Token(response) => response,
+            Outcome::Refused(refusal) => return Err(refused(exchange_issuer, &target, &refusal)),
+        };
+    authorization_token(response)
+}
+
 /// Exchanges `subject_token`, an external credential of the type `subject_token_type` names,
 /// for the login token of the user it is bound to. The answer is the device grant's (RFC
 /// 6749 §5.1), and nothing but `subject_token` names the target.

@@ -550,3 +550,42 @@ async fn an_unusable_login_token_is_an_error() {
 
     assert!(refused.is_internal(), "{refused}");
 }
+
+#[tokio::test]
+async fn anonymous_exchange_carries_no_subject_credentials() {
+    let provider = provider_answering(exchange_response).await;
+
+    let authz = exchange_for_partition(with_resource_template(&provider.issuer), "")
+        .await
+        .expect("anonymous read is authorized");
+
+    assert_eq!(authz.token, exchanged_token(&provider.issuer));
+    let requests = provider.requests_to("/token");
+    assert_eq!(requests.len(), 1);
+    let fields = fields(&requests[0]);
+    assert_eq!(
+        values(&fields, "grant_type"),
+        vec!["urn:lore:grant-type:anonymous"]
+    );
+    assert_eq!(values(&fields, "client_id"), vec![CLIENT_ID]);
+    assert_eq!(
+        values(&fields, "requested_token_type"),
+        vec![ACCESS_TOKEN_TYPE]
+    );
+    assert_eq!(
+        values(&fields, "resource"),
+        vec![RESOURCE_TEMPLATE.replace("{id}", PARTITION)]
+    );
+    assert!(values(&fields, "subject_token").is_empty());
+    assert!(values(&fields, "subject_token_type").is_empty());
+}
+
+#[tokio::test]
+async fn anonymous_access_denied_is_not_authorized() {
+    let provider = provider_answering(|_| refusal("access_denied")).await;
+
+    let refused = exchange_for_partition(with_resource_template(&provider.issuer), "")
+        .await
+        .expect_err("anonymous access is denied");
+    assert!(refused.is_not_authorized(), "{refused}");
+}

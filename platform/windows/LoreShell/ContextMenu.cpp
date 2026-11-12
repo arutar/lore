@@ -2,6 +2,7 @@
 #include "Resource.h"
 #include <shlwapi.h>
 #include <shellapi.h>
+#include <gdiplus.h>
 #include <sstream>
 
 namespace
@@ -14,6 +15,7 @@ constexpr UINT CommandStatus = 4;
 constexpr UINT CommandHistory = 5;
 constexpr UINT CommandLock = 6;
 constexpr UINT CommandUnlock = 7;
+constexpr UINT CommandAccounts = 8;
 
 std::wstring RepositoryRoot(std::wstring path)
 {
@@ -55,45 +57,38 @@ struct Invocation
 
 HBITMAP LoreMenuBitmap(int operation = -1)
 {
-    constexpr int operationCount = 8;
+    constexpr int operationCount = 9;
     if (operation < -1 || operation >= operationCount) return nullptr;
     static HBITMAP bitmaps[operationCount + 1]{};
     constexpr int resources[operationCount + 1]{
         IDI_LORE, IDI_LORE_CLONE, IDI_LORE_SYNC, IDI_LORE_COMMIT,
-        IDI_LORE_STAGE, IDI_LORE_STATUS, IDI_LORE_HISTORY, IDI_LORE_LOCK, IDI_LORE_UNLOCK,
+        IDI_LORE_STAGE, IDI_LORE_STATUS, IDI_LORE_HISTORY, IDI_LORE_LOCK, IDI_LORE_UNLOCK, IDI_LORE_STATUS,
     };
     auto& bitmap = bitmaps[operation + 1];
     if (bitmap) return bitmap;
     const auto resource = resources[operation + 1];
     bitmap = [resource]
     {
-        BITMAPINFO info{};
-        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        info.bmiHeader.biWidth = 16;
-        info.bmiHeader.biHeight = -16;
-        info.bmiHeader.biPlanes = 1;
-        info.bmiHeader.biBitCount = 32;
-        info.bmiHeader.biCompression = BI_RGB;
-        void* pixels = nullptr;
-        HBITMAP created = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
-        if (!created) return static_cast<HBITMAP>(nullptr);
-        HDC dc = CreateCompatibleDC(nullptr);
-        auto old = SelectObject(dc, created);
-        HBRUSH background = CreateSolidBrush(GetSysColor(COLOR_MENU));
-        RECT rectangle{0, 0, 16, 16};
-        FillRect(dc, &rectangle, background);
-        DeleteObject(background);
-        HICON icon = static_cast<HICON>(LoadImageW(g_instance, MAKEINTRESOURCE(resource), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
-        if (icon)
+        static ULONG_PTR gdiplus = []
         {
-            DrawIconEx(dc, 0, 0, icon, 16, 16, 0, nullptr, DI_NORMAL);
-            DestroyIcon(icon);
-        }
-        auto* rgba = static_cast<uint32_t*>(pixels);
-        for (int index = 0; index < 256; ++index) rgba[index] |= 0xff000000;
-        SelectObject(dc, old);
-        DeleteDC(dc);
-        return created;
+            Gdiplus::GdiplusStartupInput input;
+            ULONG_PTR token = 0;
+            return Gdiplus::GdiplusStartup(&token, &input, nullptr) == Gdiplus::Ok ? token : 0;
+        }();
+        if (!gdiplus) return static_cast<HBITMAP>(nullptr);
+        HICON icon = static_cast<HICON>(LoadImageW(g_instance, MAKEINTRESOURCE(resource), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
+        if (!icon) return static_cast<HBITMAP>(nullptr);
+        Gdiplus::Bitmap source(icon);
+        Gdiplus::Bitmap canvas(16, 16, PixelFormat32bppARGB);
+        Gdiplus::Graphics graphics(&canvas);
+        graphics.Clear(Gdiplus::Color(0, 0, 0, 0));
+        graphics.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+        graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        graphics.DrawImage(&source, Gdiplus::Rect(0, 0, 16, 16));
+        HBITMAP created = nullptr;
+        const auto status = canvas.GetHBITMAP(Gdiplus::Color(0, 0, 0, 0), &created);
+        DestroyIcon(icon);
+        return status == Gdiplus::Ok ? created : nullptr;
     }();
     return bitmap;
 }
@@ -218,11 +213,13 @@ STDMETHODIMP ContextMenu::QueryContextMenu(HMENU menu, UINT index, UINT first, U
 {
     if (flags & CMF_DEFAULTONLY) return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, 0);
     UINT next = index;
+    InsertMenuW(menu, next++, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
     if (!insideRepository_)
     {
         InsertMenuW(menu, next++, MF_BYPOSITION | MF_STRING, first + CommandClone, L"Lore Clone...");
         SetLoreMenuIcon(menu, first + CommandClone, CommandClone);
-        return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, 1);
+        InsertMenuW(menu, next, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+        return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, 3);
     }
 
     InsertMenuW(menu, next++, MF_BYPOSITION | MF_STRING, first + CommandSync, L"Lore Sync");
@@ -241,19 +238,23 @@ STDMETHODIMP ContextMenu::QueryContextMenu(HMENU menu, UINT index, UINT first, U
     SetLoreMenuIcon(submenu, first + CommandLock, CommandLock);
     AppendMenuW(submenu, MF_STRING, first + CommandUnlock, L"Release locks");
     SetLoreMenuIcon(submenu, first + CommandUnlock, CommandUnlock);
-    InsertMenuW(menu, next, MF_BYPOSITION | MF_STRING | MF_POPUP, reinterpret_cast<UINT_PTR>(submenu), L"Lore");
+    AppendMenuW(submenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(submenu, MF_STRING, first + CommandAccounts, L"Accounts");
+    SetLoreMenuIcon(submenu, first + CommandAccounts, CommandAccounts);
+    InsertMenuW(menu, next++, MF_BYPOSITION | MF_STRING | MF_POPUP, reinterpret_cast<UINT_PTR>(submenu), L"Lore");
     MENUITEMINFOW submenuInfo{sizeof(submenuInfo)};
     submenuInfo.fMask = MIIM_BITMAP;
     submenuInfo.hbmpItem = LoreMenuBitmap();
-    SetMenuItemInfoW(menu, next, TRUE, &submenuInfo);
-    return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, 8);
+    SetMenuItemInfoW(menu, index + 3, TRUE, &submenuInfo);
+    InsertMenuW(menu, next, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+    return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, CommandAccounts + 1);
 }
 
 STDMETHODIMP ContextMenu::InvokeCommand(CMINVOKECOMMANDINFO* info)
 {
     if (!info || HIWORD(info->lpVerb)) return E_INVALIDARG;
     const auto command = LOWORD(info->lpVerb);
-    if (command > CommandUnlock) return E_INVALIDARG;
+    if (command > CommandAccounts) return E_INVALIDARG;
     if (command == CommandClone && insideRepository_) return E_INVALIDARG;
     if (command != CommandClone && !insideRepository_) return E_INVALIDARG;
 

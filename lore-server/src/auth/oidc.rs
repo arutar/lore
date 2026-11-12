@@ -4,7 +4,7 @@ use lore_transport::Oidc;
 use tracing::info;
 
 use crate::auth::jwk::JWKServiceError;
-use crate::auth::jwk::fetch_discovery_document;
+use crate::auth::jwk::fetch_discovery_document_from;
 use crate::settings::AuthSettings;
 
 /// Resolves the OIDC provider info advertised for the clients.
@@ -19,7 +19,8 @@ pub async fn advertised_oidc(
         .jwt_issuer
         .first()
         .ok_or(JWKServiceError::EndpointUnresolvable)?;
-    let document = fetch_discovery_document(issuer).await?;
+    let discovery_issuer = oidc.discovery_issuer.as_deref().unwrap_or(issuer);
+    let document = fetch_discovery_document_from(discovery_issuer, issuer).await?;
     info!(issuer = %document.issuer, "Advertising the OIDC provider to clients");
     // An empty string counts as unset, as it does in the settings validation.
     let non_empty = |value: &Option<String>| value.clone().filter(|value| !value.is_empty());

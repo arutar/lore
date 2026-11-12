@@ -1,5 +1,13 @@
 {$LORE_PUBLIC_ADDRESS:http://host.docker.internal:8080}
 
+handle /auth/admin* {
+    respond "Not found" 404
+}
+
+handle /auth/realms/master* {
+    respond "Not found" 404
+}
+
 handle /auth* {
     reverse_proxy keycloak:8080
 }

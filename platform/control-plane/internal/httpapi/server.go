@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/arutar/lore/platform/control-plane/internal/directory"
 	"github.com/arutar/lore/platform/control-plane/internal/loreclient"
 	"github.com/arutar/lore/platform/control-plane/internal/model"
 	"github.com/arutar/lore/platform/control-plane/internal/store"
@@ -25,16 +26,27 @@ type RepositoryContent interface {
 	Download(ctx context.Context, repositoryID, revision, path string) (*loreclient.Download, error)
 }
 
+type GroupCatalog interface {
+	ListGroups(ctx context.Context) ([]directory.Group, error)
+	GroupIDs(ctx context.Context, username string) ([]string, error)
+	FindUser(ctx context.Context, username string) (directory.User, error)
+	SearchUsers(ctx context.Context, query string) ([]directory.User, error)
+}
+
 type Config struct {
-	Repositories      RepositoryCreator
-	Content           RepositoryContent
-	TokenExchange     *TokenExchange
-	RegistrationRealm RegistrationRealm
-	StaticDir         string
-	DevAuth           bool
-	DevUser           model.User
-	OIDC              AuthConfig
-	ExternalURL       string
+	Repositories        RepositoryCreator
+	Directory           GroupCatalog
+	Content             RepositoryContent
+	TokenExchange       *TokenExchange
+	RegistrationRealm   RegistrationRealm
+	Accounts            AccountManager
+	BearerAuth          BearerAuthenticator
+	StaticDir           string
+	DevAuth             bool
+	DevUser             model.User
+	OIDC                AuthConfig
+	ExternalURL         string
+	NativeRepositoryURL string
 }
 
 type Server struct {
@@ -67,6 +79,7 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 		router.Get("/login", auth.login)
 		router.Get("/oidc/callback", auth.callback)
 		router.With(requireCSRF).Post("/logout", auth.logout)
+		router.Post("/native-logout", server.nativeLogout)
 		if config.DevAuth {
 			router.Post("/dev-login", server.devLogin)
 		}
@@ -86,11 +99,15 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 			router.With(requireCSRF).Put("/", server.setGrant)
 			router.With(requireCSRF).Delete("/", server.removeGrant)
 			router.Get("/export", server.exportGrants)
+			router.Get("/subjects", server.grantSubjects)
 			router.With(requireCSRF).Post("/import", server.importGrants)
 		})
 		router.Route("/admin", func(router chi.Router) {
 			router.Use(server.requireAdmin)
 			router.Get("/users", server.users)
+			router.Get("/users/search", server.searchADUsers)
+			router.With(requireCSRF).Post("/users", server.createLocalUser)
+			router.With(requireCSRF).Post("/users/provision", server.provisionADUser)
 			router.Get("/users/export", server.exportUsers)
 			router.With(requireCSRF).Post("/users/import", server.importUsers)
 			router.With(requireCSRF).Patch("/users/{id}", server.updateUser)

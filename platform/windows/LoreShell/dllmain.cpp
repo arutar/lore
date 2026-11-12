@@ -36,6 +36,7 @@ STDAPI DllGetClassObject(REFCLSID clsid, REFIID iid, void** object)
     if (clsid == CLSID_OverlayLocked) return GetClass(clsid, iid, object, 4);
     if (clsid == CLSID_OverlayIgnored) return GetClass(clsid, iid, object, 5);
     if (clsid == CLSID_OverlayStagedModified) return GetClass(clsid, iid, object, 6);
+    if (clsid == CLSID_OverlayClean) return GetClass(clsid, iid, object, 7);
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 

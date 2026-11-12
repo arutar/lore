@@ -2,14 +2,19 @@ package httpapi
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"net/mail"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"google.golang.org/grpc/codes"
+
+	"github.com/arutar/lore/platform/control-plane/internal/directory"
 	"google.golang.org/grpc/status"
 
 	"github.com/arutar/lore/platform/control-plane/internal/model"
@@ -31,6 +36,13 @@ type userInput struct {
 	Disabled bool       `json:"disabled"`
 }
 
+type localUserInput struct {
+	Email       string     `json:"email"`
+	DisplayName string     `json:"displayName"`
+	Password    string     `json:"password"`
+	Role        model.Role `json:"role"`
+}
+
 type settingsInput struct {
 	RegistrationEnabled bool   `json:"registrationEnabled"`
 	Theme               string `json:"theme"`
@@ -46,7 +58,9 @@ func (s *Server) publicConfig(w http.ResponseWriter, r *http.Request) {
 		"registrationEnabled": settings.RegistrationEnabled,
 		"oidcEnabled":         s.auth.provider != nil,
 		"devAuthEnabled":      s.config.DevAuth,
+		"adEnabled":           s.config.Directory != nil,
 		"externalUrl":         s.config.ExternalURL,
+		"nativeRepositoryUrl": s.config.NativeRepositoryURL,
 		"theme":               settings.Theme,
 	})
 }
@@ -70,6 +84,39 @@ func (s *Server) devLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.auth.devLogin(w, r, s.config.DevUser)
+}
+
+func (s *Server) nativeLogout(w http.ResponseWriter, r *http.Request) {
+	if s.config.Accounts == nil {
+		writeError(w, http.StatusServiceUnavailable, "logout_unavailable", "Identity provider logout isn't configured")
+		return
+	}
+	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok || strings.TrimSpace(token) == "" {
+		writeError(w, http.StatusUnauthorized, "not_authenticated", "A bearer token is required")
+		return
+	}
+	var userID string
+	if authenticator := s.config.BearerAuth; authenticator != nil {
+		user, err := authenticator.AuthenticateBearer(r.Context(), strings.TrimSpace(token))
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "not_authenticated", "The bearer token is invalid")
+			return
+		}
+		userID = user.ID
+	} else {
+		var err error
+		userID, err = s.auth.AuthenticateBearerForLogout(r.Context(), strings.TrimSpace(token))
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "not_authenticated", "The bearer token is invalid")
+			return
+		}
+	}
+	if err := s.config.Accounts.LogoutUser(r.Context(), userID); err != nil {
+		writeError(w, http.StatusBadGateway, "logout_failed", "Couldn't clear the identity provider sessions")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) catalog(w http.ResponseWriter, r *http.Request) {
@@ -118,6 +165,15 @@ func (s *Server) setGrant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_grant", "Grant is invalid")
 		return
 	}
+	valid, err := s.validGrantSubject(r.Context(), grant)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "directory_unavailable", "Couldn't validate the user or group")
+		return
+	}
+	if !valid {
+		writeInvalidSubject(w)
+		return
+	}
 	actor, _ := currentUser(r.Context())
 	if err := s.store.SetGrant(r.Context(), actor.ID, grant); err != nil {
 		writeStoreError(w, err)
@@ -142,6 +198,155 @@ func (s *Server) removeGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) createLocalUser(w http.ResponseWriter, r *http.Request) {
+	var input localUserInput
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
+	input.DisplayName = strings.TrimSpace(input.DisplayName)
+	address, err := mail.ParseAddress(input.Email)
+	if err != nil || address.Address != input.Email {
+		writeError(w, http.StatusBadRequest, "invalid_email", "A valid email address is required")
+		return
+	}
+	if input.DisplayName == "" || len(input.DisplayName) > 256 {
+		writeError(w, http.StatusBadRequest, "invalid_name", "Display name is required")
+		return
+	}
+	if len(input.Password) < 8 || len(input.Password) > 256 {
+		writeError(w, http.StatusBadRequest, "invalid_password", "Temporary password must be between 8 and 256 characters")
+		return
+	}
+	if input.Role == "" {
+		input.Role = model.RoleUser
+	}
+	if input.Role != model.RoleAdmin && input.Role != model.RoleUser {
+		writeError(w, http.StatusBadRequest, "invalid_role", "Role must be admin or user")
+		return
+	}
+	if s.config.Accounts == nil {
+		writeError(w, http.StatusServiceUnavailable, "accounts_unavailable", "Local account management isn't configured")
+		return
+	}
+	user, err := s.config.Accounts.CreateLocalUser(r.Context(), input.Email, input.DisplayName, input.Password)
+	if errors.Is(err, ErrAccountExists) {
+		writeError(w, http.StatusConflict, "account_exists", "An account with this email already exists")
+		return
+	}
+	if err != nil {
+		log.Printf("Local account creation failed: %v", err)
+		writeError(w, http.StatusBadGateway, "account_creation_failed", "Couldn't create the identity provider account")
+		return
+	}
+	user.Role = input.Role
+	actor, _ := currentUser(r.Context())
+	if _, err := s.store.UpsertUser(r.Context(), user); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	user, err = s.store.UpdateUser(r.Context(), actor.ID, user.ID, input.Role, false)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, user)
+}
+
+func (s *Server) searchADUsers(w http.ResponseWriter, r *http.Request) {
+	if s.config.Directory == nil {
+		writeError(w, http.StatusServiceUnavailable, "ad_unavailable", "Active Directory search isn't configured")
+		return
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(query) < 2 || len(query) > 256 {
+		writeError(w, http.StatusBadRequest, "invalid_search", "Enter between 2 and 256 characters")
+		return
+	}
+	users, err := s.config.Directory.SearchUsers(r.Context(), query)
+	if err != nil {
+		log.Printf("AD user search failed: %v", err)
+		writeError(w, http.StatusBadGateway, "ad_lookup_failed", "Couldn't search Active Directory users")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": users})
+}
+
+func (s *Server) provisionADUser(w http.ResponseWriter, r *http.Request) {
+	if s.config.Accounts == nil || s.config.Directory == nil {
+		writeError(w, http.StatusServiceUnavailable, "ad_unavailable", "Active Directory provisioning isn't configured")
+		return
+	}
+	var input struct {
+		Username string `json:"username"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.Username = strings.TrimSpace(input.Username)
+	if input.Username == "" || len(input.Username) > 256 {
+		writeError(w, http.StatusBadRequest, "invalid_username", "An Active Directory username is required")
+		return
+	}
+	profile, err := s.config.Directory.FindUser(r.Context(), input.Username)
+	if errors.Is(err, directory.ErrUserNotFound) {
+		writeError(w, http.StatusNotFound, "account_not_found", "The Active Directory account wasn't found in LDAP")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "ad_lookup_failed", "Couldn't look up the Active Directory account")
+		return
+	}
+	lookupName := profile.Email
+	if lookupName == "" {
+		lookupName = profile.Username
+	}
+	user, err := s.config.Accounts.GetFederatedUser(r.Context(), lookupName)
+	if errors.Is(err, ErrAccountNotFound) && lookupName != profile.Username {
+		user, err = s.config.Accounts.GetFederatedUser(r.Context(), profile.Username)
+	}
+	if errors.Is(err, ErrAccountNotFound) {
+		if syncErr := s.config.Accounts.SyncFederatedUsers(r.Context()); syncErr != nil {
+			log.Printf("AD account synchronization failed: %v", syncErr)
+			writeError(w, http.StatusBadGateway, "ad_sync_failed", "Couldn't synchronize Active Directory accounts")
+			return
+		}
+		user, err = s.config.Accounts.GetFederatedUser(r.Context(), lookupName)
+		if errors.Is(err, ErrAccountNotFound) && lookupName != profile.Username {
+			user, err = s.config.Accounts.GetFederatedUser(r.Context(), profile.Username)
+		}
+	}
+	if errors.Is(err, ErrAccountNotFound) {
+		writeError(w, http.StatusNotFound, "account_not_found", "The Active Directory account wasn't found in the identity provider after synchronization")
+		return
+	}
+	if errors.Is(err, ErrNotFederated) {
+		writeError(w, http.StatusBadRequest, "not_ad_account", "The account is local, not an Active Directory account")
+		return
+	}
+	if err != nil {
+		log.Printf("AD account lookup failed: %v", err)
+		writeError(w, http.StatusBadGateway, "ad_lookup_failed", "Couldn't look up the Active Directory account")
+		return
+	}
+	groups, err := s.config.Directory.GroupIDs(r.Context(), profile.Username)
+	if errors.Is(err, directory.ErrUserNotFound) {
+		writeError(w, http.StatusNotFound, "account_not_found", "The Active Directory account wasn't found in LDAP")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "ad_lookup_failed", "Couldn't read the user's Active Directory groups")
+		return
+	}
+	user.Groups = groups
+	user, err = s.store.UpsertUser(r.Context(), user)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, user)
 }
 
 func (s *Server) users(w http.ResponseWriter, r *http.Request) {
@@ -173,8 +378,23 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "self_lockout", "You can't disable or demote your own administrator account")
 		return
 	}
+	existing, err := s.store.GetUser(r.Context(), id)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	enabledChanged := existing.Disabled != input.Disabled
+	if enabledChanged && s.config.Accounts != nil {
+		if err := s.config.Accounts.SetLocalUserEnabled(r.Context(), id, !input.Disabled); err != nil {
+			writeError(w, http.StatusBadGateway, "account_update_failed", "Couldn't update the identity provider account")
+			return
+		}
+	}
 	user, err := s.store.UpdateUser(r.Context(), actor.ID, id, input.Role, input.Disabled)
 	if err != nil {
+		if enabledChanged && s.config.Accounts != nil {
+			_ = s.config.Accounts.SetLocalUserEnabled(r.Context(), id, !existing.Disabled)
+		}
 		writeStoreError(w, err)
 		return
 	}
@@ -191,6 +411,19 @@ func (s *Server) repositories(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeStoreError(w, err)
 		return
+	}
+	owners := make(map[string]string)
+	for index := range page.Items {
+		ownerID := page.Items[index].OwnerID
+		if name, ok := owners[ownerID]; ok {
+			page.Items[index].OwnerName = name
+			continue
+		}
+		owner, err := s.store.GetUser(r.Context(), ownerID)
+		if err == nil {
+			owners[ownerID] = accountName(owner)
+			page.Items[index].OwnerName = owners[ownerID]
+		}
 	}
 	writeJSON(w, http.StatusOK, page)
 }
@@ -245,6 +478,7 @@ func (s *Server) createRepository(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	repository.Public = input.Public
 	writeJSON(w, http.StatusCreated, repository)
 }
 
@@ -281,6 +515,7 @@ func (s *Server) updateRepository(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	repository.Public = input.Public
 	writeJSON(w, http.StatusOK, repository)
 }
 
@@ -350,6 +585,51 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeStoreError(w, err)
 		return
+	}
+	repositoryNames := make(map[string]string)
+	for _, event := range page.Items {
+		if event.TargetType != "repository" {
+			continue
+		}
+		name := event.After
+		if event.Action == "repository.delete" {
+			name = event.Before
+		}
+		if (event.Action == "repository.create" || event.Action == "repository.update" || event.Action == "repository.delete") && name != "" {
+			repositoryNames[event.TargetID] = name
+		}
+	}
+	usernames := make(map[string]string)
+	username := func(id string) string {
+		if id == "" {
+			return "System"
+		}
+		if name, ok := usernames[id]; ok {
+			return name
+		}
+		user, err := s.store.GetUser(r.Context(), id)
+		if err != nil {
+			return ""
+		}
+		usernames[id] = accountName(user)
+		return usernames[id]
+	}
+	for index := range page.Items {
+		event := &page.Items[index]
+		event.ActorName = username(event.ActorID)
+		switch event.TargetType {
+		case "user":
+			event.TargetName = username(event.TargetID)
+		case "repository":
+			repository, err := s.store.GetRepository(r.Context(), event.TargetID)
+			if err == nil {
+				event.TargetName = repository.Name
+			} else {
+				event.TargetName = repositoryNames[event.TargetID]
+			}
+		case "settings":
+			event.TargetName = "Global settings"
+		}
 	}
 	writeJSON(w, http.StatusOK, page)
 }

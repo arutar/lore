@@ -1,5 +1,7 @@
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Interop;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 
@@ -12,6 +14,7 @@ internal sealed class WebViewOperationWindow : Window
     private readonly WebView2 webView = new();
     private readonly int baseHeight;
     private bool running;
+    private WebViewOperationWindow? accountsWindow;
 
     public WebViewOperationWindow(OperationRequest request)
     {
@@ -23,6 +26,7 @@ internal sealed class WebViewOperationWindow : Window
             CompanionOperation.Commit => 500,
             CompanionOperation.Status => 450,
             CompanionOperation.History => 420,
+            CompanionOperation.Accounts => 500,
             _ => 430,
         };
         Title = $"Lore {request.Operation}";
@@ -32,17 +36,27 @@ internal sealed class WebViewOperationWindow : Window
         MinHeight = 340;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         Icon = new System.Windows.Media.Imaging.BitmapImage(new Uri("pack://application:,,,/lore.ico"));
+        SourceInitialized += (_, _) => ApplyWindowTheme();
         Content = webView;
         if (request.Operation == CompanionOperation.Clone && string.IsNullOrWhiteSpace(request.TargetPath) && request.Paths.Length > 0)
         {
             var directory = Directory.Exists(request.Paths[0]) ? request.Paths[0] : Path.GetDirectoryName(request.Paths[0]);
-            if (!string.IsNullOrEmpty(directory)) request.TargetPath = Path.Combine(directory, "repository");
+            if (!string.IsNullOrEmpty(directory)) request.TargetPath = directory;
         }
         Loaded += async (_, _) => await Initialize();
         webView.CoreWebView2InitializationCompleted += (_, args) =>
         {
             if (!args.IsSuccess) ShowInitializationError(args.InitializationException);
         };
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
+
+    private void ApplyWindowTheme()
+    {
+        var dark = settings.Theme == "midnight" ? 1 : 0;
+        DwmSetWindowAttribute(new WindowInteropHelper(this).Handle, 20, ref dark, sizeof(int));
     }
 
     public static bool IsRuntimeAvailable()
@@ -101,13 +115,14 @@ internal sealed class WebViewOperationWindow : Window
                     {
                         type = "init",
                         operation = (int)request.Operation,
-                        repositoryUrl = request.RepositoryUrl,
-                        repositoryPath = request.Operation == CompanionOperation.Clone ? "" : request.RepositoryRoot(),
+                        repositoryUrl = request.Operation == CompanionOperation.Accounts ? request.ServerUrl() : request.RepositoryUrl,
+                        repositoryPath = request.Operation is CompanionOperation.Clone or CompanionOperation.Accounts ? "" : request.RepositoryRoot(),
                         targetPath = request.TargetPath,
                         message = request.Message,
                         paths = request.Paths,
                         theme = settings.Theme,
                     });
+                    if (request.Operation == CompanionOperation.Accounts) await SendAccounts();
                     break;
                 case "browse":
                     if (request.Operation != CompanionOperation.Clone) break;
@@ -117,6 +132,48 @@ internal sealed class WebViewOperationWindow : Window
                         request.TargetPath = dialog.FolderName;
                         Send(new { type = "directory", path = dialog.FolderName });
                     }
+                    break;
+                case "accounts-open":
+                    if (running) break;
+                    if (accountsWindow is not null)
+                    {
+                        accountsWindow.Activate();
+                        break;
+                    }
+                    accountsWindow = new WebViewOperationWindow(new OperationRequest
+                    {
+                        Operation = CompanionOperation.Accounts,
+                        RepositoryUrl = request.ServerUrl(),
+                        TargetPath = request.TargetPath,
+                        Paths = request.Paths,
+                    }) { Owner = this };
+                    accountsWindow.Closed += (_, _) => accountsWindow = null;
+                    accountsWindow.Show();
+                    break;
+                case "accounts-add":
+                    if (running) break;
+                    running = true;
+                    await LoreAccounts.Add(root.GetProperty("remoteUrl").GetString() ?? "", text => Send(new { type = "progress", text }));
+                    running = false;
+                    await SendAccounts();
+                    Send(new { type = "complete", text = "Account added successfully." });
+                    break;
+                case "accounts-select":
+                    if (running) break;
+                    if (string.IsNullOrEmpty(request.ServerKey())) throw new InvalidDataException("The Lore server is unknown");
+                    running = true;
+                    settings.SelectAccount(request.ServerKey(), root.GetProperty("userId").GetString() ?? "");
+                    running = false;
+                    await SendAccounts();
+                    Send(new { type = "complete", text = "The account will be used for this server." });
+                    break;
+                case "accounts-remove":
+                    if (running) break;
+                    running = true;
+                    await LoreAccounts.Remove(root.GetProperty("authUrl").GetString() ?? "", root.GetProperty("userId").GetString() ?? "", request.ServerUrl());
+                    running = false;
+                    await SendAccounts();
+                    Send(new { type = "complete", text = "Account removed and its Keycloak SSO sessions signed out. You can add another account." });
                     break;
                 case "cancel":
                     Close();
@@ -132,8 +189,33 @@ internal sealed class WebViewOperationWindow : Window
         catch (Exception exception)
         {
             running = false;
-            Send(new { type = "error", text = OperationError.UserMessage(exception, request.Operation) });
+            Send(new { type = "error", text = OperationError.UserMessage(exception, request.Operation), accessDenied = OperationError.IsAccessDenied(exception, request.Operation) });
         }
+    }
+
+    private async Task SendAccounts()
+    {
+        var server = request.ServerKey();
+        var selected = ClientSettings.Load().SelectedAccount(server);
+        if (string.IsNullOrEmpty(selected)) selected = request.CurrentIdentity();
+        var accounts = await LoreAccounts.List();
+        if (string.IsNullOrEmpty(selected))
+        {
+            var matches = accounts.Where(account => account.Domains.Split([',', ' '], StringSplitOptions.RemoveEmptyEntries).Contains(server, StringComparer.OrdinalIgnoreCase)).Take(2).ToArray();
+            if (matches.Length == 1) selected = matches[0].UserId;
+        }
+        Send(new
+        {
+            type = "accounts",
+            items = accounts.Select(account => new
+            {
+                authUrl = account.AuthUrl,
+                userId = account.UserId,
+                username = account.Username,
+                domains = account.Domains,
+                selected = account.UserId == selected,
+            }),
+        });
     }
 
     private async Task Run(string? repositoryUrl, string? targetPath, string? message)
@@ -145,13 +227,13 @@ internal sealed class WebViewOperationWindow : Window
         {
             request.Validate();
             running = true;
-            Height = baseHeight + 90;
+            Height = baseHeight + 140;
             await LoreOperations.ExecuteAsync(request, text => Send(new { type = "progress", text }), CancellationToken.None);
             Send(new { type = "complete", text = CompletionText() });
         }
         catch (Exception exception)
         {
-            Send(new { type = "error", text = OperationError.UserMessage(exception, request.Operation) });
+            Send(new { type = "error", text = OperationError.UserMessage(exception, request.Operation), accessDenied = OperationError.IsAccessDenied(exception, request.Operation) });
         }
         finally
         {

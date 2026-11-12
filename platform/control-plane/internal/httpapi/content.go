@@ -11,6 +11,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/arutar/lore/platform/control-plane/internal/model"
 )
 
 func (s *Server) repositoryContent(w http.ResponseWriter, r *http.Request) RepositoryContent {
@@ -47,7 +49,39 @@ func (s *Server) repositoryHistory(w http.ResponseWriter, r *http.Request) {
 		writeRepositoryContentError(w, err)
 		return
 	}
+	usernames := make(map[string]string)
+	username := func(id string) string {
+		if id == "" {
+			return ""
+		}
+		if name, ok := usernames[id]; ok {
+			return name
+		}
+		user, err := s.store.GetUser(r.Context(), id)
+		if err != nil {
+			return "Former user"
+		}
+		usernames[id] = accountName(user)
+		return usernames[id]
+	}
+	for index := range result.Items {
+		result.Items[index].Author = username(result.Items[index].Author)
+		result.Items[index].Committer = username(result.Items[index].Committer)
+	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func accountName(user model.User) string {
+	if strings.HasPrefix(user.Username, "service-account-") {
+		return "Lore service (automation)"
+	}
+	if user.DisplayName != "" {
+		return user.DisplayName
+	}
+	if user.Email != "" {
+		return user.Email
+	}
+	return user.Username
 }
 
 func (s *Server) repositoryLocks(w http.ResponseWriter, r *http.Request) {

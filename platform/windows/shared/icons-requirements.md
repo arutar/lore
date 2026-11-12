@@ -29,7 +29,7 @@
 
 | Состояние | Имя файла | Изображение |
 |---|---|---|
-| Normal | не требуется | Нет overlay |
+| Normal / clean repository root | `success` | Зелёная галочка на корневой папке репозитория; обычные clean-файлы без overlay |
 | Modified | `overlay-modified` | Оранжевый карандаш или точка |
 | Staged | `overlay-staged` | Синий плюс |
 | Conflicted | `overlay-conflicted` | Красный восклицательный знак |

@@ -9,11 +9,14 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
+	"github.com/arutar/lore/platform/control-plane/internal/directory"
 	"github.com/arutar/lore/platform/control-plane/internal/model"
 	"github.com/arutar/lore/platform/control-plane/internal/store"
 )
@@ -30,25 +33,28 @@ type GroupDirectory interface {
 }
 
 type AuthConfig struct {
-	Issuer         string
-	InternalIssuer string
-	ClientID       string
-	ClientSecret   string
-	RedirectURL    string
-	SecureCookies  bool
-	SessionTTL     time.Duration
-	BootstrapAdmin string
-	GroupDirectory GroupDirectory
+	Issuer                string
+	InternalIssuer        string
+	ClientID              string
+	ClientSecret          string
+	RedirectURL           string
+	PostLogoutRedirectURL string
+	SecureCookies         bool
+	SessionTTL            time.Duration
+	BootstrapAdmin        string
+	GroupDirectory        GroupDirectory
 }
 
 type Authenticator struct {
-	store           store.Store
-	config          AuthConfig
-	provider        *oidc.Provider
-	verifier        *oidc.IDTokenVerifier
-	serviceVerifier *oidc.IDTokenVerifier
-	tokenExchange   *TokenExchange
-	oauth           oauth2.Config
+	store              store.Store
+	config             AuthConfig
+	provider           *oidc.Provider
+	verifier           *oidc.IDTokenVerifier
+	serviceVerifier    *oidc.IDTokenVerifier
+	logoutVerifier     *oidc.IDTokenVerifier
+	tokenExchange      *TokenExchange
+	oauth              oauth2.Config
+	endSessionEndpoint string
 }
 
 type sessionContext struct {
@@ -75,13 +81,22 @@ func NewAuthenticator(ctx context.Context, store store.Store, config AuthConfig)
 		return nil, err
 	}
 	auth.provider = provider
+	var endpoints struct {
+		EndSession string `json:"end_session_endpoint"`
+	}
+	if err := provider.Claims(&endpoints); err != nil {
+		return nil, err
+	}
+	auth.endSessionEndpoint = endpoints.EndSession
 	auth.verifier = provider.Verifier(&oidc.Config{ClientID: config.ClientID})
 	auth.serviceVerifier = provider.Verifier(&oidc.Config{SkipClientIDCheck: true})
+	auth.logoutVerifier = provider.Verifier(&oidc.Config{SkipClientIDCheck: true, SkipExpiryCheck: true})
 	endpoint := provider.Endpoint()
 	if config.InternalIssuer != "" {
 		keys := oidc.NewRemoteKeySet(ctx, config.InternalIssuer+"/protocol/openid-connect/certs")
 		auth.verifier = oidc.NewVerifier(config.Issuer, keys, &oidc.Config{ClientID: config.ClientID})
 		auth.serviceVerifier = oidc.NewVerifier(config.Issuer, keys, &oidc.Config{SkipClientIDCheck: true})
+		auth.logoutVerifier = oidc.NewVerifier(config.Issuer, keys, &oidc.Config{SkipClientIDCheck: true, SkipExpiryCheck: true})
 		endpoint.TokenURL = config.InternalIssuer + "/protocol/openid-connect/token"
 	}
 	auth.oauth = oauth2.Config{
@@ -247,7 +262,7 @@ func (a *Authenticator) callback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "account_disabled", "Account is disabled")
 		return
 	}
-	if err := a.createSession(r.Context(), w, user.ID); err != nil {
+	if err := a.createSession(r.Context(), w, user.ID, rawIDToken); err != nil {
 		writeError(w, http.StatusInternalServerError, "session_failed", "Couldn't create a session")
 		return
 	}
@@ -269,11 +284,26 @@ func (a *Authenticator) AuthenticateBearer(ctx context.Context, token string) (m
 	return model.User{}, errors.New("bearer token is invalid")
 }
 
+func (a *Authenticator) AuthenticateBearerForLogout(ctx context.Context, token string) (string, error) {
+	if a.logoutVerifier == nil {
+		return "", errors.New("logout token verifier isn't configured")
+	}
+	idToken, err := a.logoutVerifier.Verify(ctx, token)
+	if err != nil || idToken.Subject == "" {
+		return "", errors.New("logout token is invalid")
+	}
+	return idToken.Subject, nil
+}
+
 func (a *Authenticator) groupIDs(ctx context.Context, username string, fallback []string) ([]string, error) {
-	if a.config.GroupDirectory == nil {
+	if a.config.GroupDirectory == nil || strings.Contains(username, "@") {
 		return fallback, nil
 	}
-	return a.config.GroupDirectory.GroupIDs(ctx, username)
+	groups, err := a.config.GroupDirectory.GroupIDs(ctx, username)
+	if errors.Is(err, directory.ErrUserNotFound) {
+		return fallback, nil
+	}
+	return groups, err
 }
 
 func (a *Authenticator) SetTokenExchange(exchange *TokenExchange) {
@@ -343,7 +373,7 @@ func (a *Authenticator) devLogin(w http.ResponseWriter, r *http.Request, user mo
 	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
 }
 
-func (a *Authenticator) createSession(ctx context.Context, w http.ResponseWriter, userID string) error {
+func (a *Authenticator) createSession(ctx context.Context, w http.ResponseWriter, userID string, idTokens ...string) error {
 	token, err := randomToken()
 	if err != nil {
 		return err
@@ -356,11 +386,16 @@ func (a *Authenticator) createSession(ctx context.Context, w http.ResponseWriter
 	if ttl <= 0 {
 		ttl = 8 * time.Hour
 	}
+	idToken := ""
+	if len(idTokens) > 0 {
+		idToken = idTokens[0]
+	}
 	expires := time.Now().UTC().Add(ttl)
 	if err := a.store.CreateSession(ctx, model.Session{
 		IDHash:    hashToken(token),
 		CSRFToken: csrf,
 		UserID:    userID,
+		IDToken:   idToken,
 		ExpiresAt: expires,
 	}); err != nil {
 		return err
@@ -378,6 +413,7 @@ func (a *Authenticator) createSession(ctx context.Context, w http.ResponseWriter
 }
 
 func (a *Authenticator) logout(w http.ResponseWriter, r *http.Request) {
+	_, session := currentUser(r.Context())
 	cookie, err := r.Cookie(sessionCookie)
 	if err == nil && cookie.Value != "" {
 		if err := a.store.DeleteSession(r.Context(), hashToken(cookie.Value)); err != nil {
@@ -386,7 +422,25 @@ func (a *Authenticator) logout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	clearCookie(w, sessionCookie, a.config.SecureCookies)
-	w.WriteHeader(http.StatusNoContent)
+	if a.endSessionEndpoint == "" {
+		writeJSON(w, http.StatusOK, map[string]string{})
+		return
+	}
+	logoutURL, err := url.Parse(a.endSessionEndpoint)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "logout_failed", "OIDC logout URL is invalid")
+		return
+	}
+	query := logoutURL.Query()
+	query.Set("client_id", a.config.ClientID)
+	if session != nil && session.IDToken != "" {
+		query.Set("id_token_hint", session.IDToken)
+		if a.config.PostLogoutRedirectURL != "" {
+			query.Set("post_logout_redirect_uri", strings.TrimSuffix(a.config.PostLogoutRedirectURL, "/")+"/")
+		}
+	}
+	logoutURL.RawQuery = query.Encode()
+	writeJSON(w, http.StatusOK, map[string]string{"logoutUrl": logoutURL.String()})
 }
 
 func requireCSRF(next http.Handler) http.Handler {

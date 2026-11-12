@@ -5,10 +5,12 @@ The per-machine MSI installs the Lore CLI, React + WebView2 companion, Explorer 
 ## Build
 
 ```powershell
-platform/windows/Build-Client.ps1
+platform/windows/Build-Client.ps1 -PlatformVersion 0.1.0
 platform/windows/Build-Msi.ps1 -Version 0.1.0
 platform/windows/Test-Msi.ps1
 ```
+
+Use the same release number for `PlatformVersion` and MSI `Version`: it is embedded into both Lore-owned binaries so Windows Installer can replace older builds. GitHub Actions passes the tag version automatically. Rust/Cargo is required: the build compiles `lore.exe` and `lorelib.dll` from this fork so native protocol and authentication fixes are included in both CLI and GUI.
 
 Outputs in `platform/windows/bin`:
 

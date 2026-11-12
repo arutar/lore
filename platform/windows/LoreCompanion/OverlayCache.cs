@@ -31,12 +31,12 @@ public sealed class OverlayCache : IDisposable
         }
         try
         {
-            using var view = file.CreateViewAccessor(0, 16 + Capacity * EntrySize, MemoryMappedFileAccess.Write);
+            using var view = file.CreateViewAccessor(0, 16 + Capacity * EntrySize, MemoryMappedFileAccess.ReadWrite);
             var count = Math.Clamp(view.ReadInt32(0), 0, Capacity);
             for (var index = 0; index < count; index++)
             {
                 var offset = 16 + index * EntrySize;
-                if (view.ReadUInt32(offset + 16) == rootHash)
+                if (view.ReadUInt32(offset + 20) == rootHash)
                 {
                     ClearEntry(view, offset);
                 }
@@ -59,7 +59,7 @@ public sealed class OverlayCache : IDisposable
         }
         try
         {
-            using var view = file.CreateViewAccessor(0, 16 + Capacity * EntrySize, MemoryMappedFileAccess.Write);
+            using var view = file.CreateViewAccessor(0, 16 + Capacity * EntrySize, MemoryMappedFileAccess.ReadWrite);
             var count = Math.Clamp(view.ReadInt32(0), 0, Capacity);
             var freeOffset = -1;
             for (var index = 0; index < count; index++)

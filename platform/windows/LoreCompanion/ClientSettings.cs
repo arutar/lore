@@ -5,6 +5,24 @@ namespace LoreCompanion;
 internal sealed class ClientSettings
 {
     public string Theme { get; set; } = "midnight";
+    public Dictionary<string, string> SelectedAccounts { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public string SelectedAccount(string server) => SelectedAccounts.TryGetValue(server, out var identity) ? identity : "";
+
+    public void SelectAccount(string server, string identity)
+    {
+        SelectedAccounts[server] = identity;
+        Save();
+    }
+
+    public void RemoveAccount(string identity)
+    {
+        foreach (var server in SelectedAccounts.Where(pair => pair.Value == identity).Select(pair => pair.Key).ToArray())
+        {
+            SelectedAccounts.Remove(server);
+        }
+        Save();
+    }
 
     public static ClientSettings Load()
     {

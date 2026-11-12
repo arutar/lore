@@ -3,6 +3,9 @@
   "enabled": true,
   "displayName": "Lore",
   "registrationAllowed": false,
+  "registrationEmailAsUsername": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
   "verifyEmail": true,
   "resetPasswordAllowed": false,
   "sslRequired": "none",
@@ -19,13 +22,15 @@
       "webOrigins": ["http://localhost:8080", "http://host.docker.internal:8080"],
       "defaultClientScopes": ["openid", "profile", "email", "groups"],
       "attributes": {
-        "pkce.code.challenge.method": "S256"
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8080/##http://host.docker.internal:8080/"
       }
     },
     {
       "clientId": "lore-native",
       "name": "Lore Native Client",
       "publicClient": true,
+      "consentRequired": false,
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "defaultClientScopes": ["openid", "profile", "groups"],
@@ -39,8 +44,18 @@
           "protocolMapper": "oidc-hardcoded-claim-mapper",
           "config": {
             "claim.name": "root_domains",
-            "claim.value": "[\"host.docker.internal\"]",
+            "claim.value": "[\"localhost\",\"host.docker.internal\"]",
             "jsonType.label": "JSON",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "Lore server audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "lore-server",
             "access.token.claim": "true",
             "id.token.claim": "false"
           }
@@ -112,6 +127,7 @@
       "email": "admin@example.invalid",
       "firstName": "Lore",
       "lastName": "Administrator",
+      "realmRoles": ["default-roles-lore"],
       "credentials": [
         {
           "type": "password",

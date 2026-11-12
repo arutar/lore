@@ -5,3 +5,11 @@ target/
 **/node_modules
 **/dist
 docs
+platform/deploy/data/
+platform/deploy/backups/
+platform/windows/bin/
+platform/windows/LoreCompanion/bin/
+platform/windows/LoreCompanion/obj/
+platform/windows/LoreCompanion.Tests/bin/
+platform/windows/LoreCompanion.Tests/obj/
+platform/windows/LoreShell/build/

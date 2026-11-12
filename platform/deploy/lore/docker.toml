@@ -20,10 +20,12 @@ endpoint = "http://keycloak:8080/auth/realms/lore/protocol/openid-connect/certs"
 
 [server.auth.oidc]
 client_id = "lore-native"
+discovery_issuer = "http://keycloak:8080/auth/realms/lore"
 preferred = true
 scopes = ["openid", "profile"]
 resource_template = "lore-{id}"
 token_exchange_issuer = "http://host.docker.internal:8080/web/v1/lore-oidc"
+token_exchange_jwks_endpoint = "http://control-plane:8080/web/v1/lore-oidc/jwks"
 
 [environment.endpoint]
 user_url = "http+insecure://control-plane:9090"

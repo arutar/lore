@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,6 +26,7 @@ import (
 )
 
 const tokenExchangeGrant = "urn:ietf:params:oauth:grant-type:token-exchange"
+const anonymousGrant = "urn:lore:grant-type:anonymous"
 const accessTokenType = "urn:ietf:params:oauth:token-type:access_token"
 
 type BearerAuthenticator interface {
@@ -32,15 +34,21 @@ type BearerAuthenticator interface {
 }
 
 type TokenExchange struct {
-	store    store.Store
-	auth     BearerAuthenticator
-	issuer   string
-	clientID string
-	key      jose.JSONWebKey
-	signer   jose.Signer
+	store      store.Store
+	auth       BearerAuthenticator
+	issuer     string
+	rootDomain string
+	clientID   string
+	key        jose.JSONWebKey
+	signer     jose.Signer
 }
 
 func NewTokenExchange(storage store.Store, auth BearerAuthenticator, issuer, clientID string, keyPaths ...string) (*TokenExchange, error) {
+	issuer = strings.TrimSuffix(issuer, "/")
+	issuerURL, err := url.Parse(issuer)
+	if err != nil || issuerURL.Hostname() == "" {
+		return nil, errors.New("token exchange issuer must be an absolute URL")
+	}
 	keyPath := ""
 	if len(keyPaths) > 0 {
 		keyPath = keyPaths[0]
@@ -58,7 +66,7 @@ func NewTokenExchange(storage store.Store, auth BearerAuthenticator, issuer, cli
 	if err != nil {
 		return nil, err
 	}
-	return &TokenExchange{store: storage, auth: auth, issuer: strings.TrimSuffix(issuer, "/"), clientID: clientID, key: key, signer: signer}, nil
+	return &TokenExchange{store: storage, auth: auth, issuer: issuer, rootDomain: issuerURL.Hostname(), clientID: clientID, key: key, signer: signer}, nil
 }
 
 func loadOrCreateSigningKey(path string) (*rsa.PrivateKey, error) {
@@ -122,7 +130,7 @@ func (t *TokenExchange) discovery(w http.ResponseWriter, r *http.Request) {
 		"issuer":                   t.issuer,
 		"token_endpoint":           t.issuer + "/token",
 		"jwks_uri":                 t.issuer + "/jwks",
-		"grant_types_supported":    []string{tokenExchangeGrant},
+		"grant_types_supported":    []string{tokenExchangeGrant, anonymousGrant},
 		"response_types_supported": []string{},
 	})
 }
@@ -137,28 +145,35 @@ func (t *TokenExchange) exchange(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Invalid form body")
 		return
 	}
-	if r.Form.Get("grant_type") != tokenExchangeGrant || r.Form.Get("subject_token_type") != accessTokenType || r.Form.Get("requested_token_type") != accessTokenType || r.Form.Get("client_id") != t.clientID {
+	grantType := r.Form.Get("grant_type")
+	anonymous := grantType == anonymousGrant
+	if (grantType != tokenExchangeGrant && !anonymous) || r.Form.Get("requested_token_type") != accessTokenType || r.Form.Get("client_id") != t.clientID {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Unsupported token exchange")
 		return
 	}
-	user, err := t.auth.AuthenticateBearer(r.Context(), r.Form.Get("subject_token"))
-	if err != nil || user.Disabled {
-		writeOAuthError(w, http.StatusUnauthorized, "invalid_grant", "Subject token is invalid")
+	if anonymous && (r.Form.Get("subject_token") != "" || r.Form.Get("subject_token_type") != "") {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Anonymous exchange doesn't accept a subject token")
 		return
+	}
+	var user *model.User
+	if !anonymous {
+		if r.Form.Get("subject_token_type") != accessTokenType {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Unsupported token exchange")
+			return
+		}
+		authenticated, err := t.auth.AuthenticateBearer(r.Context(), r.Form.Get("subject_token"))
+		if err != nil || authenticated.Disabled {
+			writeOAuthError(w, http.StatusUnauthorized, "invalid_grant", "Subject token is invalid")
+			return
+		}
+		user = &authenticated
 	}
 	resources := r.Form["resource"]
 	if len(resources) != 1 {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_target", "Exactly one repository resource is required")
 		return
 	}
-	rawID, ok := strings.CutPrefix(resources[0], "lore-")
-	id, validID := canonicalRepositoryID(rawID)
-	if !ok || !validID {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_target", "Repository resource is invalid")
-		return
-	}
-	compactID := strings.ReplaceAll(id, "-", "")
-	repository, err := t.store.GetRepository(r.Context(), id)
+	repository, err := t.repositoryForResource(r.Context(), resources[0], anonymous)
 	if err != nil {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_target", "Repository isn't available")
 		return
@@ -168,27 +183,32 @@ func (t *TokenExchange) exchange(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "Permission lookup failed")
 		return
 	}
-	if !policy.CanRead(&user, grants) {
+	if !policy.CanRead(user, grants) {
 		writeOAuthError(w, http.StatusForbidden, "access_denied", "Repository access isn't granted")
 		return
 	}
-	permissions := []string{}
-	if policy.CanWrite(&user, grants) {
+	permissions := []string{"read"}
+	if policy.CanWrite(user, grants) {
 		permissions = append(permissions, "write")
 	}
-	if policy.CanManage(&user, grants) {
+	if policy.CanManage(user, grants) {
 		permissions = append(permissions, "owner")
+	}
+	subject, username := "anonymous", "anonymous"
+	if user != nil {
+		subject, username = user.ID, user.Username
 	}
 	now := time.Now().UTC()
 	claims := map[string]any{
 		"iss":                t.issuer,
-		"sub":                user.ID,
+		"sub":                subject,
 		"aud":                []string{"lore-server"},
 		"iat":                now.Unix(),
 		"exp":                now.Add(5 * time.Minute).Unix(),
-		"preferred_username": user.Username,
+		"preferred_username": username,
+		"root_domains":       []string{t.rootDomain},
 		"client_id":          t.clientID,
-		"lore_access":        []map[string]any{{"resource_id": "lore-" + compactID, "permission": permissions}},
+		"lore_access":        []map[string]any{{"resource_id": "lore-" + strings.ReplaceAll(repository.ID, "-", ""), "permission": permissions}},
 	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
@@ -211,6 +231,35 @@ func (t *TokenExchange) exchange(w http.ResponseWriter, r *http.Request) {
 		"token_type":        "Bearer",
 		"expires_in":        300,
 	})
+}
+
+func (t *TokenExchange) repositoryForResource(ctx context.Context, resource string, anonymous bool) (model.Repository, error) {
+	if anonymous {
+		if name, ok := strings.CutPrefix(resource, "lore-name:"); ok {
+			cursor := ""
+			for {
+				page, err := t.store.Catalog(ctx, nil, cursor, 100)
+				if err != nil {
+					return model.Repository{}, err
+				}
+				for _, repository := range page.Items {
+					if repository.Name == name {
+						return repository, nil
+					}
+				}
+				if page.NextCursor == "" {
+					return model.Repository{}, store.ErrNotFound
+				}
+				cursor = page.NextCursor
+			}
+		}
+	}
+	rawID, ok := strings.CutPrefix(resource, "lore-")
+	id, validID := canonicalRepositoryID(rawID)
+	if !ok || !validID {
+		return model.Repository{}, errors.New("invalid repository resource")
+	}
+	return t.store.GetRepository(ctx, id)
 }
 
 func canonicalRepositoryID(value string) (string, bool) {

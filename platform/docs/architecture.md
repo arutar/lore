@@ -110,4 +110,7 @@ flowchart TD
 - WebUI использует opaque session cookie и CSRF для изменяющих запросов.
 - gRPC `:9090` предназначен для внутренней сети; публичный вход — HTTPS через reverse proxy.
 - Гость не получает write- или owner-grant; `none` не является deny-правилом.
+- Anonymous Clone использует `urn:lore:grant-type:anonymous`: control plane разрешает имя или ID только при anonymous Read и подписывает краткоживущий read-only JWT. Имена приватных репозиториев не раскрываются.
+- Native logout проверяет подпись и subject JWT; истёкший токен принимается только для завершения сессии и не даёт доступа к данным.
+- AD provisioning ищет пользователя в LDAP по `sAMAccountName`, при необходимости сопоставляет по email с federated Keycloak-аккаунтом и загружает группы до первого входа.
 - Секреты Keycloak, PostgreSQL и service account задаются deployment-окружением, а не фиксируются в исходниках.

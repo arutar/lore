@@ -13,6 +13,7 @@ type Config struct {
 	DatabaseURL           string
 	StaticDir             string
 	ExternalURL           string
+	NativeRepositoryURL   string
 	DevAuth               bool
 	DevUserID             string
 	DevUsername           string
@@ -40,6 +41,7 @@ func FromEnv() (Config, error) {
 		DatabaseURL:           env("DATABASE_URL", "memory://"),
 		StaticDir:             env("STATIC_DIR", ""),
 		ExternalURL:           env("EXTERNAL_URL", "http://localhost:8080"),
+		NativeRepositoryURL:   os.Getenv("LORE_NATIVE_PUBLIC_URL"),
 		DevUserID:             env("DEV_USER_ID", "dev-admin"),
 		DevUsername:           env("DEV_USERNAME", "admin"),
 		SessionTTL:            8 * time.Hour,

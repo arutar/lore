@@ -91,7 +91,8 @@ func (p *Postgres) Catalog(ctx context.Context, user *model.User, after string, 
 	}
 
 	query := `
-		SELECT r.id, r.name, r.description, r.owner_id, r.created_at, r.updated_at
+		SELECT r.id, r.name, r.description, r.owner_id, r.created_at, r.updated_at,
+		       EXISTS (SELECT 1 FROM grants AS public_grant WHERE public_grant.repository_id = r.id AND public_grant.subject_type = 'anonymous' AND public_grant.permission = 'read')
 		FROM repositories AS r
 		WHERE ($1 = '' OR r.id > $1)
 		  AND EXISTS (
@@ -119,7 +120,8 @@ func (p *Postgres) Catalog(ctx context.Context, user *model.User, after string, 
 
 func (p *Postgres) ListRepositories(ctx context.Context, after string, limit int) (model.Page[model.Repository], error) {
 	query := `
-		SELECT id, name, description, owner_id, created_at, updated_at
+		SELECT id, name, description, owner_id, created_at, updated_at,
+		       EXISTS (SELECT 1 FROM grants AS public_grant WHERE public_grant.repository_id = repositories.id AND public_grant.subject_type = 'anonymous' AND public_grant.permission = 'read')
 		FROM repositories
 		WHERE ($1 = '' OR id > $1)
 		ORDER BY id
@@ -144,7 +146,7 @@ func (p *Postgres) repositoryPage(ctx context.Context, query string, args ...any
 	items := make([]model.Repository, 0, limit+1)
 	for rows.Next() {
 		var repository model.Repository
-		if err := rows.Scan(&repository.ID, &repository.Name, &repository.Description, &repository.OwnerID, &repository.CreatedAt, &repository.UpdatedAt); err != nil {
+		if err := rows.Scan(&repository.ID, &repository.Name, &repository.Description, &repository.OwnerID, &repository.CreatedAt, &repository.UpdatedAt, &repository.Public); err != nil {
 			return model.Page[model.Repository]{}, fmt.Errorf("scan repository: %w", err)
 		}
 		items = append(items, repository)
@@ -164,9 +166,10 @@ func (p *Postgres) repositoryPage(ctx context.Context, query string, args ...any
 func (p *Postgres) GetRepository(ctx context.Context, id string) (model.Repository, error) {
 	var repository model.Repository
 	err := p.pool.QueryRow(ctx, `
-		SELECT id, name, description, owner_id, created_at, updated_at
+		SELECT id, name, description, owner_id, created_at, updated_at,
+		       EXISTS (SELECT 1 FROM grants AS public_grant WHERE public_grant.repository_id = repositories.id AND public_grant.subject_type = 'anonymous' AND public_grant.permission = 'read')
 		FROM repositories WHERE id = $1`, id).Scan(
-		&repository.ID, &repository.Name, &repository.Description, &repository.OwnerID, &repository.CreatedAt, &repository.UpdatedAt,
+		&repository.ID, &repository.Name, &repository.Description, &repository.OwnerID, &repository.CreatedAt, &repository.UpdatedAt, &repository.Public,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Repository{}, ErrNotFound
@@ -487,8 +490,8 @@ func (p *Postgres) ListAudit(ctx context.Context, after int64, limit int) (model
 
 func (p *Postgres) CreateSession(ctx context.Context, session model.Session) error {
 	_, err := p.pool.Exec(ctx, `
-		INSERT INTO sessions(id_hash, csrf_token, user_id, expires_at) VALUES ($1, $2, $3, $4)`,
-		session.IDHash, session.CSRFToken, session.UserID, session.ExpiresAt)
+		INSERT INTO sessions(id_hash, csrf_token, user_id, id_token, expires_at) VALUES ($1, $2, $3, $4, $5)`,
+		session.IDHash, session.CSRFToken, session.UserID, session.IDToken, session.ExpiresAt)
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
@@ -498,9 +501,9 @@ func (p *Postgres) CreateSession(ctx context.Context, session model.Session) err
 func (p *Postgres) GetSession(ctx context.Context, idHash string, now time.Time) (model.Session, error) {
 	var session model.Session
 	err := p.pool.QueryRow(ctx, `
-		SELECT id_hash, csrf_token, user_id, expires_at FROM sessions
+		SELECT id_hash, csrf_token, user_id, id_token, expires_at FROM sessions
 		WHERE id_hash = $1 AND expires_at > $2`, idHash, now).Scan(
-		&session.IDHash, &session.CSRFToken, &session.UserID, &session.ExpiresAt,
+		&session.IDHash, &session.CSRFToken, &session.UserID, &session.IDToken, &session.ExpiresAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Session{}, ErrNotFound

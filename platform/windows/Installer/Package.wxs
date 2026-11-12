@@ -31,9 +31,9 @@
     <Component Id="ShellRegistration" Directory="APPLICATIONFOLDER" Guid="7f7a9253-e3f7-47fa-82b1-cb460ab64e13">
       <RegistryValue Root="HKLM" Key="SOFTWARE\Lore\Client\Shell" Name="Registered" Type="integer" Value="1" KeyPath="yes" />
 
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{cc69a511-5c48-46bc-9a41-d1405083a193}" Value="Lore Explorer context menu" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{cc69a511-5c48-46bc-9a41-d1405083a193}\InprocServer32" Value="[APPLICATIONFOLDER]LoreShell.dll" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{cc69a511-5c48-46bc-9a41-d1405083a193}\InprocServer32" Name="ThreadingModel" Value="Apartment" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{cc69a511-5c48-46bc-9a41-d14050831a93}" Value="Lore Explorer context menu" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{cc69a511-5c48-46bc-9a41-d14050831a93}\InprocServer32" Value="[APPLICATIONFOLDER]LoreShell.dll" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{cc69a511-5c48-46bc-9a41-d14050831a93}\InprocServer32" Name="ThreadingModel" Value="Apartment" Type="string" />
 
       <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{b056f7b6-3445-46d0-b3e3-01573d936aba}" Value="Lore modified overlay" Type="string" />
       <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{b056f7b6-3445-46d0-b3e3-01573d936aba}\InprocServer32" Value="[APPLICATIONFOLDER]LoreShell.dll" Type="string" />
@@ -43,34 +43,39 @@
       <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{95ecca15-ad76-4802-8f4e-37e967bf7139}\InprocServer32" Value="[APPLICATIONFOLDER]LoreShell.dll" Type="string" />
       <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{95ecca15-ad76-4802-8f4e-37e967bf7139}\InprocServer32" Name="ThreadingModel" Value="Apartment" Type="string" />
 
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{9dcc2578-1112-455a-9af7-d28f18ce02b1}" Value="Lore conflicted overlay" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{9dcc2578-1112-455a-9af7-d28f18ce02b1}\InprocServer32" Value="[APPLICATIONFOLDER]LoreShell.dll" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{9dcc2578-1112-455a-9af7-d28f18ce02b1}\InprocServer32" Name="ThreadingModel" Value="Apartment" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{9dcc2578-1112-455a-9af7-d28f18cea2b1}" Value="Lore conflicted overlay" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{9dcc2578-1112-455a-9af7-d28f18cea2b1}\InprocServer32" Value="[APPLICATIONFOLDER]LoreShell.dll" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{9dcc2578-1112-455a-9af7-d28f18cea2b1}\InprocServer32" Name="ThreadingModel" Value="Apartment" Type="string" />
 
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{224f8e7b-61ba-4da3-97d3-60d9c47a0b}" Value="Lore locked overlay" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{224f8e7b-61ba-4da3-97d3-60d9c47a0b}\InprocServer32" Value="[APPLICATIONFOLDER]LoreShell.dll" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{224f8e7b-61ba-4da3-97d3-60d9c47a0b}\InprocServer32" Name="ThreadingModel" Value="Apartment" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{224f8e7b-61ba-4da3-97d3-6092d9c47a0b}" Value="Lore locked overlay" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{224f8e7b-61ba-4da3-97d3-6092d9c47a0b}\InprocServer32" Value="[APPLICATIONFOLDER]LoreShell.dll" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{224f8e7b-61ba-4da3-97d3-6092d9c47a0b}\InprocServer32" Name="ThreadingModel" Value="Apartment" Type="string" />
 
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{902208de-1b5a-462f-9a7d-d88b80e42e48}" Value="Lore ignored overlay" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{902208de-1b5a-462f-9a7d-d88b80e42e48}\InprocServer32" Value="[APPLICATIONFOLDER]LoreShell.dll" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{902208de-1b5a-462f-9a7d-d88b80e42e48}\InprocServer32" Name="ThreadingModel" Value="Apartment" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{902208de-1b5a-462f-9aa7-a409d88b8042}" Value="Lore ignored overlay" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{902208de-1b5a-462f-9aa7-a409d88b8042}\InprocServer32" Value="[APPLICATIONFOLDER]LoreShell.dll" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{902208de-1b5a-462f-9aa7-a409d88b8042}\InprocServer32" Name="ThreadingModel" Value="Apartment" Type="string" />
 
       <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{80444c1d-93fc-4241-9af5-7eff9280985e}" Value="Lore staged and modified overlay" Type="string" />
       <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{80444c1d-93fc-4241-9af5-7eff9280985e}\InprocServer32" Value="[APPLICATIONFOLDER]LoreShell.dll" Type="string" />
       <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{80444c1d-93fc-4241-9af5-7eff9280985e}\InprocServer32" Name="ThreadingModel" Value="Apartment" Type="string" />
 
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\*\shellex\ContextMenuHandlers\Lore" Value="{cc69a511-5c48-46bc-9a41-d1405083a193}" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Directory\shellex\ContextMenuHandlers\Lore" Value="{cc69a511-5c48-46bc-9a41-d1405083a193}" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Directory\Background\shellex\ContextMenuHandlers\Lore" Value="{cc69a511-5c48-46bc-9a41-d1405083a193}" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Folder\shellex\ContextMenuHandlers\Lore" Value="{cc69a511-5c48-46bc-9a41-d1405083a193}" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{e3d52a22-7739-4a37-a35f-47a1d00f8d6f}" Value="Lore clean repository overlay" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{e3d52a22-7739-4a37-a35f-47a1d00f8d6f}\InprocServer32" Value="[APPLICATIONFOLDER]LoreShell.dll" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\CLSID\{e3d52a22-7739-4a37-a35f-47a1d00f8d6f}\InprocServer32" Name="ThreadingModel" Value="Apartment" Type="string" />
+
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\*\shellex\ContextMenuHandlers\Lore" Value="{cc69a511-5c48-46bc-9a41-d14050831a93}" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Directory\shellex\ContextMenuHandlers\Lore" Value="{cc69a511-5c48-46bc-9a41-d14050831a93}" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Directory\Background\shellex\ContextMenuHandlers\Lore" Value="{cc69a511-5c48-46bc-9a41-d14050831a93}" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Folder\shellex\ContextMenuHandlers\Lore" Value="{cc69a511-5c48-46bc-9a41-d14050831a93}" Type="string" />
 
       <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\ Lore Modified" Value="{b056f7b6-3445-46d0-b3e3-01573d936aba}" Type="string" />
       <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\ Lore Staged" Value="{95ecca15-ad76-4802-8f4e-37e967bf7139}" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\ Lore Conflicted" Value="{9dcc2578-1112-455a-9af7-d28f18ce02b1}" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\ Lore Locked" Value="{224f8e7b-61ba-4da3-97d3-60d9c47a0b}" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\ Lore Ignored" Value="{902208de-1b5a-462f-9a7d-d88b80e42e48}" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\ Lore Conflicted" Value="{9dcc2578-1112-455a-9af7-d28f18cea2b1}" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\ Lore Locked" Value="{224f8e7b-61ba-4da3-97d3-6092d9c47a0b}" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\ Lore Ignored" Value="{902208de-1b5a-462f-9aa7-a409d88b8042}" Type="string" />
       <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\ Lore Staged Modified" Value="{80444c1d-93fc-4241-9af5-7eff9280985e}" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved" Name="{cc69a511-5c48-46bc-9a41-d1405083a193}" Value="Lore Explorer context menu" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\ Lore Clean" Value="{e3d52a22-7739-4a37-a35f-47a1d00f8d6f}" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved" Name="{cc69a511-5c48-46bc-9a41-d14050831a93}" Value="Lore Explorer context menu" Type="string" />
     </Component>
   </Package>
 </Wix>

@@ -455,6 +455,9 @@ pub struct AuthSettings {
 /// rest of `[server.auth]`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct OidcSettings {
+    /// An optional internal issuer URL used for OIDC discovery by the server.
+    /// The advertised issuer remains the public `jwt_issuer` value.
+    pub discovery_issuer: Option<String>,
     /// The public client ID clients present to the provider.
     pub client_id: String,
     /// Default scopes clients request at an interactive (device) login.
@@ -477,6 +480,10 @@ pub struct OidcSettings {
     /// The issuer of the RFC 8693 token-exchange endpoint, if using a separate
     /// token service. If not set, uses the first `jwt_issuer` entry. Tier 2.
     pub token_exchange_issuer: Option<String>,
+    /// An optional internal JWKS endpoint for the separate token-exchange issuer.
+    /// This lets containers fetch keys directly when the public issuer resolves to
+    /// the server itself, while clients continue to use `token_exchange_issuer`.
+    pub token_exchange_jwks_endpoint: Option<String>,
 }
 
 impl AuthSettings {

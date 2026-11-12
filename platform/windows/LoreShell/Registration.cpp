@@ -18,6 +18,7 @@ const Registration registrations[] = {
     {&CLSID_OverlayLocked, L"Lore locked overlay", L" Lore Locked"},
     {&CLSID_OverlayIgnored, L"Lore ignored overlay", L" Lore Ignored"},
     {&CLSID_OverlayStagedModified, L"Lore staged and modified overlay", L" Lore Staged Modified"},
+    {&CLSID_OverlayClean, L"Lore clean repository overlay", L" Lore Clean"},
 };
 
 HRESULT SetString(HKEY root, const std::wstring& path, const wchar_t* value, const std::wstring& data)

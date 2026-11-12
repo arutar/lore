@@ -25,7 +25,7 @@ func (f *fakeRepositoryContent) Tree(context.Context, string, string, string) (l
 
 func (f *fakeRepositoryContent) History(context.Context, string, string) (loreclient.HistoryPage, error) {
 	f.calls++
-	return loreclient.HistoryPage{Items: []loreclient.Revision{{Number: 1, Message: "Initial commit"}}}, nil
+	return loreclient.HistoryPage{Items: []loreclient.Revision{{Number: 1, Message: "Initial commit", Author: "author-id", Committer: "author-id"}}}, nil
 }
 
 func (f *fakeRepositoryContent) Locks(context.Context, string) ([]loreclient.RepositoryLock, error) {
@@ -40,6 +40,7 @@ func (f *fakeRepositoryContent) Download(context.Context, string, string, string
 
 func TestRepositoryContentUsesWebPermissions(t *testing.T) {
 	storage := store.NewMemory()
+	storage.UpsertUser(t.Context(), model.User{ID: "author-id", Username: "alice", Role: model.RoleUser})
 	auth, err := NewAuthenticator(context.Background(), storage, AuthConfig{SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatal(err)
@@ -63,6 +64,12 @@ func TestRepositoryContentUsesWebPermissions(t *testing.T) {
 		if status != http.StatusOK || body["items"] == nil {
 			t.Fatalf("anonymous %s status = %d, body = %v", endpoint, status, body)
 		}
+		if endpoint == "history" {
+			revision := body["items"].([]any)[0].(map[string]any)
+			if revision["author"] != "alice" || revision["committer"] != "alice" {
+				t.Fatalf("history identity = %v", revision)
+			}
+		}
 	}
 	calls := content.calls
 	status, _ = anonymous.request(http.MethodGet, "/web/v1/repositories/"+private["id"].(string)+"/tree", nil, false)
@@ -75,5 +82,17 @@ func TestRepositoryContentUsesWebPermissions(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Body.String() != "hello" || response.Header().Get("Content-Disposition") != `attachment; filename=README.md` {
 		t.Fatalf("download status = %d, headers = %v, body = %q", response.Code, response.Header(), response.Body.String())
+	}
+}
+
+func TestAccountNameUsesHumanIdentity(t *testing.T) {
+	user := model.User{ID: "238b27e5-84bb-41b5-b1bb-b48597388a37", Username: "238b27e5-84bb-41b5-b1bb-b48597388a37", DisplayName: "Lore Administrator"}
+	if name := accountName(user); name != "Lore Administrator" {
+		t.Fatalf("account name = %q", name)
+	}
+	user.DisplayName = ""
+	user.Email = "admin@example.com"
+	if name := accountName(user); name != "admin@example.com" {
+		t.Fatalf("account email = %q", name)
 	}
 }

@@ -1,7 +1,6 @@
 {
   "name": "burut-ad",
   "providerId": "ldap",
-  "providerType": "org.keycloak.storage.UserStorageProvider",
   "config": {
     "enabled": ["true"],
     "priority": ["0"],

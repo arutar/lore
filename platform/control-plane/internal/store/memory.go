@@ -47,6 +47,11 @@ func (m *Memory) Catalog(_ context.Context, user *model.User, after string, limi
 				continue
 			}
 		}
+		for _, grant := range m.grantListLocked(repository.ID) {
+			if grant.SubjectType == model.SubjectAnonymous && grant.Permission == model.PermissionRead {
+				repository.Public = true
+			}
+		}
 		items = append(items, repository)
 		if len(items) == limit {
 			break
@@ -79,7 +84,13 @@ func (m *Memory) ListRepositories(_ context.Context, after string, limit int) (m
 	items := make([]model.Repository, 0, limit)
 	for _, id := range m.sortedRepositoryIDs() {
 		if id > after {
-			items = append(items, m.repositories[id])
+			repository := m.repositories[id]
+			for _, grant := range m.grantListLocked(id) {
+				if grant.SubjectType == model.SubjectAnonymous && grant.Permission == model.PermissionRead {
+					repository.Public = true
+				}
+			}
+			items = append(items, repository)
 			if len(items) == limit {
 				break
 			}
@@ -98,6 +109,11 @@ func (m *Memory) GetRepository(_ context.Context, id string) (model.Repository, 
 	repository, ok := m.repositories[id]
 	if !ok {
 		return model.Repository{}, ErrNotFound
+	}
+	for _, grant := range m.grantListLocked(id) {
+		if grant.SubjectType == model.SubjectAnonymous && grant.Permission == model.PermissionRead {
+			repository.Public = true
+		}
 	}
 	return repository, nil
 }

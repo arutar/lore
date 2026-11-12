@@ -53,17 +53,23 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	auth, err := httpapi.NewAuthenticator(ctx, storage, httpapi.AuthConfig{
-		Issuer:         settings.OIDCIssuer,
-		InternalIssuer: settings.OIDCInternalIssuer,
-		ClientID:       settings.OIDCClientID,
-		ClientSecret:   settings.OIDCClientSecret,
-		RedirectURL:    settings.OIDCRedirectURL,
-		SecureCookies:  settings.SecureCookies,
-		SessionTTL:     settings.SessionTTL,
-		BootstrapAdmin: settings.BootstrapAdmin,
-		GroupDirectory: groupDirectory,
-	})
+	authConfig := httpapi.AuthConfig{
+		Issuer:                settings.OIDCIssuer,
+		InternalIssuer:        settings.OIDCInternalIssuer,
+		ClientID:              settings.OIDCClientID,
+		ClientSecret:          settings.OIDCClientSecret,
+		RedirectURL:           settings.OIDCRedirectURL,
+		PostLogoutRedirectURL: settings.ExternalURL,
+		SecureCookies:         settings.SecureCookies,
+		SessionTTL:            settings.SessionTTL,
+		BootstrapAdmin:        settings.BootstrapAdmin,
+	}
+	var groupCatalog httpapi.GroupCatalog
+	if groupDirectory != nil {
+		authConfig.GroupDirectory = groupDirectory
+		groupCatalog = groupDirectory
+	}
+	auth, err := httpapi.NewAuthenticator(ctx, storage, authConfig)
 	if err != nil {
 		return err
 	}
@@ -94,26 +100,32 @@ func run() error {
 		}
 	}
 	var registrationRealm httpapi.RegistrationRealm
+	var accounts httpapi.AccountManager
 	oidcAdminIssuer := settings.OIDCInternalIssuer
 	if oidcAdminIssuer == "" {
 		oidcAdminIssuer = settings.OIDCIssuer
 	}
 	if oidcAdminIssuer != "" {
-		registrationRealm, err = httpapi.NewKeycloakRealmAdmin(oidcAdminIssuer, settings.LoreServiceTokenURL, settings.LoreServiceClientID, settings.LoreServiceSecret)
+		realmAdmin, err := httpapi.NewKeycloakRealmAdmin(oidcAdminIssuer, settings.LoreServiceTokenURL, settings.LoreServiceClientID, settings.LoreServiceSecret)
 		if err != nil {
 			return err
 		}
+		registrationRealm = realmAdmin
+		accounts = realmAdmin
 	}
 	handler := httpapi.NewServer(storage, auth, httpapi.Config{
-		Repositories:      repositories,
-		Content:           content,
-		TokenExchange:     exchange,
-		RegistrationRealm: registrationRealm,
-		StaticDir:         settings.StaticDir,
-		DevAuth:           settings.DevAuth,
-		DevUser:           model.User{ID: settings.DevUserID, Username: settings.DevUsername, DisplayName: settings.DevUsername, Role: model.RoleAdmin, Source: "local"},
-		OIDC:              httpapi.AuthConfig{},
-		ExternalURL:       settings.ExternalURL,
+		Repositories:        repositories,
+		Directory:           groupCatalog,
+		Content:             content,
+		TokenExchange:       exchange,
+		RegistrationRealm:   registrationRealm,
+		Accounts:            accounts,
+		StaticDir:           settings.StaticDir,
+		DevAuth:             settings.DevAuth,
+		DevUser:             model.User{ID: settings.DevUserID, Username: settings.DevUsername, DisplayName: settings.DevUsername, Role: model.RoleAdmin, Source: "local"},
+		OIDC:                httpapi.AuthConfig{},
+		ExternalURL:         settings.ExternalURL,
+		NativeRepositoryURL: settings.NativeRepositoryURL,
 	})
 
 	server := &http.Server{

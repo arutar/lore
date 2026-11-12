@@ -13,6 +13,12 @@ export interface User {
   disabled: boolean;
 }
 
+export interface ADUser {
+  username: string;
+  email: string;
+  displayName: string;
+}
+
 export interface Session {
   authenticated: boolean;
   user?: User;
@@ -23,7 +29,9 @@ export interface PublicConfig {
   registrationEnabled: boolean;
   oidcEnabled: boolean;
   devAuthEnabled: boolean;
+  adEnabled: boolean;
   externalUrl: string;
+  nativeRepositoryUrl: string;
   theme: string;
 }
 
@@ -37,6 +45,8 @@ export interface Repository {
   name: string;
   description: string;
   ownerId: string;
+  ownerName?: string;
+  public: boolean;
 }
 
 export interface Grant {
@@ -46,12 +56,23 @@ export interface Grant {
   permission: Permission;
 }
 
+export interface GrantSubject {
+  type: "user" | "group";
+  id: string;
+  value: string;
+  label: string;
+  detail: string;
+  automated: boolean;
+}
+
 export interface AuditEvent {
   id: number;
   actorId: string;
+  actorName?: string;
   action: string;
   targetType: string;
   targetId: string;
+  targetName?: string;
   before?: string;
   after?: string;
   createdAt: string;

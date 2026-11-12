@@ -17,6 +17,21 @@ import (
 
 const nestedGroupsMatchingRule = "1.2.840.113556.1.4.1941"
 
+var ErrUserNotFound = errors.New("LDAP user not found")
+
+type Group struct {
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	DistinguishedName string `json:"distinguishedName"`
+}
+
+type User struct {
+	Username          string `json:"username"`
+	Email             string `json:"email"`
+	DisplayName       string `json:"displayName"`
+	DistinguishedName string `json:"-"`
+}
+
 type LDAPConfig struct {
 	URLs               []string
 	BindDN             string
@@ -84,6 +99,227 @@ func (d *LDAPDirectory) GroupIDs(ctx context.Context, username string) ([]string
 	return nil, errors.Join(failures...)
 }
 
+func (d *LDAPDirectory) FindUser(ctx context.Context, username string) (User, error) {
+	if strings.TrimSpace(username) == "" {
+		return User{}, fmt.Errorf("LDAP username is empty")
+	}
+	var failures []error
+	for _, address := range d.config.URLs {
+		user, err := d.findUserFromServer(ctx, address, username)
+		if err == nil {
+			return user, nil
+		}
+		failures = append(failures, fmt.Errorf("%s: %w", address, err))
+	}
+	return User{}, errors.Join(failures...)
+}
+
+func (d *LDAPDirectory) SearchUsers(ctx context.Context, query string) ([]User, error) {
+	query = strings.TrimSpace(query)
+	if len(query) < 2 {
+		return nil, fmt.Errorf("LDAP search query must contain at least 2 characters")
+	}
+	var failures []error
+	for _, address := range d.config.URLs {
+		users, err := d.searchUsersOnServer(ctx, address, query)
+		if err == nil {
+			return users, nil
+		}
+		failures = append(failures, fmt.Errorf("%s: %w", address, err))
+	}
+	return nil, errors.Join(failures...)
+}
+
+func (d *LDAPDirectory) searchUsersOnServer(ctx context.Context, address, query string) ([]User, error) {
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: d.config.InsecureSkipVerify}
+	connection, err := ldap.DialURL(address,
+		ldap.DialWithTLSConfig(tlsConfig),
+		ldap.DialWithDialer(&net.Dialer{Timeout: d.config.Timeout}),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	connection.SetTimeout(d.config.Timeout)
+	if d.config.StartTLS {
+		if err := connection.StartTLS(tlsConfig); err != nil {
+			return nil, err
+		}
+	}
+	if err := connection.Bind(d.config.BindDN, d.config.BindPassword); err != nil {
+		return nil, err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		connection.SetTimeout(time.Until(deadline))
+	}
+	result, err := connection.Search(ldap.NewSearchRequest(
+		d.config.BaseDN,
+		ldap.ScopeWholeSubtree,
+		ldap.NeverDerefAliases,
+		0,
+		int(d.config.Timeout.Seconds()),
+		false,
+		fmt.Sprintf("(&(objectCategory=person)(%s=%s*))", d.config.UsernameAttribute, ldap.EscapeFilter(query)),
+		[]string{d.config.UsernameAttribute, "mail", "displayName", "cn"},
+		[]ldap.Control{ldap.NewControlPaging(10)},
+	))
+	if err != nil {
+		return nil, err
+	}
+	users := make([]User, 0, len(result.Entries))
+	for _, entry := range result.Entries {
+		username := entry.GetAttributeValue(d.config.UsernameAttribute)
+		if username == "" {
+			continue
+		}
+		displayName := entry.GetAttributeValue("displayName")
+		if displayName == "" {
+			displayName = entry.GetAttributeValue("cn")
+		}
+		users = append(users, User{
+			Username:    username,
+			Email:       entry.GetAttributeValue("mail"),
+			DisplayName: displayName,
+		})
+	}
+	sort.Slice(users, func(i, j int) bool {
+		left, right := strings.ToLower(users[i].Username), strings.ToLower(users[j].Username)
+		if left == right {
+			return users[i].Username < users[j].Username
+		}
+		return left < right
+	})
+	return users, nil
+}
+
+func (d *LDAPDirectory) findUserFromServer(ctx context.Context, address, username string) (User, error) {
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: d.config.InsecureSkipVerify}
+	connection, err := ldap.DialURL(address,
+		ldap.DialWithTLSConfig(tlsConfig),
+		ldap.DialWithDialer(&net.Dialer{Timeout: d.config.Timeout}),
+	)
+	if err != nil {
+		return User{}, err
+	}
+	defer connection.Close()
+	connection.SetTimeout(d.config.Timeout)
+	if d.config.StartTLS {
+		if err := connection.StartTLS(tlsConfig); err != nil {
+			return User{}, err
+		}
+	}
+	if err := connection.Bind(d.config.BindDN, d.config.BindPassword); err != nil {
+		return User{}, err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		connection.SetTimeout(time.Until(deadline))
+	}
+	result, err := connection.Search(ldap.NewSearchRequest(
+		d.config.BaseDN,
+		ldap.ScopeWholeSubtree,
+		ldap.NeverDerefAliases,
+		1,
+		int(d.config.Timeout.Seconds()),
+		false,
+		fmt.Sprintf("(%s=%s)", d.config.UsernameAttribute, ldap.EscapeFilter(username)),
+		[]string{d.config.UsernameAttribute, "mail", "displayName", "cn"},
+		nil,
+	))
+	if err != nil {
+		return User{}, err
+	}
+	if len(result.Entries) == 0 {
+		return User{}, ErrUserNotFound
+	}
+	if len(result.Entries) != 1 {
+		return User{}, fmt.Errorf("expected one LDAP user, found %d", len(result.Entries))
+	}
+	entry := result.Entries[0]
+	displayName := entry.GetAttributeValue("displayName")
+	if displayName == "" {
+		displayName = entry.GetAttributeValue("cn")
+	}
+	return User{
+		Username:          entry.GetAttributeValue(d.config.UsernameAttribute),
+		Email:             entry.GetAttributeValue("mail"),
+		DisplayName:       displayName,
+		DistinguishedName: entry.DN,
+	}, nil
+}
+
+func (d *LDAPDirectory) ListGroups(ctx context.Context) ([]Group, error) {
+	var failures []error
+	for _, address := range d.config.URLs {
+		groups, err := d.listGroupsFromServer(ctx, address)
+		if err == nil {
+			return groups, nil
+		}
+		failures = append(failures, fmt.Errorf("%s: %w", address, err))
+	}
+	return nil, errors.Join(failures...)
+}
+
+func (d *LDAPDirectory) listGroupsFromServer(ctx context.Context, address string) ([]Group, error) {
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: d.config.InsecureSkipVerify}
+	connection, err := ldap.DialURL(address,
+		ldap.DialWithTLSConfig(tlsConfig),
+		ldap.DialWithDialer(&net.Dialer{Timeout: d.config.Timeout}),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	connection.SetTimeout(d.config.Timeout)
+	if d.config.StartTLS {
+		if err := connection.StartTLS(tlsConfig); err != nil {
+			return nil, err
+		}
+	}
+	if err := connection.Bind(d.config.BindDN, d.config.BindPassword); err != nil {
+		return nil, err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		connection.SetTimeout(time.Until(deadline))
+	}
+	result, err := connection.Search(ldap.NewSearchRequest(
+		d.config.BaseDN,
+		ldap.ScopeWholeSubtree,
+		ldap.NeverDerefAliases,
+		0,
+		int(d.config.Timeout.Seconds()),
+		false,
+		"(objectClass=group)",
+		[]string{"objectGUID", "cn"},
+		nil,
+	))
+	if err != nil {
+		return nil, err
+	}
+	groups := make([]Group, 0, len(result.Entries))
+	for _, entry := range result.Entries {
+		raw := entry.GetRawAttributeValue("objectGUID")
+		if len(raw) == 0 {
+			continue
+		}
+		id, err := ObjectGUIDString(raw)
+		if err != nil {
+			return nil, fmt.Errorf("group %q: %w", entry.DN, err)
+		}
+		name := entry.GetAttributeValue("cn")
+		if name == "" {
+			name = entry.DN
+		}
+		groups = append(groups, Group{ID: id, Name: name, DistinguishedName: entry.DN})
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].Name == groups[j].Name {
+			return groups[i].ID < groups[j].ID
+		}
+		return groups[i].Name < groups[j].Name
+	})
+	return groups, nil
+}
+
 func (d *LDAPDirectory) groupIDsFromServer(ctx context.Context, address, username string) ([]string, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: d.config.InsecureSkipVerify}
 	connection, err := ldap.DialURL(address,
@@ -119,6 +355,9 @@ func (d *LDAPDirectory) groupIDsFromServer(ctx context.Context, address, usernam
 	))
 	if err != nil {
 		return nil, err
+	}
+	if len(users.Entries) == 0 {
+		return nil, ErrUserNotFound
 	}
 	if len(users.Entries) != 1 {
 		return nil, fmt.Errorf("expected one LDAP user, found %d", len(users.Entries))

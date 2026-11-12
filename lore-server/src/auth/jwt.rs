@@ -256,13 +256,20 @@ pub struct ExchangeIssuer {
 }
 
 impl ExchangeIssuer {
-    /// The keys `issuer`'s discovery document names, fetched. `[server.auth.jwk].endpoint`
-    /// names the login issuer's keys and never these: serving the login issuer's keys here
-    /// would let it sign tokens in the exchange issuer's name.
-    pub async fn discover(issuer: &str) -> Result<Self, JWKServiceError> {
+    /// Fetches the exchange issuer's keys from `jwks_endpoint`, or from its discovery
+    /// document when no explicit endpoint is configured. `[server.auth.jwk].endpoint` names
+    /// only the login issuer's keys: serving those here would let that issuer sign tokens in
+    /// the exchange issuer's name.
+    pub async fn discover(
+        issuer: &str,
+        jwks_endpoint: Option<&str>,
+    ) -> Result<Self, JWKServiceError> {
         let issuer = issuer.to_string();
         let jwk_service = JwkServiceImpl::with_issuers(
-            JWKServiceSettings::default(),
+            JWKServiceSettings {
+                endpoint: jwks_endpoint.map(str::to_owned),
+                ..Default::default()
+            },
             Some(std::slice::from_ref(&issuer)),
         )?;
         jwk_service.fetch_new_keys(None).await?;
@@ -316,10 +323,18 @@ impl JwtVerifier {
             .fetch_new_keys(None)
             .await
             .context("fetching the keys of [server.auth] jwt_issuer")?;
+        let exchange_jwks = auth
+            .oidc
+            .as_ref()
+            .and_then(|oidc| oidc.token_exchange_jwks_endpoint.as_deref());
         let exchange_issuer = match auth.separate_exchange_issuer() {
-            Some(issuer) => Some(ExchangeIssuer::discover(issuer).await.with_context(|| {
-                format!("fetching the keys of [server.auth.oidc] token_exchange_issuer {issuer}")
-            })?),
+            Some(issuer) => Some(
+                ExchangeIssuer::discover(issuer, exchange_jwks)
+                    .await
+                    .with_context(|| {
+                        format!("fetching the keys of [server.auth.oidc] token_exchange_issuer {issuer}")
+                    })?,
+            ),
             None => None,
         };
         Ok(JwtVerifier {

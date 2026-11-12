@@ -12,8 +12,9 @@ import successIcon from "../../shared/svg/success.svg?url";
 import syncIcon from "../../shared/svg/sync.svg?url";
 import unlockIcon from "../../shared/svg/unlock.svg?url";
 
-const Operation = { Clone: 0, Sync: 1, Commit: 2, Stage: 3, Status: 4, History: 5, Lock: 6, Unlock: 7 } as const;
+const Operation = { Clone: 0, Sync: 1, Commit: 2, Stage: 3, Status: 4, History: 5, Lock: 6, Unlock: 7, Accounts: 8 } as const;
 type OperationValue = typeof Operation[keyof typeof Operation];
+type StoredAccount = { authUrl: string; userId: string; username: string; domains: string; selected: boolean };
 
 type InitMessage = {
   type: "init";
@@ -28,9 +29,12 @@ type InitMessage = {
 type HostMessage = InitMessage
   | { type: "progress"; text: string }
   | { type: "complete"; text: string }
-  | { type: "error"; text: string }
+  | { type: "error"; text: string; accessDenied?: boolean }
+  | { type: "accounts"; items: StoredAccount[] }
   | { type: "directory"; path: string };
-type ClientMessage = { type: "ready" } | { type: "browse" } | { type: "cancel" }
+type ClientMessage = { type: "ready" } | { type: "browse" } | { type: "cancel" } | { type: "accounts-open" }
+  | { type: "accounts-add"; remoteUrl: string } | { type: "accounts-select"; userId: string }
+  | { type: "accounts-remove"; authUrl: string; userId: string }
   | { type: "run"; repositoryUrl: string; targetPath: string; message: string };
 
 interface WebViewBridge {
@@ -49,6 +53,7 @@ const info: Record<OperationValue, { title: string; subtitle: string; action: st
   [Operation.History]: { title: "Revision history", subtitle: "Recent revisions in this repository.", action: "Refresh", icon: historyIcon },
   [Operation.Lock]: { title: "Acquire locks", subtitle: "Prevent conflicting edits to selected files.", action: "Acquire locks", icon: lockIcon },
   [Operation.Unlock]: { title: "Release locks", subtitle: "Release locks held on selected files.", action: "Release locks", icon: unlockIcon },
+  [Operation.Accounts]: { title: "Saved accounts", subtitle: "Manage Lore servers and stored sign-ins.", action: "Add account", icon: statusIcon },
 };
 const post = (message: ClientMessage) => window.chrome?.webview?.postMessage(message);
 
@@ -61,14 +66,17 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState("");
+  const [accessDenied, setAccessDenied] = useState(false);
   const [success, setSuccess] = useState("");
   const [statuses, setStatuses] = useState<Record<string, number>>({});
   const [revisions, setRevisions] = useState<{ number: string; id: string }[]>([]);
+  const [accounts, setAccounts] = useState<StoredAccount[]>([]);
 
   const start = (current: InitMessage) => {
     setRunning(true);
     setLogs([]);
     setError("");
+    setAccessDenied(false);
     setSuccess("");
     setStatuses({});
     setRevisions([]);
@@ -85,7 +93,9 @@ export default function App() {
         setRepositoryUrl(data.repositoryUrl);
         setTargetPath(data.targetPath);
         setMessage(data.message);
-        if (data.operation === Operation.Status || data.operation === Operation.History) start(data);
+        if (data.operation !== Operation.Clone && data.operation !== Operation.Commit && data.operation !== Operation.Accounts) start(data);
+      } else if (data.type === "accounts") {
+        setAccounts(data.items);
       } else if (data.type === "progress") {
         setLogs((current) => [...current, data.text]);
         if (operationRef.current === Operation.Status) {
@@ -104,6 +114,7 @@ export default function App() {
       } else if (data.type === "error") {
         setRunning(false);
         setError(data.text);
+        setAccessDenied(Boolean(data.accessDenied));
       }
     };
     window.chrome?.webview?.addEventListener("message", receive);
@@ -119,6 +130,34 @@ export default function App() {
   if (!config) return <main className="loading"><img src={loreIcon} alt="" /><span>Loading Lore Companion…</span></main>;
 
   const current = info[config.operation];
+  const addAccount = (event: React.FormEvent) => {
+    event.preventDefault();
+    setRunning(true);
+    setError("");
+    setSuccess("");
+    setLogs([]);
+    post({ type: "accounts-add", remoteUrl: repositoryUrl });
+  };
+  if (config.operation === Operation.Accounts) return <main className="dialog">
+    <header className="header"><img className="operation-icon" src={loreIcon} alt="" /><div><h1>{current.title}</h1><p>{current.subtitle}</p></div></header>
+    <form className="account-form" onSubmit={addAccount}>
+      <label><span>Lore server</span><span className="directory-row"><input required disabled={running} value={repositoryUrl}
+        onChange={(event) => setRepositoryUrl(event.target.value)} placeholder="lore://localhost" />
+        <button className="button primary" disabled={running}>{running ? "Signing in…" : "Add account"}</button></span></label>
+    </form>
+    <div className="account-list">
+      {accounts.length === 0 ? <div className="summary">No saved accounts. Enter a Lore server URL to sign in.</div> : accounts.map((account) => <div className="account-row" key={`${account.authUrl}:${account.userId}`}>
+        <div className="account-info"><strong>{account.username || "Unknown user"}</strong><span>{account.domains || account.authUrl.replace(/^oidc\+/, "")}</span></div>
+        {account.selected ? <span className="selected-account">In use</span> : <button className="button secondary" disabled={running} onClick={() => { setRunning(true); setError(""); setSuccess(""); post({ type: "accounts-select", userId: account.userId }); }}>Use</button>}
+        <button className="button danger" disabled={running} title="Remove this saved login and its repository tokens" onClick={() => { setRunning(true); setError(""); setSuccess(""); post({ type: "accounts-remove", authUrl: account.authUrl, userId: account.userId }); }}>Remove</button>
+      </div>)}
+    </div>
+    {running && <div className="progress" role="progressbar" aria-label="Waiting for browser sign-in"><span /></div>}
+    {error && <div className="alert error" role="alert"><img src={errorIcon} alt="" /><span>{error}</span></div>}
+    {success && <div className="alert success" role="status"><img src={successIcon} alt="" /><span>{success}</span></div>}
+    {logs.length > 0 && <pre className="output" aria-live="polite">{logs.join("\n")}</pre>}
+    <footer className="actions"><button className="button secondary" disabled={running} onClick={() => post({ type: "cancel" })}>Close</button></footer>
+  </main>;
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     if (!window.chrome?.webview) {
@@ -139,17 +178,17 @@ export default function App() {
       </header>
       <form onSubmit={submit}>
         {config.operation === Operation.Clone ? <>
-          <label><span>Repository URL</span><input autoFocus required disabled={running} value={repositoryUrl}
+          <label><span>Repository URL</span><input autoFocus required disabled={running || Boolean(success)} value={repositoryUrl}
             onChange={(event) => setRepositoryUrl(event.target.value)} placeholder="https://lore.example.com/repository" /></label>
-          <label><span>Target folder</span><span className="directory-row"><input required disabled={running} value={targetPath}
+          <label><span>Target folder</span><span className="directory-row"><input required disabled={running || Boolean(success)} value={targetPath}
             onChange={(event) => setTargetPath(event.target.value)} placeholder="D:\work\repository" />
-            <button className="button browse" type="button" disabled={running} onClick={() => post({ type: "browse" })}>
+            <button className="button browse" type="button" disabled={running || Boolean(success)} onClick={() => post({ type: "browse" })}>
               <img src={folderIcon} alt="" />Browse</button></span></label>
         </> : <label><span>Repository</span><input value={config.repositoryPath} readOnly /></label>}
 
         {config.operation === Operation.Sync && <div className="summary">The server revision will be downloaded and integrated into this working copy. Local staged changes are preserved whenever possible.</div>}
         {hasPaths && <label><span>Selected paths · {config.paths.length}</span><ul className="path-list">{config.paths.map((path) => <li key={path}>{path}</li>)}</ul></label>}
-        {config.operation === Operation.Commit && <label><span>Commit message</span><textarea required disabled={running} value={message}
+        {config.operation === Operation.Commit && <label><span>Commit message (optional)</span><textarea disabled={running} value={message}
           onChange={(event) => setMessage(event.target.value)} placeholder="Describe the changes" /></label>}
         {(config.operation === Operation.Stage || config.operation === Operation.Lock || config.operation === Operation.Unlock)
           && <div className="summary">Only the selected paths will be changed. This operation does not create a revision.</div>}
@@ -167,13 +206,15 @@ export default function App() {
           : <div className="summary">{running ? "Loading revision history…" : "Select Refresh to load revision history."}</div>)}
 
         {running && <div className="progress" role="progressbar" aria-label="Running operation"><span /></div>}
-        {error && <div className="alert error" role="alert"><img src={errorIcon} alt="" /><span>{error}</span></div>}
+        {error && <div className="alert error" role="alert"><img src={errorIcon} alt="" /><div className="alert-content"><span>{error}</span>{accessDenied && <button className="button secondary error-action" type="button" onClick={() => post({ type: "accounts-open" })}>Sign in with another account</button>}</div></div>}
         {success && <div className="alert success" role="status"><img src={successIcon} alt="" /><span>{success}</span></div>}
         {logs.length > 0 && config.operation !== Operation.History && <pre className="output" aria-live="polite">{logs.join("\n")}</pre>}
 
         <footer className="actions">
-          <button className="button secondary" type="button" disabled={running} onClick={() => post({ type: "cancel" })}>Cancel</button>
-          <button className="button primary" type="submit" disabled={running}>{running ? "Working…" : current.action}</button>
+          {success && config.operation !== Operation.Status && config.operation !== Operation.History ? <button className="button primary" type="button" onClick={() => post({ type: "cancel" })}>OK</button> : <>
+            <button className="button secondary" type="button" disabled={running} onClick={() => post({ type: "cancel" })}>{error ? "Close" : "Cancel"}</button>
+            <button className="button primary" type="submit" disabled={running}>{running ? "Working…" : error ? "Retry" : current.action}</button>
+          </>}
         </footer>
       </form>
     </main>

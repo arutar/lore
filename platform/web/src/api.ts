@@ -1,4 +1,4 @@
-import type { AuditEvent, BulkResult, GlobalSettings, Grant, Page, PublicConfig, Repository, RepositoryLock, RepositoryTree, Revision, Session, User } from "./types";
+import type { ADUser, AuditEvent, BulkResult, GlobalSettings, Grant, GrantSubject, Page, PublicConfig, Repository, RepositoryLock, RepositoryTree, Revision, Role, Session, User } from "./types";
 
 let csrfToken = "";
 
@@ -39,17 +39,21 @@ export const api = {
   config: () => request<PublicConfig>("/config"),
   session: () => request<Session>("/session"),
   devLogin: () => request<{ authenticated: boolean }>("/dev-login", { method: "POST" }),
-  logout: () => request<void>("/logout", { method: "POST" }),
+  logout: () => request<{ logoutUrl?: string }>("/logout", { method: "POST" }),
   catalog: (cursor = "") => request<Page<Repository>>(`/catalog?pageSize=50&cursor=${encodeURIComponent(cursor)}`),
   repository: (id: string) => request<Repository>(`/repositories/${id}`),
   tree: (id: string, path = "", revision = "") => request<RepositoryTree>(`/repositories/${id}/tree?path=${encodeURIComponent(path)}&revision=${encodeURIComponent(revision)}`),
   history: (id: string, cursor = "") => request<Page<Revision>>(`/repositories/${id}/history?cursor=${encodeURIComponent(cursor)}`),
   locks: (id: string) => request<{ items: RepositoryLock[] }>(`/repositories/${id}/locks`),
   grants: (id: string) => request<{ items: Grant[] }>(`/repositories/${id}/grants/`),
+  grantSubjects: (id: string) => request<{ items: GrantSubject[] }>(`/repositories/${id}/grants/subjects`),
   setGrant: (grant: Grant) => request<Grant>(`/repositories/${grant.repositoryId}/grants/`, { method: "PUT", body: JSON.stringify(grant) }),
   removeGrant: (grant: Grant) => request<void>(`/repositories/${grant.repositoryId}/grants/`, { method: "DELETE", body: JSON.stringify(grant) }),
   importGrants: (id: string, body: string, csv: boolean) => request<BulkResult>(`/repositories/${id}/grants/import`, { method: "POST", headers: { "Content-Type": csv ? "text/csv" : "application/json" }, body }),
   users: () => request<Page<User>>("/admin/users?pageSize=100"),
+  searchADUsers: (query: string, signal?: AbortSignal) => request<{ items: ADUser[] }>(`/admin/users/search?q=${encodeURIComponent(query)}`, { signal }),
+  createUser: (input: { email: string; displayName: string; password: string; role: Role }) => request<User>("/admin/users", { method: "POST", body: JSON.stringify(input) }),
+  provisionADUser: (username: string) => request<User>("/admin/users/provision", { method: "POST", body: JSON.stringify({ username }) }),
   updateUser: (user: User) => request<User>(`/admin/users/${user.id}`, { method: "PATCH", body: JSON.stringify({ role: user.role, disabled: user.disabled }) }),
   importUsers: (body: string, csv: boolean) => request<BulkResult>("/admin/users/import", { method: "POST", headers: { "Content-Type": csv ? "text/csv" : "application/json" }, body }),
   repositories: () => request<Page<Repository>>("/admin/repositories?pageSize=100"),

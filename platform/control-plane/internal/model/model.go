@@ -48,6 +48,8 @@ type Repository struct {
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
 	OwnerID     string    `json:"ownerId"`
+	OwnerName   string    `json:"ownerName,omitempty"`
+	Public      bool      `json:"public"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
@@ -63,15 +65,18 @@ type Session struct {
 	IDHash    string
 	CSRFToken string
 	UserID    string
+	IDToken   string `json:"-"`
 	ExpiresAt time.Time
 }
 
 type AuditEvent struct {
 	ID         int64     `json:"id"`
 	ActorID    string    `json:"actorId"`
+	ActorName  string    `json:"actorName,omitempty"`
 	Action     string    `json:"action"`
 	TargetType string    `json:"targetType"`
 	TargetID   string    `json:"targetId"`
+	TargetName string    `json:"targetName,omitempty"`
 	Before     string    `json:"before,omitempty"`
 	After      string    `json:"after,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`

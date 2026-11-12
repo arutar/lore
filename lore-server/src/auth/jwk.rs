@@ -320,9 +320,18 @@ pub struct DiscoveryDocument {
 /// Fetch `<issuer>/.well-known/openid-configuration`. Redirects are refused, the
 /// body is capped, and a document naming any issuer other than `issuer` is rejected.
 pub async fn fetch_discovery_document(issuer: &str) -> Result<DiscoveryDocument, JWKServiceError> {
+    fetch_discovery_document_from(issuer, issuer).await
+}
+
+/// Fetches discovery through an operator-configured internal URL while validating
+/// the public issuer that clients and signed tokens use.
+pub async fn fetch_discovery_document_from(
+    discovery_issuer: &str,
+    expected_issuer: &str,
+) -> Result<DiscoveryDocument, JWKServiceError> {
     let url = format!(
         "{}/.well-known/openid-configuration",
-        issuer.trim_end_matches('/')
+        discovery_issuer.trim_end_matches('/')
     );
     let client = no_redirect_client()?;
     let mut response = client.get(&url).send().await.map_err(|e| {
@@ -356,16 +365,16 @@ pub async fn fetch_discovery_document(issuer: &str) -> Result<DiscoveryDocument,
         JWKServiceError::ParseError(e)
     })?;
 
-    // Check that document issuer matches the issuer URL, to avoid redirect
-    // attacks.
-    if document.issuer != issuer {
+    // Check that the document names the public issuer, even when discovery used
+    // an operator-configured internal endpoint.
+    if document.issuer != expected_issuer {
         warn!(
-            expected = %issuer,
+            expected = %expected_issuer,
             actual = %document.issuer,
             "OIDC discovery document names a different issuer than the configured one"
         );
         return Err(JWKServiceError::DiscoveryIssuerMismatch {
-            expected: issuer.to_string(),
+            expected: expected_issuer.to_string(),
             actual: document.issuer,
         });
     }

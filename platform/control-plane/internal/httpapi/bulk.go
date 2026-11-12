@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -77,6 +78,15 @@ func (s *Server) importGrants(w http.ResponseWriter, r *http.Request) {
 			result.Errors = append(result.Errors, bulkError{Line: line, Message: "Grant is invalid"})
 			return
 		}
+		valid, err := s.validGrantSubject(r.Context(), grant)
+		if err != nil {
+			result.Errors = append(result.Errors, bulkError{Line: line, Message: "Couldn't validate user or group"})
+			return
+		}
+		if !valid {
+			result.Errors = append(result.Errors, bulkError{Line: line, Message: "User or group doesn't exist"})
+			return
+		}
 		if err := s.store.SetGrant(r.Context(), actor.ID, grant); err != nil {
 			result.Errors = append(result.Errors, bulkError{Line: line, Message: "Couldn't save grant"})
 			return
@@ -113,7 +123,7 @@ func (s *Server) importGrants(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) exportUsers(w http.ResponseWriter, r *http.Request) {
-	users, err := s.allUsers(r)
+	users, err := s.allUsers(r.Context())
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -200,11 +210,11 @@ func (s *Server) importUsers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (s *Server) allUsers(r *http.Request) ([]model.User, error) {
+func (s *Server) allUsers(ctx context.Context) ([]model.User, error) {
 	users := []model.User{}
 	cursor := ""
 	for {
-		page, err := s.store.ListUsers(r.Context(), cursor, 100)
+		page, err := s.store.ListUsers(ctx, cursor, 100)
 		if err != nil {
 			return nil, err
 		}

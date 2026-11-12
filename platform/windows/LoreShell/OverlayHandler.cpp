@@ -1,5 +1,6 @@
 #include "LoreShell.h"
 #include "Resource.h"
+#include <shlwapi.h>
 
 namespace
 {
@@ -50,7 +51,7 @@ int Lookup(const std::wstring& path)
     for (int32_t index = 0; index < count; ++index)
     {
         const auto* entry = reinterpret_cast<const Entry*>(bytes + 16 + index * EntrySize);
-        if (entry->hash == hash && entry->state >= 0 && entry->state <= 6)
+        if (entry->hash == hash && entry->state >= 0 && entry->state <= 7)
         {
             state = entry->state;
             break;
@@ -89,13 +90,17 @@ STDMETHODIMP_(ULONG) OverlayHandler::Release()
 
 STDMETHODIMP OverlayHandler::IsMemberOf(PCWSTR path, DWORD)
 {
-    return path && Lookup(path) == state_ ? S_OK : S_FALSE;
+    if (!path) return S_FALSE;
+    const auto cached = Lookup(path);
+    if (cached) return cached == state_ ? S_OK : S_FALSE;
+    if (state_ == 7 && PathFileExistsW((std::wstring(path) + L"\\.lore").c_str())) return S_OK;
+    return S_FALSE;
 }
 
 STDMETHODIMP OverlayHandler::GetOverlayInfo(PWSTR path, int pathSize, int* index, DWORD* flags)
 {
     if (!path || !index || !flags) return E_POINTER;
-    if (state_ < 1 || state_ > 6) return E_UNEXPECTED;
+    if (state_ < 1 || state_ > 7) return E_UNEXPECTED;
     const auto result = GetModuleFileNameW(g_instance, path, pathSize);
     if (!result || result >= static_cast<UINT>(pathSize)) return E_FAIL;
     *index = -(200 + state_);

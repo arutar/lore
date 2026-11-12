@@ -1,16 +1,24 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "v0.13.0",
+    [string]$PlatformVersion = "0.1.0",
     [string]$OutputDirectory = "",
     [string]$Generator = ""
 )
 
 $ErrorActionPreference = "Stop"
+$env:CARGO_INCREMENTAL = "0"
+if ($PlatformVersion -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') { throw "Platform version must contain three or four numeric components" }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $PSScriptRoot "bin/client" }
 $root = (Resolve-Path "$PSScriptRoot/../..").Path
 $dotnet = if (Get-Command dotnet -ErrorAction SilentlyContinue) { "dotnet" } else { "$root/.tooling/dotnet/dotnet.exe" }
 $cmake = if (Get-Command cmake -ErrorAction SilentlyContinue) { "cmake" } else { "C:/CMake/bin/cmake.exe" }
-$cliChecksum = "26b84459fd6ab2faa10d5f8eb8393848286935414210d7070dafffd97e4c1343"
+$localCargo = "$root/.tooling/cargo/bin/cargo.exe"
+$cargo = if (Get-Command cargo -ErrorAction SilentlyContinue) { "cargo" } else { $localCargo }
+if ($cargo -eq $localCargo) {
+    $env:CARGO_HOME = "$root/.tooling/cargo"
+    $env:RUSTUP_HOME = "$root/.tooling/rustup"
+}
+if (-not (Get-Command $cargo -ErrorAction SilentlyContinue)) { throw "Rust and Cargo are required to build the Lore native library and CLI" }
 if (-not $Generator) {
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     $visualStudioVersion = if (Test-Path $vswhere) { & $vswhere -latest -property installationVersion } else { $null }
@@ -33,26 +41,18 @@ try {
 finally {
     Pop-Location
 }
-& $dotnet publish "$PSScriptRoot/LoreCompanion/LoreCompanion.csproj" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o "$OutputDirectory"
+& $dotnet publish "$PSScriptRoot/LoreCompanion/LoreCompanion.csproj" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true "-p:Version=$PlatformVersion" -o "$OutputDirectory"
 if ($LASTEXITCODE -ne 0) { throw "Companion publish failed" }
-& $cmake -S "$PSScriptRoot/LoreShell" -B "$PSScriptRoot/LoreShell/build" -G $Generator -A x64
+& $cargo build --release -p lore-capi --manifest-path "$root/Cargo.toml"
+if ($LASTEXITCODE -ne 0) { throw "Lore native library build failed" }
+& $cargo build --release -p lore-client --bin lore --manifest-path "$root/Cargo.toml"
+if ($LASTEXITCODE -ne 0) { throw "Lore CLI build failed" }
+Copy-Item "$root/target/release/lore.dll" "$OutputDirectory/lorelib.dll" -Force
+Copy-Item "$root/target/release/lore.exe" "$OutputDirectory/lore.exe" -Force
+& $cmake -S "$PSScriptRoot/LoreShell" -B "$PSScriptRoot/LoreShell/build" -G $Generator -A x64 "-DLORE_PLATFORM_VERSION=$PlatformVersion"
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 & $cmake --build "$PSScriptRoot/LoreShell/build" --config Release
 if ($LASTEXITCODE -ne 0) { throw "Shell extension build failed" }
 Copy-Item "$PSScriptRoot/LoreShell/build/Release/LoreShell.dll" $OutputDirectory -Force
-
-$temp = New-Item -ItemType Directory -Path ([IO.Path]::Combine([IO.Path]::GetTempPath(), [Guid]::NewGuid().ToString()))
-try {
-    $archive = "$temp/lore.zip"
-    Invoke-WebRequest "https://github.com/EpicGames/lore/releases/download/$Version/lore-$Version-x86_64-pc-windows-msvc.zip" -OutFile $archive
-    if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $cliChecksum) { throw "Lore CLI checksum mismatch" }
-    Expand-Archive $archive "$temp/cli"
-    $cli = Get-ChildItem "$temp/cli" -Filter lore.exe -Recurse | Select-Object -First 1
-    if (-not $cli) { throw "lore.exe is missing from the release archive" }
-    Copy-Item $cli.FullName "$OutputDirectory/lore.exe"
-}
-finally {
-    Remove-Item $temp -Recurse -Force
-}
 Compress-Archive "$OutputDirectory/*" "$PSScriptRoot/bin/LoreClient-win-x64.zip" -Force
 Write-Host "Windows client bundle: $OutputDirectory"

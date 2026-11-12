@@ -4,6 +4,7 @@ public static class OperationError
 {
     public static string UserMessage(Exception exception, CompanionOperation operation)
     {
+        if (exception is TaskCanceledException) return "The server did not answer in time. Check the connection and try again.";
         if (exception is OperationCanceledException) return "The operation was canceled.";
         if (exception is InvalidDataException or ArgumentException) return exception.Message;
         if (exception is UnauthorizedAccessException) return "Windows could not access the selected path. Check the folder permissions.";
@@ -11,12 +12,20 @@ public static class OperationError
         var message = exception.Message;
         if (Contains(message, "protocol", "was not recognized"))
             return "This repository URL uses an unsupported protocol. Check the server URL and the Lore client configuration.";
+        if (Contains(message, "code_challenge") || Contains(message, "pkce"))
+            return "The server requires an unsupported sign-in method. Disable PKCE enforcement for the Lore native client or update the Lore client.";
+        if (Contains(message, "device authorization"))
+            return "The server rejected the Lore sign-in request. Check the native OIDC client configuration.";
+        if (Contains(message, "offline tokens not allowed"))
+            return "The server could not create a persistent Lore session. Assign the realm's default role, including offline_access, to this account.";
         if (Contains(message, "certificate") || Contains(message, "tls") || Contains(message, "ssl"))
             return "The server certificate could not be validated. Check the HTTPS certificate or your trusted CA configuration.";
-        if (Contains(message, "401") || Contains(message, "unauthorized") || Contains(message, "authentication") || Contains(message, "credentials"))
+        if (Contains(message, "401") || Contains(message, "unauthorized") || Contains(message, "authentication") || Contains(message, "credentials") || Contains(message, "missingtoken") || Contains(message, "missing token") || Contains(message, "not authenticated"))
             return "Authentication failed. Sign in again and check your credentials.";
-        if (Contains(message, "403") || Contains(message, "forbidden") || Contains(message, "permission denied"))
-            return "You do not have permission to perform this operation. Ask a repository administrator for access.";
+        if (operation == CompanionOperation.Clone && Contains(message, "not found"))
+            return "This account does not have access to the repository, or the repository does not exist. Sign in with another account or ask a repository administrator for access.";
+        if (IsAccessDenied(exception, operation))
+            return "This account does not have access to the repository or operation. Sign in with another account or ask a repository administrator for access.";
         if (Contains(message, "conflict"))
             return "The operation conflicts with local or incoming changes. Review the working copy and resolve the conflicts before retrying.";
         if (Contains(message, "already locked") || Contains(message, "lock is held"))
@@ -43,6 +52,14 @@ public static class OperationError
             CompanionOperation.Unlock => "The locks could not be released. Check the selected paths and lock ownership.",
             _ => "The operation could not be completed. Check the repository and try again.",
         };
+    }
+
+    public static bool IsAccessDenied(Exception exception, CompanionOperation operation)
+    {
+        if (operation == CompanionOperation.Clone && Contains(exception.Message, "not found")) return true;
+        var message = exception.Message;
+        return Contains(message, "403") || Contains(message, "forbidden") || Contains(message, "permission denied")
+            || Contains(message, "not authorized") || Contains(message, "access_denied") || Contains(message, "access denied");
     }
 
     private static bool Contains(string message, params string[] parts) =>

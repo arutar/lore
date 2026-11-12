@@ -306,6 +306,21 @@ pub async fn exchange(
         }
         .into());
     }
+    if identity.is_empty() && identity_token.is_empty() {
+        let authorization = auth_endpoint
+            .auth
+            .exchange_for_repository(&auth_endpoint.url, "", repository, "")
+            .await
+            .forward::<ExchangeError>("exchanging anonymous repository access")?;
+        verify_jwt_usage_for_remote(
+            &insecure_decode_token(&authorization.token)
+                .internal("decoding anonymous token")?
+                .claims,
+            &recipient_domain,
+        )
+        .forward::<ExchangeError>("verifying anonymous token usage")?;
+        return Ok(authorization.token);
+    }
     if identity.is_empty() {
         lore_debug!("No identity, unable to perform authz exchange");
         return Err(NotAuthenticated.into());
@@ -458,6 +473,21 @@ pub async fn exchange_custom_resource(
             operation: "No authentication configured on server".to_string(),
         }
         .into());
+    }
+    if identity.is_empty() && identity_token.is_empty() {
+        let authorization = auth_endpoint
+            .auth
+            .exchange_for_custom_resources(&auth_endpoint.url, "", &[resource_id], "")
+            .await
+            .forward::<ExchangeError>("exchanging an anonymous resource")?;
+        verify_jwt_usage_for_remote(
+            &insecure_decode_token(&authorization.token)
+                .internal("decoding anonymous token")?
+                .claims,
+            &recipient_domain,
+        )
+        .forward::<ExchangeError>("verifying anonymous token usage")?;
+        return Ok(authorization.token);
     }
     if identity.is_empty() {
         lore_debug!("No identity, unable to perform authz exchange");

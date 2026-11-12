@@ -285,6 +285,9 @@ impl OidcAuthentication {
     ) -> Result<AuthorizationToken, ProtocolError> {
         self.check_endpoint(auth_url)?;
         match target {
+            Some(target) if authn_token.is_empty() => {
+                exchange::exchange_anonymous(&self.oidc, target).await
+            }
             Some(target) => exchange::exchange(&self.oidc, authn_token, target).await,
             None => exchange::unexchanged(authn_token),
         }

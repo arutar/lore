@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:18-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: lore
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lore-dev-only}
@@ -16,6 +17,7 @@ services:
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.4
+    restart: unless-stopped
     command: ["start-dev", "--import-realm", "--health-enabled=true"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
@@ -25,14 +27,13 @@ services:
       KC_DB_USERNAME: lore
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-lore-dev-only}
       KC_HTTP_ENABLED: "true"
-      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-http://host.docker.internal:8080/auth}
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-${LORE_AUTH_PUBLIC_URL:-${LORE_PUBLIC_URL:-http://host.docker.internal:8080}/auth}}
       KC_HTTP_RELATIVE_PATH: /auth
-    ports:
-      - "${LORE_KEYCLOAK_BIND:-127.0.0.1}:8081:8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "${LORE_AD_HOST:-localhost}:${LORE_AD_IP:-127.0.0.1}"
     volumes:
-      - ${LORE_REALM_FILE:-./keycloak/lore-realm.json}:/opt/keycloak/data/import/lore-realm.json:ro
+      - ${LORE_REALM_FILE:-./data/generated/lore-realm.json}:/opt/keycloak/data/import/lore-realm.json:ro
     healthcheck:
       test:
         - CMD-SHELL
@@ -47,16 +48,18 @@ services:
         condition: service_healthy
 
   control-plane:
+    restart: unless-stopped
     build:
       context: ../..
       dockerfile: platform/Dockerfile
     environment:
       DATABASE_URL: postgres://lore:${POSTGRES_PASSWORD:-lore-dev-only}@postgres:5432/lore?sslmode=disable
-      OIDC_ISSUER: ${KEYCLOAK_PUBLIC_URL:-http://host.docker.internal:8080/auth}/realms/lore
+      OIDC_ISSUER: ${KEYCLOAK_PUBLIC_URL:-${LORE_AUTH_PUBLIC_URL:-${LORE_PUBLIC_URL:-http://host.docker.internal:8080}/auth}}/realms/lore
       OIDC_INTERNAL_ISSUER: http://keycloak:8080/auth/realms/lore
       OIDC_CLIENT_ID: lore-web
-      OIDC_REDIRECT_URL: ${LORE_WEB_PUBLIC_URL:-http://host.docker.internal:8080}/web/v1/oidc/callback
-      EXTERNAL_URL: ${LORE_WEB_PUBLIC_URL:-http://host.docker.internal:8080}
+      OIDC_REDIRECT_URL: ${LORE_WEB_PUBLIC_URL:-${LORE_PUBLIC_URL:-http://host.docker.internal:8080}}/web/v1/oidc/callback
+      EXTERNAL_URL: ${LORE_WEB_PUBLIC_URL:-${LORE_PUBLIC_URL:-http://host.docker.internal:8080}}
+      LORE_NATIVE_PUBLIC_URL: ${LORE_NATIVE_PUBLIC_URL:-lore://${LORE_PUBLIC_HOST:-host.docker.internal}:41337}
       BOOTSTRAP_ADMIN: admin
       SECURE_COOKIES: ${SECURE_COOKIES:-false}
       SESSION_TTL: 8h
@@ -66,7 +69,7 @@ services:
       LORE_SERVICE_CLIENT_ID: lore-control-plane
       LORE_SERVICE_CLIENT_SECRET: ${LORE_SERVICE_CLIENT_SECRET:-lore-service-dev-only}
       LORE_GRPC_SECURE: "false"
-      LORE_TOKEN_EXCHANGE_ISSUER: ${LORE_EXCHANGE_PUBLIC_URL:-http://host.docker.internal:8080}/web/v1/lore-oidc
+      LORE_TOKEN_EXCHANGE_ISSUER: ${LORE_EXCHANGE_PUBLIC_URL:-${LORE_PUBLIC_URL:-http://host.docker.internal:8080}}/web/v1/lore-oidc
       LORE_TOKEN_SIGNING_KEY_FILE: ${LORE_TOKEN_SIGNING_KEY_FILE:-/data/token-exchange-signing.pem}
       LORE_LDAP_URL: ${LORE_LDAP_URL:-}
       LORE_LDAP_BIND_DN: ${LORE_LDAP_BIND_DN:-}
@@ -81,6 +84,7 @@ services:
       - "9090"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "${LORE_AD_HOST:-localhost}:${LORE_AD_IP:-127.0.0.1}"
     volumes:
       - ${LORE_DATA_ROOT:-./data}/control-plane:/data
     depends_on:
@@ -90,18 +94,20 @@ services:
         condition: service_healthy
 
   lore:
+    restart: unless-stopped
     build:
       context: ../..
       dockerfile: lore-server/Dockerfile
     volumes:
       - ${LORE_DATA_ROOT:-./data}/lore:/data
-      - ${LORE_CONFIG_FILE:-./lore/docker.toml}:/etc/lore/config/docker.toml:ro
+      - ${LORE_CONFIG_FILE:-./data/generated/lore.toml}:/etc/lore/config/docker.toml:ro
     ports:
       - "41337:41337/tcp"
       - "41337:41337/udp"
       - "41339:41339"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "${LORE_AD_HOST:-localhost}:${LORE_AD_IP:-127.0.0.1}"
     healthcheck:
       test:
         - CMD-SHELL
@@ -120,7 +126,7 @@ services:
   caddy:
     image: caddy:2-alpine
     environment:
-      LORE_PUBLIC_ADDRESS: ${LORE_PUBLIC_ADDRESS:-http://host.docker.internal:8080}
+      LORE_PUBLIC_ADDRESS: ${LORE_PUBLIC_ADDRESS:-${LORE_PUBLIC_URL:-http://host.docker.internal:8080}}
     ports:
       - "${LORE_PROXY_BIND:-0.0.0.0}:8080:8080"
     volumes:

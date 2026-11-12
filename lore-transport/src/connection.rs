@@ -563,11 +563,19 @@ async fn connect_impl(
     if !auth_endpoint.is_none() {
         // Ensure we are authenticated if there is an auth url defined in the environment
         if identity.is_empty() {
-            let (_, _, resolved) =
-                auth_exchange_for_stored_identity(&auth_endpoint, &remote_domain, "", repository)
-                    .await
-                    .forward::<ProtocolError>("resolving a stored identity")?;
-            identity = resolved;
+            match auth_exchange_for_stored_identity(&auth_endpoint, &remote_domain, "", repository)
+                .await
+            {
+                Ok((_, _, resolved)) => identity = resolved,
+                Err(error) if error.is_not_authenticated() => {
+                    lore_debug!(
+                        "No stored identity for {auth_endpoint}; trying anonymous repository access"
+                    )
+                }
+                Err(error) => {
+                    return Err(error).forward::<ProtocolError>("resolving a stored identity");
+                }
+            }
         } else if identity_token.is_empty() && access_token.is_empty() {
             // Only authentication is checked here. The repository's authorization is
             // exchanged where it is used, so its refusal is handled there.

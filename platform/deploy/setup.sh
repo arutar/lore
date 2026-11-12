@@ -43,6 +43,30 @@ set -a; . ./.env; set +a
 mkdir -p data/generated/caddy data/postgres data/lore data/control-plane data/caddy
 escape_sed() { printf '%s' "$1" | sed 's/[&|\\]/\\&/g'; }
 escape_json() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+set_env() {
+    key=$1
+    value=$2
+    export "$key=$value"
+    escaped=$(escape_sed "$value")
+    if grep -q "^$key=" .env; then
+        sed -i "s|^$key=.*|$key=$escaped|" .env
+    else
+        printf '%s=%s\n' "$key" "$value" >> .env
+    fi
+}
+set_env LORE_PUBLIC_URL "$WEB_URL"
+set_env LORE_PUBLIC_HOST "$PUBLIC_HOST"
+set_env LORE_PUBLIC_SCHEME "$SCHEME"
+set_env LORE_AUTH_PUBLIC_URL "$KEYCLOAK_URL"
+set_env LORE_PUBLIC_ADDRESS "$PUBLIC_ADDRESS"
+if [ "$SCHEME" = "https" ]; then set_env SECURE_COOKIES true; else set_env SECURE_COOKIES false; fi
+for name in LORE_LDAP_URL LORE_LDAP_BASE_DN LORE_LDAP_BIND_DN LORE_LDAP_BIND_PASSWORD \
+    LORE_LDAP_USERNAME_ATTRIBUTE LORE_LDAP_STARTTLS LORE_LDAP_INSECURE_SKIP_VERIFY LORE_LDAP_TIMEOUT \
+    LORE_SMTP_HOST LORE_SMTP_PORT LORE_SMTP_FROM LORE_SMTP_FROM_NAME LORE_SMTP_USERNAME LORE_SMTP_PASSWORD \
+    LORE_SMTP_STARTTLS LORE_SMTP_SSL LORE_DATA_ROOT LORE_PROXY_BIND; do
+    eval "value=\${$name:-}"
+    if [ -n "$value" ]; then set_env "$name" "$value"; fi
+done
 WEB_ESCAPED=$(escape_sed "$WEB_URL")
 KEYCLOAK_ESCAPED=$(escape_sed "$KEYCLOAK_URL")
 HOST_ESCAPED=$(escape_sed "$PUBLIC_HOST")
@@ -69,6 +93,8 @@ if [ -n "${LORE_SMTP_HOST:-}" ]; then
     SMTP_BLOCK="$SMTP_BLOCK" awk '{if (index($0, "\"smtpServer\": {}")) print ENVIRON["SMTP_BLOCK"] ","; else print}' data/generated/lore-realm.json > data/generated/lore-realm.tmp
     mv data/generated/lore-realm.tmp data/generated/lore-realm.json
     sed -i 's/"resetPasswordAllowed": false/"resetPasswordAllowed": true/' data/generated/lore-realm.json
+else
+    sed -i -e 's/"verifyEmail": true/"verifyEmail": false/' -e 's/"resetPasswordAllowed": true/"resetPasswordAllowed": false/' data/generated/lore-realm.json
 fi
 if [ -n "${LORE_LDAP_URL:-}" ]; then
     LDAP_STARTTLS=${LORE_LDAP_STARTTLS:-false}
@@ -85,6 +111,17 @@ if [ -n "${LORE_LDAP_URL:-}" ]; then
     awk 'FNR==NR {provider=provider $0 "\n"; next} index($0, "\"components\": {}") {printf "\"components\": {\"org.keycloak.storage.UserStorageProvider\":[\n%s]},\n", provider; next} {print}' \
         data/generated/ldap-provider.json data/generated/lore-realm.json > data/generated/lore-realm.tmp
     mv data/generated/lore-realm.tmp data/generated/lore-realm.json
+    LDAP_HOST=$(printf '%s' "$LORE_LDAP_URL" | sed -E 's|^[a-zA-Z]+://||; s|[:/].*$||')
+    case "$LDAP_HOST" in
+        *.*|localhost) ;;
+        *)
+            LDAP_IP=$(getent ahostsv4 "$LDAP_HOST" 2>/dev/null | awk 'NR == 1 {print $1}')
+            if [ -n "$LDAP_IP" ]; then
+                set_env LORE_AD_HOST "$LDAP_HOST"
+                set_env LORE_AD_IP "$LDAP_IP"
+            fi
+            ;;
+    esac
 fi
 rm -f data/generated/caddy/auth.conf
 if [ "$KEYCLOAK_URL" != "$WEB_URL/auth" ]; then
@@ -123,7 +160,7 @@ else
     docker compose $COMPOSE_FILES up -d --build --wait --wait-timeout 240
 fi
 
-docker compose $COMPOSE_FILES exec -T keycloak bash -c 'set -e; KC=/opt/keycloak/bin/kcadm.sh; "$KC" config credentials --server http://127.0.0.1:8080/auth --realm master --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD"; "$KC" add-roles -r lore --uusername service-account-lore-control-plane --cclientid realm-management --rolename manage-realm'
+docker compose $COMPOSE_FILES exec -T keycloak bash -c 'set -e; KC=/opt/keycloak/bin/kcadm.sh; "$KC" config credentials --server http://127.0.0.1:8080/auth --realm master --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD"; "$KC" add-roles -r lore --uusername service-account-lore-control-plane --cclientid realm-management --rolename manage-realm; "$KC" add-roles -r lore --uusername service-account-lore-control-plane --cclientid realm-management --rolename manage-users'
 
 printf '\nLore is ready.\nWebUI: %s\nKeycloak: %s\nAdministrator: admin\nInitial administrator password: %s\nData: %s/data\n' \
     "$WEB_URL" "$KEYCLOAK_URL" "$LORE_ADMIN_PASSWORD" "$(pwd)"

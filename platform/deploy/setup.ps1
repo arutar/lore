@@ -64,6 +64,37 @@ foreach ($entry in $settings.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "Process")
     }
 }
+function Set-EnvSetting([string]$Name, [string]$Value) {
+    $settings[$Name] = $Value
+    [Environment]::SetEnvironmentVariable($Name, $Value, "Process")
+    $found = $false
+    $updated = @(Get-Content .env | ForEach-Object {
+        if ($_ -match "^$Name=") {
+            $found = $true
+            "$Name=$Value"
+        } else {
+            $_
+        }
+    })
+    if (-not $found) { $updated += "$Name=$Value" }
+    [IO.File]::WriteAllLines((Join-Path (Get-Location).Path ".env"), [string[]]$updated, [Text.UTF8Encoding]::new($false))
+}
+Set-EnvSetting "LORE_PUBLIC_URL" $PublicUrl
+Set-EnvSetting "LORE_PUBLIC_HOST" $PublicHost
+Set-EnvSetting "LORE_PUBLIC_SCHEME" $Scheme
+Set-EnvSetting "LORE_AUTH_PUBLIC_URL" $AuthUrl
+Set-EnvSetting "LORE_PUBLIC_ADDRESS" $(if ($Scheme -eq "https") { ([Uri]$PublicUrl).Authority } else { $PublicUrl })
+Set-EnvSetting "SECURE_COOKIES" $(if ($Scheme -eq "https") { "true" } else { "false" })
+foreach ($name in @(
+    "LORE_LDAP_URL", "LORE_LDAP_BASE_DN", "LORE_LDAP_BIND_DN", "LORE_LDAP_BIND_PASSWORD",
+    "LORE_LDAP_USERNAME_ATTRIBUTE", "LORE_LDAP_STARTTLS", "LORE_LDAP_INSECURE_SKIP_VERIFY", "LORE_LDAP_TIMEOUT",
+    "LORE_SMTP_HOST", "LORE_SMTP_PORT", "LORE_SMTP_FROM", "LORE_SMTP_FROM_NAME",
+    "LORE_SMTP_USERNAME", "LORE_SMTP_PASSWORD", "LORE_SMTP_STARTTLS", "LORE_SMTP_SSL",
+    "LORE_DATA_ROOT", "LORE_PROXY_BIND"
+)) {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if ($value) { Set-EnvSetting $name $value }
+}
 
 $generated = "data/generated"
 New-Item -ItemType Directory -Force -Path "$generated/caddy", "data/postgres", "data/lore", "data/control-plane", "data/caddy" | Out-Null
@@ -87,7 +118,11 @@ if ($env:LORE_SMTP_HOST) {
         user = $env:LORE_SMTP_USERNAME
         password = $env:LORE_SMTP_PASSWORD
     }
+    $realm.verifyEmail = $true
     $realm.resetPasswordAllowed = $true
+} else {
+    $realm.verifyEmail = $false
+    $realm.resetPasswordAllowed = $false
 }
 if ($env:LORE_LDAP_URL) {
     $startTls = $(if ($env:LORE_LDAP_STARTTLS) { $env:LORE_LDAP_STARTTLS } else { "false" })
@@ -106,6 +141,15 @@ if ($env:LORE_LDAP_URL) {
     }
     $provider = $providerJson | ConvertFrom-Json
     $realm.components = @{ "org.keycloak.storage.UserStorageProvider" = @($provider) }
+    $adHost = ([Uri]$env:LORE_LDAP_URL).DnsSafeHost
+    if (-not $adHost.Contains(".")) {
+        $adAddress = Resolve-DnsName $adHost -Type A -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty IPAddress
+        if ($adAddress) {
+            Set-EnvSetting "LORE_AD_HOST" $adHost
+            Set-EnvSetting "LORE_AD_IP" $adAddress
+        }
+    }
 }
 $realm | ConvertTo-Json -Depth 100 | Write-Utf8NoBom "$generated/lore-realm.json"
 Remove-Item "$generated/caddy/auth.conf" -ErrorAction SilentlyContinue
@@ -142,7 +186,7 @@ if ($localCa) {
 }
 & docker @composeFiles @arguments
 if ($LASTEXITCODE -ne 0) { throw "Docker Compose failed" }
-& docker @composeFiles exec -T keycloak bash -c 'set -e; KC=/opt/keycloak/bin/kcadm.sh; "$KC" config credentials --server http://127.0.0.1:8080/auth --realm master --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD"; "$KC" add-roles -r lore --uusername service-account-lore-control-plane --cclientid realm-management --rolename manage-realm'
+& docker @composeFiles exec -T keycloak bash -c 'set -e; KC=/opt/keycloak/bin/kcadm.sh; "$KC" config credentials --server http://127.0.0.1:8080/auth --realm master --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD"; "$KC" add-roles -r lore --uusername service-account-lore-control-plane --cclientid realm-management --rolename manage-realm; "$KC" add-roles -r lore --uusername service-account-lore-control-plane --cclientid realm-management --rolename manage-users'
 if ($LASTEXITCODE -ne 0) { throw "Keycloak service account configuration failed" }
 
 Write-Host "`nLore is ready.`nWebUI: $PublicUrl`nKeycloak: $AuthUrl`nAdministrator: admin`nInitial administrator password: $($settings.LORE_ADMIN_PASSWORD)`nData: $PSScriptRoot/data"
