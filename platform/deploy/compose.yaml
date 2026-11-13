@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: lore
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lore-dev-only}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run setup.sh or setup.ps1 first}
       POSTGRES_DB: lore
     volumes:
       - ${LORE_DATA_ROOT:-./data}/postgres:/var/lib/postgresql
@@ -18,22 +18,32 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:26.4
     restart: unless-stopped
-    command: ["start-dev", "--import-realm", "--health-enabled=true"]
+    # Production mode behind the proxy: Caddy or an external reverse proxy terminates TLS.
+    command: ["start", "--import-realm", "--health-enabled=true"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
-      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin-dev-only}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Run setup.sh or setup.ps1 first}
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
       KC_DB_USERNAME: lore
-      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-lore-dev-only}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:?Run setup.sh or setup.ps1 first}
       KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_CACHE: local
+      # The realm import resolves ${...} placeholders from these, so the generated realm
+      # file holds no secrets. configure-realm.sh applies them to an existing realm.
+      LORE_ADMIN_PASSWORD: ${LORE_ADMIN_PASSWORD:?Run setup.sh or setup.ps1 first}
+      LORE_SERVICE_CLIENT_SECRET: ${LORE_SERVICE_CLIENT_SECRET:?Run setup.sh or setup.ps1 first}
+      LORE_LDAP_BIND_PASSWORD: ${LORE_LDAP_BIND_PASSWORD:-}
+      LORE_SMTP_PASSWORD: ${LORE_SMTP_PASSWORD:-}
       KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-${LORE_AUTH_PUBLIC_URL:-${LORE_PUBLIC_URL:-http://host.docker.internal:8080}/auth}}
       KC_HTTP_RELATIVE_PATH: /auth
     extra_hosts:
       - "host.docker.internal:host-gateway"
       - "${LORE_AD_HOST:-localhost}:${LORE_AD_IP:-127.0.0.1}"
     volumes:
-      - ${LORE_REALM_FILE:-./data/generated/lore-realm.json}:/opt/keycloak/data/import/lore-realm.json:ro
+      - ${LORE_REALM_FILE:-${LORE_DATA_ROOT:-./data}/generated/lore-realm.json}:/opt/keycloak/data/import/lore-realm.json:ro
+      - ./keycloak/configure-realm.sh:/opt/lore/configure-realm.sh:ro
     healthcheck:
       test:
         - CMD-SHELL
@@ -48,12 +58,15 @@ services:
         condition: service_healthy
 
   control-plane:
+    # Published image when LORE_CONTROL_PLANE_IMAGE names one (setup pulls it); otherwise
+    # built from this checkout.
+    image: ${LORE_CONTROL_PLANE_IMAGE:-lore-platform-control-plane:local}
     restart: unless-stopped
     build:
       context: ../..
       dockerfile: platform/Dockerfile
     environment:
-      DATABASE_URL: postgres://lore:${POSTGRES_PASSWORD:-lore-dev-only}@postgres:5432/lore?sslmode=disable
+      DATABASE_URL: postgres://lore:${POSTGRES_PASSWORD:?Run setup.sh or setup.ps1 first}@postgres:5432/lore?sslmode=disable
       OIDC_ISSUER: ${KEYCLOAK_PUBLIC_URL:-${LORE_AUTH_PUBLIC_URL:-${LORE_PUBLIC_URL:-http://host.docker.internal:8080}/auth}}/realms/lore
       OIDC_INTERNAL_ISSUER: http://keycloak:8080/auth/realms/lore
       OIDC_CLIENT_ID: lore-web
@@ -67,7 +80,7 @@ services:
       LORE_REPOSITORY_ADDR: lore:41337
       LORE_SERVICE_TOKEN_URL: http://keycloak:8080/auth/realms/lore/protocol/openid-connect/token
       LORE_SERVICE_CLIENT_ID: lore-control-plane
-      LORE_SERVICE_CLIENT_SECRET: ${LORE_SERVICE_CLIENT_SECRET:-lore-service-dev-only}
+      LORE_SERVICE_CLIENT_SECRET: ${LORE_SERVICE_CLIENT_SECRET:?Run setup.sh or setup.ps1 first}
       LORE_GRPC_SECURE: "false"
       LORE_TOKEN_EXCHANGE_ISSUER: ${LORE_EXCHANGE_PUBLIC_URL:-${LORE_PUBLIC_URL:-http://host.docker.internal:8080}}/web/v1/lore-oidc
       LORE_TOKEN_SIGNING_KEY_FILE: ${LORE_TOKEN_SIGNING_KEY_FILE:-/data/token-exchange-signing.pem}
@@ -79,6 +92,10 @@ services:
       LORE_LDAP_STARTTLS: ${LORE_LDAP_STARTTLS:-}
       LORE_LDAP_INSECURE_SKIP_VERIFY: ${LORE_LDAP_INSECURE_SKIP_VERIFY:-}
       LORE_LDAP_TIMEOUT: ${LORE_LDAP_TIMEOUT:-}
+      # How often Active Directory groups and account status are re-read, and how long
+      # the last known groups are trusted while AD can't be reached.
+      LORE_LDAP_REFRESH: ${LORE_LDAP_REFRESH:-5m}
+      LORE_LDAP_OUTAGE_GRACE: ${LORE_LDAP_OUTAGE_GRACE:-8h}
     expose:
       - "8080"
       - "9090"
@@ -94,13 +111,14 @@ services:
         condition: service_healthy
 
   lore:
+    image: ${LORE_SERVER_IMAGE:-lore-platform-server:local}
     restart: unless-stopped
     build:
       context: ../..
       dockerfile: lore-server/Dockerfile
     volumes:
       - ${LORE_DATA_ROOT:-./data}/lore:/data
-      - ${LORE_CONFIG_FILE:-./data/generated/lore.toml}:/etc/lore/config/docker.toml:ro
+      - ${LORE_CONFIG_FILE:-${LORE_DATA_ROOT:-./data}/generated/lore.toml}:/etc/lore/config/docker.toml:ro
     ports:
       - "41337:41337/tcp"
       - "41337:41337/udp"

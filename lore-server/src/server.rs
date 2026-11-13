@@ -199,6 +199,9 @@ fn server_runtime(settings: &Settings) -> tokio::runtime::Handle {
 pub fn server_main(config: ServerConfig) -> Result<()> {
     set_fallback_user_agent_product("lore-server".to_string());
     assume_server_policies();
+    // The server's endpoints come from its own configuration, so it may use http+insecure
+    // to reach a service on a private network; clients never enable this.
+    lore_transport::auth::ucs_auth::trust_configured_endpoints();
 
     let cli = Cli::parse();
     let (settings, settings_hash) = Settings::load(cli.config.as_deref(), cli.env.as_deref())?;

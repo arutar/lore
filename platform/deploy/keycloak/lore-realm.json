@@ -18,13 +18,45 @@
       "publicClient": true,
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
-      "redirectUris": ["http://localhost:8080/*", "http://host.docker.internal:8080/*"],
-      "webOrigins": ["http://localhost:8080", "http://host.docker.internal:8080"],
-      "defaultClientScopes": ["openid", "profile", "email", "groups"],
+      "redirectUris": [
+        "http://localhost:8080/*",
+        "http://host.docker.internal:8080/*"
+      ],
+      "webOrigins": [
+        "http://localhost:8080",
+        "http://host.docker.internal:8080"
+      ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
         "post.logout.redirect.uris": "http://localhost:8080/##http://host.docker.internal:8080/"
-      }
+      },
+      "protocolMappers": [
+        {
+          "name": "Directory account ID",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "LDAP_ID",
+            "claim.name": "ldap_id",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        },
+        {
+          "name": "Groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
     },
     {
       "clientId": "lore-native",
@@ -33,11 +65,23 @@
       "consentRequired": false,
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
-      "defaultClientScopes": ["openid", "profile", "groups"],
       "attributes": {
         "oauth2.device.authorization.grant.enabled": "true"
       },
       "protocolMappers": [
+        {
+          "name": "Directory account ID",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "LDAP_ID",
+            "claim.name": "ldap_id",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        },
         {
           "name": "Control plane exchange domain",
           "protocol": "openid-connect",
@@ -59,6 +103,18 @@
             "access.token.claim": "true",
             "id.token.claim": "false"
           }
+        },
+        {
+          "name": "Groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
         }
       ]
     },
@@ -69,7 +125,7 @@
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
-      "secret": "lore-service-dev-only",
+      "secret": "${LORE_SERVICE_CLIENT_SECRET}",
       "protocolMappers": [
         {
           "name": "Lore server audience",
@@ -96,29 +152,6 @@
       ]
     }
   ],
-  "clientScopes": [
-    {
-      "name": "groups",
-      "protocol": "openid-connect",
-      "attributes": {
-        "include.in.token.scope": "true",
-        "display.on.consent.screen": "false"
-      },
-      "protocolMappers": [
-        {
-          "name": "groups",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-group-membership-mapper",
-          "config": {
-            "claim.name": "groups",
-            "full.path": "false",
-            "access.token.claim": "true",
-            "id.token.claim": "true"
-          }
-        }
-      ]
-    }
-  ],
   "users": [
     {
       "username": "admin",
@@ -127,11 +160,13 @@
       "email": "admin@example.invalid",
       "firstName": "Lore",
       "lastName": "Administrator",
-      "realmRoles": ["default-roles-lore"],
+      "realmRoles": [
+        "default-roles-lore"
+      ],
       "credentials": [
         {
           "type": "password",
-          "value": "admin-dev-only",
+          "value": "${LORE_ADMIN_PASSWORD}",
           "temporary": false
         }
       ]

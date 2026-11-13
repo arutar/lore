@@ -11,12 +11,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
-	"github.com/arutar/lore/platform/control-plane/internal/directory"
 	"github.com/arutar/lore/platform/control-plane/internal/model"
 	"github.com/arutar/lore/platform/control-plane/internal/store"
 )
@@ -28,10 +28,6 @@ const (
 	verifierCookie = "lore_oidc_verifier"
 )
 
-type GroupDirectory interface {
-	GroupIDs(ctx context.Context, username string) ([]string, error)
-}
-
 type AuthConfig struct {
 	Issuer                string
 	InternalIssuer        string
@@ -42,7 +38,19 @@ type AuthConfig struct {
 	SecureCookies         bool
 	SessionTTL            time.Duration
 	BootstrapAdmin        string
-	GroupDirectory        GroupDirectory
+	// Directory reads Active Directory accounts; nil when LDAP isn't configured.
+	Directory DirectoryAccounts
+	// DirectoryLinks finds an account's directory link when the token lacks ldap_id.
+	DirectoryLinks DirectoryLinks
+	// DirectoryRefresh is how old a directory account's groups may get before they're
+	// read again; DirectoryOutageGrace how long they're still trusted while LDAP is down.
+	DirectoryRefresh     time.Duration
+	DirectoryOutageGrace time.Duration
+	// Audience must appear in every bearer token; NativeClientID and ServiceClientID are
+	// the only clients whose tokens are accepted as bearer tokens.
+	Audience        string
+	NativeClientID  string
+	ServiceClientID string
 }
 
 type Authenticator struct {
@@ -55,6 +63,8 @@ type Authenticator struct {
 	tokenExchange      *TokenExchange
 	oauth              oauth2.Config
 	endSessionEndpoint string
+	// directoryAttempts remembers when each account's directory state was last requested.
+	directoryAttempts sync.Map
 }
 
 type sessionContext struct {
@@ -88,15 +98,21 @@ func NewAuthenticator(ctx context.Context, store store.Store, config AuthConfig)
 		return nil, err
 	}
 	auth.endSessionEndpoint = endpoints.EndSession
+	audience := config.Audience
+	if audience == "" {
+		audience = defaultAudience
+	}
 	auth.verifier = provider.Verifier(&oidc.Config{ClientID: config.ClientID})
-	auth.serviceVerifier = provider.Verifier(&oidc.Config{SkipClientIDCheck: true})
-	auth.logoutVerifier = provider.Verifier(&oidc.Config{SkipClientIDCheck: true, SkipExpiryCheck: true})
+	auth.serviceVerifier = provider.Verifier(&oidc.Config{ClientID: audience})
+	// Logout accepts expired tokens: a saved sign-in is usually removed long after its
+	// last access token expired. Audience and client are still checked.
+	auth.logoutVerifier = provider.Verifier(&oidc.Config{ClientID: audience, SkipExpiryCheck: true})
 	endpoint := provider.Endpoint()
 	if config.InternalIssuer != "" {
 		keys := oidc.NewRemoteKeySet(ctx, config.InternalIssuer+"/protocol/openid-connect/certs")
 		auth.verifier = oidc.NewVerifier(config.Issuer, keys, &oidc.Config{ClientID: config.ClientID})
-		auth.serviceVerifier = oidc.NewVerifier(config.Issuer, keys, &oidc.Config{SkipClientIDCheck: true})
-		auth.logoutVerifier = oidc.NewVerifier(config.Issuer, keys, &oidc.Config{SkipClientIDCheck: true, SkipExpiryCheck: true})
+		auth.serviceVerifier = oidc.NewVerifier(config.Issuer, keys, &oidc.Config{ClientID: audience})
+		auth.logoutVerifier = oidc.NewVerifier(config.Issuer, keys, &oidc.Config{ClientID: audience, SkipExpiryCheck: true})
 		endpoint.TokenURL = config.InternalIssuer + "/protocol/openid-connect/token"
 	}
 	auth.oauth = oauth2.Config{
@@ -104,7 +120,9 @@ func NewAuthenticator(ctx context.Context, store store.Store, config AuthConfig)
 		ClientSecret: config.ClientSecret,
 		RedirectURL:  config.RedirectURL,
 		Endpoint:     endpoint,
-		Scopes:       []string{oidc.ScopeOpenID, "profile", "email", "groups"},
+		// No "groups" scope: the realm maps groups on the client itself, and asking for a
+		// scope the realm doesn't define fails the sign-in with invalid_scope.
+		Scopes: []string{oidc.ScopeOpenID, "profile", "email"},
 	}
 	return auth, nil
 }
@@ -128,10 +146,25 @@ func (a *Authenticator) middleware(next http.Handler) http.Handler {
 			return
 		}
 		user, err := a.store.GetUser(r.Context(), session.UserID)
-		if err != nil || user.Disabled {
+		if err != nil || !user.Active() {
 			clearCookie(w, sessionCookie, a.config.SecureCookies)
 			next.ServeHTTP(w, r)
 			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/web/v1/") {
+			user, err = a.refresh(r.Context(), user)
+			if err != nil {
+				// The directory is down past the grace period: serve the request as a
+				// guest rather than with groups that may have been revoked. The session
+				// stays, so access returns as soon as the directory answers again.
+				next.ServeHTTP(w, r)
+				return
+			}
+			if !user.Active() {
+				clearCookie(w, sessionCookie, a.config.SecureCookies)
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
 		ctx := context.WithValue(r.Context(), userContextKey, sessionContext{session: session, user: user})
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -209,56 +242,23 @@ func (a *Authenticator) callback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "id_token_invalid", "OIDC ID token is invalid")
 		return
 	}
-	var claims struct {
-		Username string   `json:"preferred_username"`
-		Email    string   `json:"email"`
-		Name     string   `json:"name"`
-		Groups   []string `json:"groups"`
-		Source   string   `json:"idp"`
-	}
+	var claims identityClaims
 	if err := idToken.Claims(&claims); err != nil {
 		writeError(w, http.StatusUnauthorized, "claims_invalid", "OIDC claims are invalid")
 		return
 	}
-	if claims.Username == "" {
-		claims.Username = claims.Email
-	}
-	if claims.Username == "" {
-		claims.Username = idToken.Subject
-	}
-	if claims.Name == "" {
-		claims.Name = claims.Username
-	}
-	if claims.Source == "" {
-		claims.Source = "oidc"
-	}
-	groups, err := a.groupIDs(r.Context(), claims.Username, claims.Groups)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "directory_sync_failed", "Couldn't read directory groups")
+	claims.Subject = idToken.Subject
+	user, err := a.signIn(r.Context(), claims)
+	if errors.Is(err, ErrDirectoryUnavailable) {
+		writeError(w, http.StatusServiceUnavailable, "directory_unavailable", "Active Directory is unavailable. Try again later.")
 		return
 	}
-	user, err := a.store.UpsertUser(r.Context(), model.User{
-		ID:          idToken.Subject,
-		Username:    claims.Username,
-		Email:       claims.Email,
-		DisplayName: claims.Name,
-		Role:        model.RoleUser,
-		Groups:      groups,
-		Source:      claims.Source,
-	})
 	if err != nil {
 		log.Printf("OIDC user sync failed: %v", err)
 		writeError(w, http.StatusInternalServerError, "user_sync_failed", "Couldn't synchronize the account")
 		return
 	}
-	if a.config.BootstrapAdmin != "" && (user.ID == a.config.BootstrapAdmin || user.Username == a.config.BootstrapAdmin) && user.Role != model.RoleAdmin {
-		user, err = a.store.UpdateUser(r.Context(), user.ID, user.ID, model.RoleAdmin, user.Disabled)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "bootstrap_failed", "Couldn't initialize the administrator")
-			return
-		}
-	}
-	if user.Disabled {
+	if !user.Active() {
 		writeError(w, http.StatusForbidden, "account_disabled", "Account is disabled")
 		return
 	}
@@ -272,14 +272,40 @@ func (a *Authenticator) callback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
+// LoginTokens authenticates only tokens that the identity provider issued at sign-in.
+// The token exchange must use it for subject tokens: accepting the exchange's own
+// repository-scoped tokens there would let a five-minute token for one repository be
+// renewed forever and traded for tokens to every other repository of the same user.
+func (a *Authenticator) LoginTokens() BearerAuthenticator {
+	return loginTokens{authenticator: a}
+}
+
+type loginTokens struct{ authenticator *Authenticator }
+
+func (l loginTokens) AuthenticateBearer(ctx context.Context, token string) (model.User, error) {
+	return l.authenticator.authenticateLogin(ctx, token)
+}
+
+// AuthenticateBearer accepts a login token or a repository-scoped token that the token
+// exchange issued. It serves the Lore server's calls on behalf of a user; it must never
+// authenticate a subject token for the exchange itself, see LoginTokens.
 func (a *Authenticator) AuthenticateBearer(ctx context.Context, token string) (model.User, error) {
-	if a.serviceVerifier != nil {
-		if user, err := a.authenticateOIDCBearer(ctx, token); err == nil {
-			return user, nil
-		}
+	user, err := a.authenticateLogin(ctx, token)
+	if err == nil || !errors.Is(err, errNotLoginToken) {
+		return user, err
 	}
 	if a.tokenExchange != nil {
-		return a.tokenExchange.authenticate(ctx, token)
+		user, err := a.tokenExchange.authenticate(ctx, token)
+		if err != nil {
+			return model.User{}, err
+		}
+		if user, err = a.refresh(ctx, user); err != nil {
+			return model.User{}, err
+		}
+		if !user.Active() {
+			return model.User{}, ErrAccountInactive
+		}
+		return user, nil
 	}
 	return model.User{}, errors.New("bearer token is invalid")
 }
@@ -292,72 +318,15 @@ func (a *Authenticator) AuthenticateBearerForLogout(ctx context.Context, token s
 	if err != nil || idToken.Subject == "" {
 		return "", errors.New("logout token is invalid")
 	}
+	var claims identityClaims
+	if err := idToken.Claims(&claims); err != nil || claims.AuthorizedParty != a.bearerClients()[0] {
+		return "", errors.New("logout token wasn't issued to the native client")
+	}
 	return idToken.Subject, nil
-}
-
-func (a *Authenticator) groupIDs(ctx context.Context, username string, fallback []string) ([]string, error) {
-	if a.config.GroupDirectory == nil || strings.Contains(username, "@") {
-		return fallback, nil
-	}
-	groups, err := a.config.GroupDirectory.GroupIDs(ctx, username)
-	if errors.Is(err, directory.ErrUserNotFound) {
-		return fallback, nil
-	}
-	return groups, err
 }
 
 func (a *Authenticator) SetTokenExchange(exchange *TokenExchange) {
 	a.tokenExchange = exchange
-}
-
-func (a *Authenticator) authenticateOIDCBearer(ctx context.Context, token string) (model.User, error) {
-	idToken, err := a.serviceVerifier.Verify(ctx, token)
-	if err != nil {
-		return model.User{}, err
-	}
-	user, err := a.store.GetUser(ctx, idToken.Subject)
-	if err == nil {
-		if user.Disabled {
-			return model.User{}, errors.New("account is disabled")
-		}
-		return user, nil
-	}
-	if !errors.Is(err, store.ErrNotFound) {
-		return model.User{}, err
-	}
-	var claims struct {
-		Username string   `json:"preferred_username"`
-		Email    string   `json:"email"`
-		Name     string   `json:"name"`
-		Groups   []string `json:"groups"`
-	}
-	if err := idToken.Claims(&claims); err != nil {
-		return model.User{}, err
-	}
-	if claims.Username == "" {
-		claims.Username = claims.Email
-	}
-	if claims.Username == "" {
-		claims.Username = idToken.Subject
-	}
-	if claims.Name == "" {
-		claims.Name = claims.Username
-	}
-	groups, err := a.groupIDs(ctx, claims.Username, claims.Groups)
-	if err != nil {
-		return model.User{}, err
-	}
-	user, err = a.store.UpsertUser(ctx, model.User{
-		ID: idToken.Subject, Username: claims.Username, Email: claims.Email,
-		DisplayName: claims.Name, Role: model.RoleUser, Groups: groups, Source: "oidc",
-	})
-	if err != nil {
-		return model.User{}, err
-	}
-	if a.config.BootstrapAdmin != "" && (user.ID == a.config.BootstrapAdmin || user.Username == a.config.BootstrapAdmin) && user.Role != model.RoleAdmin {
-		return a.store.UpdateUser(ctx, user.ID, user.ID, model.RoleAdmin, false)
-	}
-	return user, nil
 }
 
 func (a *Authenticator) devLogin(w http.ResponseWriter, r *http.Request, user model.User) {

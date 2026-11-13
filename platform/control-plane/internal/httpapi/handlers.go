@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"google.golang.org/grpc/codes"
@@ -19,16 +20,17 @@ import (
 
 	"github.com/arutar/lore/platform/control-plane/internal/model"
 	"github.com/arutar/lore/platform/control-plane/internal/policy"
+	"github.com/arutar/lore/platform/control-plane/internal/store"
 )
 
-var repositorySegment = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]*$`)
 var repositoryID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 type repositoryInput struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
-	Public      bool   `json:"public"`
+	// Public is optional on update: an omitted field leaves visibility unchanged.
+	Public *bool `json:"public"`
 }
 
 type userInput struct {
@@ -46,6 +48,7 @@ type localUserInput struct {
 type settingsInput struct {
 	RegistrationEnabled bool   `json:"registrationEnabled"`
 	Theme               string `json:"theme"`
+	Language            string `json:"language"`
 }
 
 func (s *Server) publicConfig(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +65,7 @@ func (s *Server) publicConfig(w http.ResponseWriter, r *http.Request) {
 		"externalUrl":         s.config.ExternalURL,
 		"nativeRepositoryUrl": s.config.NativeRepositoryURL,
 		"theme":               settings.Theme,
+		"language":            settings.Language,
 	})
 }
 
@@ -126,7 +130,7 @@ func (s *Server) catalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, _ := currentUser(r.Context())
-	page, err := s.store.Catalog(r.Context(), user, r.URL.Query().Get("cursor"), limit)
+	page, err := s.store.Catalog(r.Context(), user, searchQuery(r), r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -147,7 +151,7 @@ func (s *Server) grants(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": grants})
+	writeJSON(w, http.StatusOK, map[string]any{"items": s.labelGrants(r.Context(), grants)})
 }
 
 func (s *Server) setGrant(w http.ResponseWriter, r *http.Request) {
@@ -165,6 +169,12 @@ func (s *Server) setGrant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_grant", "Grant is invalid")
 		return
 	}
+	resolved, err := s.resolveSubject(r.Context(), grant)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "directory_unavailable", "Couldn't validate the user or group")
+		return
+	}
+	grant.Subject = resolved
 	valid, err := s.validGrantSubject(r.Context(), grant)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "directory_unavailable", "Couldn't validate the user or group")
@@ -252,6 +262,7 @@ func (s *Server) createLocalUser(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	s.recordAudit(r, model.AuditEvent{ActorID: actor.ID, Action: "user.create", TargetType: "user", TargetID: user.ID, After: string(user.Role)})
 	writeJSON(w, http.StatusCreated, user)
 }
 
@@ -299,31 +310,25 @@ func (s *Server) provisionADUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "ad_lookup_failed", "Couldn't look up the Active Directory account")
 		return
 	}
-	lookupName := profile.Email
-	if lookupName == "" {
-		lookupName = profile.Username
+	if profile.ID == "" {
+		writeError(w, http.StatusBadGateway, "ad_lookup_failed", "The Active Directory account has no objectGUID")
+		return
 	}
-	user, err := s.config.Accounts.GetFederatedUser(r.Context(), lookupName)
-	if errors.Is(err, ErrAccountNotFound) && lookupName != profile.Username {
-		user, err = s.config.Accounts.GetFederatedUser(r.Context(), profile.Username)
-	}
+	user, err := s.config.Accounts.GetFederatedUser(r.Context(), profile.Username)
 	if errors.Is(err, ErrAccountNotFound) {
 		if syncErr := s.config.Accounts.SyncFederatedUsers(r.Context()); syncErr != nil {
 			log.Printf("AD account synchronization failed: %v", syncErr)
 			writeError(w, http.StatusBadGateway, "ad_sync_failed", "Couldn't synchronize Active Directory accounts")
 			return
 		}
-		user, err = s.config.Accounts.GetFederatedUser(r.Context(), lookupName)
-		if errors.Is(err, ErrAccountNotFound) && lookupName != profile.Username {
-			user, err = s.config.Accounts.GetFederatedUser(r.Context(), profile.Username)
-		}
+		user, err = s.config.Accounts.GetFederatedUser(r.Context(), profile.Username)
 	}
 	if errors.Is(err, ErrAccountNotFound) {
 		writeError(w, http.StatusNotFound, "account_not_found", "The Active Directory account wasn't found in the identity provider after synchronization")
 		return
 	}
 	if errors.Is(err, ErrNotFederated) {
-		writeError(w, http.StatusBadRequest, "not_ad_account", "The account is local, not an Active Directory account")
+		writeError(w, http.StatusConflict, "not_ad_account", "A local account already uses this name. Rename or remove it before adding the Active Directory account.")
 		return
 	}
 	if err != nil {
@@ -331,20 +336,31 @@ func (s *Server) provisionADUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "ad_lookup_failed", "Couldn't look up the Active Directory account")
 		return
 	}
-	groups, err := s.config.Directory.GroupIDs(r.Context(), profile.Username)
-	if errors.Is(err, directory.ErrUserNotFound) {
-		writeError(w, http.StatusNotFound, "account_not_found", "The Active Directory account wasn't found in LDAP")
+	// The identity provider account must be linked to exactly this directory entry;
+	// otherwise grants given now would follow a different person.
+	if user.DirectoryID != profile.ID {
+		log.Printf("AD provisioning: identity provider account %s is linked to %q, LDAP entry is %q", user.ID, user.DirectoryID, profile.ID)
+		writeError(w, http.StatusConflict, "ad_link_mismatch", "The identity provider account is linked to a different Active Directory entry")
 		return
 	}
+	account, err := s.config.Directory.LookupAccount(r.Context(), profile.ID)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "ad_lookup_failed", "Couldn't read the user's Active Directory groups")
 		return
 	}
-	user.Groups = groups
+	now := time.Now().UTC()
+	user.Groups = account.Groups
+	user.DirectoryDisabled = account.Disabled
+	user.GroupsSyncedAt = &now
+	_, existsErr := s.store.GetUser(r.Context(), user.ID)
 	user, err = s.store.UpsertUser(r.Context(), user)
 	if err != nil {
 		writeStoreError(w, err)
 		return
+	}
+	if errors.Is(existsErr, store.ErrNotFound) {
+		actor, _ := currentUser(r.Context())
+		s.recordAudit(r, model.AuditEvent{ActorID: actor.ID, Action: "user.provision", TargetType: "user", TargetID: user.ID})
 	}
 	writeJSON(w, http.StatusCreated, user)
 }
@@ -355,7 +371,7 @@ func (s *Server) users(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_page_size", "Page size must be between 1 and 100")
 		return
 	}
-	page, err := s.store.ListUsers(r.Context(), r.URL.Query().Get("cursor"), limit)
+	page, err := s.store.ListUsers(r.Context(), searchQuery(r), r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -407,7 +423,7 @@ func (s *Server) repositories(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_page_size", "Page size must be between 1 and 100")
 		return
 	}
-	page, err := s.store.ListRepositories(r.Context(), r.URL.Query().Get("cursor"), limit)
+	page, err := s.store.ListRepositories(r.Context(), searchQuery(r), r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -452,7 +468,19 @@ func (s *Server) createRepository(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	desired := model.Repository{ID: id, Name: input.Name, Description: input.Description, OwnerID: actor.ID}
+	public := input.Public != nil && *input.Public
+	desired := model.Repository{ID: id, Name: input.Name, Description: input.Description, OwnerID: actor.ID, Public: public}
+	// Refuse a name that another repository holds before Lore creates anything, so a
+	// conflict can't leave a repository in Lore that the control plane doesn't know.
+	taken, err := s.store.RepositoryNameTaken(r.Context(), desired.Name, desired.ID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if taken {
+		writeError(w, http.StatusConflict, "conflict", "Repository already exists")
+		return
+	}
 	if creator := s.config.Repositories; creator != nil {
 		if err := creator.CreateRepository(r.Context(), desired); err != nil {
 			switch status.Code(err) {
@@ -471,14 +499,7 @@ func (s *Server) createRepository(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
-	if input.Public {
-		grant := model.Grant{RepositoryID: id, SubjectType: model.SubjectAnonymous, Permission: model.PermissionRead}
-		if err := s.store.SetGrant(r.Context(), actor.ID, grant); err != nil {
-			writeStoreError(w, err)
-			return
-		}
-	}
-	repository.Public = input.Public
+	repository.Public = public
 	writeJSON(w, http.StatusCreated, repository)
 }
 
@@ -500,22 +521,11 @@ func (s *Server) updateRepository(w http.ResponseWriter, r *http.Request) {
 	}
 	existing.Name = input.Name
 	existing.Description = input.Description
-	repository, err := s.store.UpdateRepository(r.Context(), actor.ID, existing)
+	repository, err := s.store.UpdateRepository(r.Context(), actor.ID, existing, input.Public)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	grant := model.Grant{RepositoryID: repository.ID, SubjectType: model.SubjectAnonymous, Permission: model.PermissionRead}
-	if input.Public {
-		err = s.store.SetGrant(r.Context(), actor.ID, grant)
-	} else {
-		err = s.store.RemoveGrant(r.Context(), actor.ID, grant)
-	}
-	if err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	repository.Public = input.Public
 	writeJSON(w, http.StatusOK, repository)
 }
 
@@ -545,6 +555,13 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_theme", "Theme isn't supported")
 		return
 	}
+	if input.Language == "" {
+		input.Language = settings.Language
+	}
+	if !model.ValidLanguage(input.Language) {
+		writeError(w, http.StatusBadRequest, "invalid_language", "Language isn't supported")
+		return
+	}
 	actor, _ := currentUser(r.Context())
 	registrationChanged := settings.RegistrationEnabled != input.RegistrationEnabled
 	previousRegistration := settings.RegistrationEnabled
@@ -556,6 +573,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	settings.RegistrationEnabled = input.RegistrationEnabled
 	settings.Theme = input.Theme
+	settings.Language = input.Language
 	if err := s.store.UpdateSettings(r.Context(), actor.ID, settings); err != nil {
 		if registrationChanged && s.config.RegistrationRealm != nil {
 			_ = s.config.RegistrationRealm.SetRegistrationAllowed(r.Context(), previousRegistration)
@@ -572,16 +590,16 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_page_size", "Page size must be between 1 and 100")
 		return
 	}
-	var after int64
+	var before int64
 	if value := r.URL.Query().Get("cursor"); value != "" {
 		parsed, err := strconv.ParseInt(value, 10, 64)
 		if err != nil || parsed < 0 {
 			writeError(w, http.StatusBadRequest, "invalid_cursor", "Audit cursor is invalid")
 			return
 		}
-		after = parsed
+		before = parsed
 	}
-	page, err := s.store.ListAudit(r.Context(), after, limit)
+	page, err := s.store.ListAudit(r.Context(), before, limit)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -617,6 +635,15 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 	for index := range page.Items {
 		event := &page.Items[index]
 		event.ActorName = username(event.ActorID)
+		if event.SubjectType == model.SubjectUser {
+			event.SubjectName = username(event.Subject)
+		}
+		// Group grants store the objectGUID; show the group's name like the Access tab does.
+		if event.SubjectType == model.SubjectGroup {
+			if group, ok := s.groupName(r.Context(), event.Subject); ok {
+				event.SubjectName = group.Name
+			}
+		}
 		switch event.TargetType {
 		case "user":
 			event.TargetName = username(event.TargetID)
@@ -632,6 +659,14 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, page)
+}
+
+// recordAudit writes an audit event for a change that has already been applied. A failure
+// is logged instead of failing the request: the change itself can't be rolled back here.
+func (s *Server) recordAudit(r *http.Request, event model.AuditEvent) {
+	if err := s.store.RecordAudit(r.Context(), event); err != nil {
+		log.Printf("Audit event %s for %s wasn't recorded: %v", event.Action, event.TargetID, err)
+	}
 }
 
 func (s *Server) readableRepository(w http.ResponseWriter, r *http.Request) (model.Repository, []model.Grant, bool) {
@@ -666,17 +701,7 @@ func (s *Server) manageableRepository(w http.ResponseWriter, r *http.Request) (m
 	return repository, grants, true
 }
 
-func validRepositoryName(name string) bool {
-	if name == "" || len(name) > 256 {
-		return false
-	}
-	for _, segment := range strings.Split(name, "/") {
-		if !repositorySegment.MatchString(segment) {
-			return false
-		}
-	}
-	return true
-}
+func validRepositoryName(name string) bool { return model.ValidRepositoryName(name) }
 
 func newRepositoryID() (string, error) {
 	bytes := make([]byte, 16)

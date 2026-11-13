@@ -1,43 +1,103 @@
 #!/usr/bin/env sh
+# Restores a backup made by backup.sh (or backup.ps1) over the current installation.
+# Everything that can fail without touching data runs first; once the databases are being
+# replaced, any failure puts the previous databases and storage back.
 set -eu
 cd "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 BACKUP=${1:-}
 [ -n "$BACKUP" ] || { echo "Usage: restore.sh BACKUP [--yes]" >&2; exit 2; }
-for file in lore.dump keycloak.dump storage.tar manifest.json; do
+for file in lore.dump keycloak.dump storage.tar manifest.json SHA256SUMS; do
     [ -f "$BACKUP/$file" ] || { echo "Backup is incomplete: $file" >&2; exit 1; }
 done
+if command -v sha256sum >/dev/null 2>&1; then (cd "$BACKUP" && sha256sum -c --quiet SHA256SUMS); else (cd "$BACKUP" && shasum -a 256 -c --quiet SHA256SUMS); fi
+[ -f .env ] || { echo ".env is missing; run setup on this host first" >&2; exit 1; }
 if [ "${2:-}" != "--yes" ]; then
     printf 'Restore %s over the current databases and storage? [y/N] ' "$BACKUP"
     read answer
     [ "$answer" = "y" ] || exit 1
 fi
-if command -v sha256sum >/dev/null 2>&1; then (cd "$BACKUP" && sha256sum -c SHA256SUMS); else (cd "$BACKUP" && shasum -a 256 -c SHA256SUMS); fi
+
+# The data root comes from the environment or, as setup stores it, from .env.
+if [ -z "${LORE_DATA_ROOT:-}" ]; then
+    LORE_DATA_ROOT=$(sed -n 's/^LORE_DATA_ROOT=//p' .env | tail -n 1)
+fi
 DATA_ROOT=${LORE_DATA_ROOT:-./data}
 STAGING=$DATA_ROOT/.restore-new-$$
 PREVIOUS=$DATA_ROOT/.restore-old-$$
 STOPPED=false
+DATABASES_TOUCHED=false
+ENV_SAVED=false
+
+# Step 1: unpack and check the storage before anything is stopped or replaced.
+mkdir -p "$STAGING" "$PREVIOUS"
 cleanup() {
     result=$?
-    rm -rf "$STAGING"
+    trap - EXIT
     if [ "$result" -ne 0 ]; then
+        echo "Restore failed; putting the previous installation back" >&2
+        if [ "$DATABASES_TOUCHED" = true ]; then
+            for database in lore keycloak; do
+                if [ -f "$PREVIOUS/$database.dump" ]; then
+                    docker compose exec -T postgres pg_restore -U lore --clean --if-exists --single-transaction --dbname="$database" < "$PREVIOUS/$database.dump" ||
+                        echo "Couldn't roll back database $database; its pre-restore dump is kept in $PREVIOUS" >&2
+                fi
+            done
+        fi
         for directory in lore control-plane; do
-            if [ -d "$PREVIOUS/$directory" ] && [ ! -e "$DATA_ROOT/$directory" ]; then mv "$PREVIOUS/$directory" "$DATA_ROOT/$directory"; fi
+            if [ -d "$PREVIOUS/$directory" ]; then rm -rf "$DATA_ROOT/$directory"; mv "$PREVIOUS/$directory" "$DATA_ROOT/$directory"; fi
         done
+        if [ "$ENV_SAVED" = true ]; then cp "$PREVIOUS/env" .env; fi
     fi
-    if [ "$STOPPED" = true ]; then docker compose up -d --no-recreate --wait --wait-timeout 120 keycloak control-plane lore caddy; fi
+    rm -rf "$STAGING"
+    if [ "$result" -eq 0 ] || [ "$DATABASES_TOUCHED" = false ]; then
+        rm -rf "$PREVIOUS"
+    else
+        echo "Dumps of the databases as they were before the restore are kept in $PREVIOUS" >&2
+    fi
+    # Recreate rather than just start: restored secrets in .env must reach the containers.
+    if [ "$STOPPED" = true ]; then docker compose up -d --wait --wait-timeout 180 keycloak control-plane lore caddy || true; fi
+    exit "$result"
 }
-trap cleanup EXIT HUP INT TERM
-STOPPED=true
-docker compose stop caddy lore control-plane keycloak
-for database in lore keycloak; do
-    docker compose exec -T postgres pg_restore -U lore --clean --if-exists --dbname="$database" < "$BACKUP/$database.dump"
-done
-mkdir -p "$STAGING" "$PREVIOUS"
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
 tar -C "$STAGING" -xf "$BACKUP/storage.tar"
 for directory in lore control-plane; do
     [ -d "$STAGING/$directory" ] || { echo "Backup storage is missing $directory" >&2; exit 1; }
-    if [ -d "$DATA_ROOT/$directory" ]; then mv "$DATA_ROOT/$directory" "$PREVIOUS/$directory"; fi
 done
-for directory in lore control-plane; do mv "$STAGING/$directory" "$DATA_ROOT/$directory"; done
-rm -rf "$PREVIOUS"
+
+# Step 2: stop the services and keep a dump of the current databases for a rollback.
+STOPPED=true
+docker compose stop caddy lore control-plane keycloak
+for database in lore keycloak; do
+    docker compose exec -T postgres pg_dump -U lore --format=custom "$database" > "$PREVIOUS/$database.dump"
+done
+
+# Step 3: databases, each in one transaction that stops at the first error.
+DATABASES_TOUCHED=true
+for database in lore keycloak; do
+    docker compose exec -T postgres pg_restore -U lore --clean --if-exists --single-transaction --exit-on-error --dbname="$database" < "$BACKUP/$database.dump"
+done
+
+# Step 4: storage.
+for directory in lore control-plane; do
+    if [ -d "$DATA_ROOT/$directory" ]; then mv "$DATA_ROOT/$directory" "$PREVIOUS/$directory"; fi
+    mv "$STAGING/$directory" "$DATA_ROOT/$directory"
+done
+
+# Step 5: secrets that live in the restored Keycloak database. Host settings (URLs, data
+# root, the PostgreSQL password of this cluster) stay as they are.
+if [ -f "$BACKUP/env" ]; then
+    cp .env "$PREVIOUS/env"
+    ENV_SAVED=true
+    for key in KEYCLOAK_ADMIN_PASSWORD LORE_SERVICE_CLIENT_SECRET; do
+        value=$(sed -n "s/^$key=//p" "$BACKUP/env" | tail -n 1)
+        [ -n "$value" ] || continue
+        grep -v "^$key=" .env > .env.restore-$$ || true
+        printf '%s=%s\n' "$key" "$value" >> .env.restore-$$
+        chmod 600 .env.restore-$$
+        mv .env.restore-$$ .env
+    done
+else
+    echo "This backup has no settings file (made before it was added). If Keycloak sign-in fails after the restore, copy KEYCLOAK_ADMIN_PASSWORD and LORE_SERVICE_CLIENT_SECRET from the original host's .env." >&2
+fi
 printf 'Restore completed: %s\n' "$BACKUP"

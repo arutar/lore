@@ -1,0 +1,149 @@
+# SPDX-License-Identifier: MIT
+
+# Publishes a Lore Platform release when a platform-vX.Y.Z tag is pushed:
+#   - Windows client: MSI and ZIP (windows-client.yml, built and smoke-tested there)
+#   - Linux CLI built from this fork (the HTTP and sign-in changes live in the client)
+#   - server bundle: the deploy directory with compose.yaml pointing at this version's images
+#   - SHA256SUMS over everything
+# The container images themselves are published by platform-images.yml on the same tag.
+name: Platform Release
+
+on:
+  push:
+    tags: ["platform-v*"]
+
+permissions: {}
+
+concurrency:
+  group: platform-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$REF_NAME" | grep -qE '^platform-v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Release tags must look like platform-v1.2.3"; exit 1
+          fi
+          echo "version=${REF_NAME#platform-v}" >> "$GITHUB_OUTPUT"
+
+  windows:
+    name: Windows client
+    needs: version
+    permissions:
+      contents: read
+    uses: ./.github/workflows/windows-client.yml
+
+  linux-cli:
+    name: Linux CLI (${{ matrix.target }})
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-cli-${{ matrix.target }}
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # Ubuntu 22.04 keeps the glibc requirement low enough for current LTS distributions.
+      - name: Build
+        run: cargo build --release --locked -p lore-client --bin lore
+      - name: Package
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/lore dist/lore
+          ./dist/lore --version
+          tar -C dist -czf "lore-cli-$VERSION-$TARGET.tar.gz" --owner=0 --group=0 ./lore
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-cli-${{ matrix.target }}
+          path: lore-cli-*.tar.gz
+          if-no-files-found: error
+
+  server-bundle:
+    name: Server bundle
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Pack
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          OWNER: ${{ github.repository_owner }}
+        run: bash platform/deploy/make-bundle.sh "$VERSION" "ghcr.io/$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')" dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: server-bundle
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [version, windows, linux-cli, server-bundle]
+    runs-on: ubuntu-latest
+    environment: platform-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+      - name: Collect assets and checksums
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp "artifacts/windows-client-${GITHUB_SHA}/LoreClient-x64.msi" "release/LoreClient-$VERSION-x64.msi"
+          cp "artifacts/windows-client-${GITHUB_SHA}/LoreClient-win-x64.zip" "release/LoreClient-$VERSION-win-x64.zip"
+          cp artifacts/linux-cli-*/lore-cli-*.tar.gz release/
+          cp artifacts/server-bundle/* release/
+          (cd release && sha256sum * > SHA256SUMS)
+          cat release/SHA256SUMS
+      - name: Write release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          OWNER: ${{ github.repository_owner }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          owner=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
+          sed -e "s|{{VERSION}}|$VERSION|g" -e "s|{{OWNER}}|$owner|g" -e "s|{{REPOSITORY}}|$REPOSITORY|g" \
+            platform/docs/release-notes-template.md > notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" release/* --title "Lore Platform ${TAG#platform-v}" --notes-file notes.md

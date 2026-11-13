@@ -15,11 +15,13 @@
     "connectionUrl": ["__LORE_LDAP_URL__"],
     "usersDn": ["__LORE_LDAP_BASE_DN__"],
     "bindDn": ["__LORE_LDAP_BIND_DN__"],
-    "bindCredential": ["__LORE_LDAP_BIND_PASSWORD__"],
+    "bindCredential": ["${LORE_LDAP_BIND_PASSWORD}"],
     "connectionTimeout": ["60000"],
     "readTimeout": ["60000"],
     "startTls": ["__LORE_LDAP_STARTTLS__"],
     "useTruststoreSpi": ["__LORE_LDAP_USE_TRUSTSTORE__"],
-    "authType": ["simple"]
+    "authType": ["simple"],
+    "pagination": ["true"],
+    "changedSyncPeriod": ["300"]
   }
 }

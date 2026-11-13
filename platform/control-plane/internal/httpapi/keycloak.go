@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/oauth2/clientcredentials"
 
+	"github.com/arutar/lore/platform/control-plane/internal/directory"
 	"github.com/arutar/lore/platform/control-plane/internal/model"
 )
 
@@ -28,7 +29,10 @@ type RegistrationRealm interface {
 type AccountManager interface {
 	CreateLocalUser(ctx context.Context, email, displayName, password string) (model.User, error)
 	SetLocalUserEnabled(ctx context.Context, id string, enabled bool) error
+	// GetFederatedUser finds the identity provider account of a directory user by exact
+	// username or email; DirectoryID carries its LDAP_ID (objectGUID).
 	GetFederatedUser(ctx context.Context, username string) (model.User, error)
+	DirectoryLinks
 	SyncFederatedUsers(ctx context.Context) error
 	LogoutUser(ctx context.Context, id string) error
 }
@@ -156,49 +160,54 @@ func (a *KeycloakRealmAdmin) SetLocalUserEnabled(ctx context.Context, id string,
 	return nil
 }
 
+type keycloakAccount struct {
+	ID             string              `json:"id"`
+	Username       string              `json:"username"`
+	Email          string              `json:"email"`
+	FirstName      string              `json:"firstName"`
+	LastName       string              `json:"lastName"`
+	FederationLink string              `json:"federationLink"`
+	Enabled        bool                `json:"enabled"`
+	Attributes     map[string][]string `json:"attributes"`
+}
+
+// directoryID is the objectGUID Keycloak's LDAP provider stores for a federated account.
+func (k keycloakAccount) directoryID() string {
+	if k.FederationLink == "" {
+		return ""
+	}
+	if values := k.Attributes["LDAP_ID"]; len(values) > 0 {
+		return directory.NormalizeGUID(values[0])
+	}
+	return ""
+}
+
 func (a *KeycloakRealmAdmin) GetFederatedUser(ctx context.Context, username string) (model.User, error) {
 	username = strings.TrimSpace(username)
 	if username == "" || len(username) > 256 {
 		return model.User{}, ErrAccountNotFound
 	}
-	endpoint := a.realmURL + "/users?search=" + url.QueryEscape(username) + "&max=20"
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return model.User{}, err
-	}
-	response, err := a.client.Do(request)
-	if err != nil {
-		return model.User{}, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		return model.User{}, fmt.Errorf("Keycloak user lookup returned %s", response.Status)
-	}
-	var accounts []struct {
-		ID             string `json:"id"`
-		Username       string `json:"username"`
-		Email          string `json:"email"`
-		FirstName      string `json:"firstName"`
-		LastName       string `json:"lastName"`
-		FederationLink string `json:"federationLink"`
-		Enabled        bool   `json:"enabled"`
-	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1024*1024)).Decode(&accounts); err != nil {
-		return model.User{}, err
-	}
+	// Exact lookups: a substring search with a result limit can miss the account, and an
+	// exact username lookup also makes Keycloak import a directory account on first use.
+	var account keycloakAccount
 	found := false
-	for index, candidate := range accounts {
-		if strings.EqualFold(candidate.Username, username) || strings.EqualFold(candidate.Email, username) {
-			accounts = accounts[index : index+1]
-			found = true
+	for _, field := range []string{"username", "email"} {
+		var accounts []keycloakAccount
+		endpoint := a.realmURL + "/users?" + field + "=" + url.QueryEscape(username) + "&exact=true&briefRepresentation=false&max=2"
+		if err := a.getJSON(ctx, endpoint, &accounts); err != nil {
+			return model.User{}, err
+		}
+		if len(accounts) > 1 {
+			return model.User{}, fmt.Errorf("more than one identity provider account matches %s %q", field, username)
+		}
+		if len(accounts) == 1 && accounts[0].ID != "" {
+			account, found = accounts[0], true
 			break
 		}
 	}
-	if !found || accounts[0].ID == "" {
+	if !found {
 		return model.User{}, ErrAccountNotFound
 	}
-	account := accounts[0]
 	if account.FederationLink == "" {
 		return model.User{}, ErrNotFederated
 	}
@@ -208,8 +217,46 @@ func (a *KeycloakRealmAdmin) GetFederatedUser(ctx context.Context, username stri
 	}
 	return model.User{
 		ID: account.ID, Username: account.Username, Email: account.Email, DisplayName: displayName,
-		Role: model.RoleUser, Source: "ad", Disabled: !account.Enabled, Groups: []string{},
+		Role: model.RoleUser, Source: SourceDirectory, Disabled: !account.Enabled, Groups: []string{},
+		DirectoryID: account.directoryID(),
 	}, nil
+}
+
+// DirectoryLink returns the objectGUID an account is federated with, or "" for a local one.
+func (a *KeycloakRealmAdmin) DirectoryLink(ctx context.Context, userID string) (string, error) {
+	var account keycloakAccount
+	err := a.getJSON(ctx, a.realmURL+"/users/"+url.PathEscape(userID), &account)
+	if errors.Is(err, ErrAccountNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if account.FederationLink != "" && account.directoryID() == "" {
+		return "", fmt.Errorf("federated account %s has no LDAP_ID", userID)
+	}
+	return account.directoryID(), nil
+}
+
+func (a *KeycloakRealmAdmin) getJSON(ctx context.Context, endpoint string, destination any) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	response, err := a.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return ErrAccountNotFound
+	}
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return fmt.Errorf("Keycloak request returned %s", response.Status)
+	}
+	return json.NewDecoder(io.LimitReader(response.Body, 1024*1024)).Decode(destination)
 }
 
 func (a *KeycloakRealmAdmin) SyncFederatedUsers(ctx context.Context) error {

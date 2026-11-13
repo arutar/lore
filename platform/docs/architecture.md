@@ -60,12 +60,12 @@ sequenceDiagram
 
     A->>W: Имя, описание, видимость
     W->>C: POST /admin/repositories + CSRF
-    C->>C: Проверка admin и имени
+    C->>C: Проверка admin, формата и занятости имени до вызова Lore
     C->>C: Сохранить client-supplied UUID для идемпотентного retry
     C->>L: RepositoryCreate(id, default_branch_id, creator)
     alt Lore подтвердил создание
         L-->>C: Repository
-        C->>P: Зафиксировать репозиторий, owner grant и public read
+        C->>P: Зафиксировать репозиторий, owner grant и видимость (public read) одной транзакцией
         C-->>W: 201 Created
         W-->>A: Репозиторий доступен
     else Сбой Lore или конфликт
@@ -110,7 +110,10 @@ flowchart TD
 - WebUI использует opaque session cookie и CSRF для изменяющих запросов.
 - gRPC `:9090` предназначен для внутренней сети; публичный вход — HTTPS через reverse proxy.
 - Гость не получает write- или owner-grant; `none` не является deny-правилом.
-- Anonymous Clone использует `urn:lore:grant-type:anonymous`: control plane разрешает имя или ID только при anonymous Read и подписывает краткоживущий read-only JWT. Имена приватных репозиториев не раскрываются.
+- Anonymous Clone использует `urn:lore:grant-type:anonymous`: control plane ищет репозиторий по ID или точному имени, разрешает только публичный и подписывает краткоживущий read-only JWT. Приватный и несуществующий репозитории дают одинаковый ответ, имена приватных не раскрываются.
 - Native logout проверяет подпись и subject JWT; истёкший токен принимается только для завершения сессии и не даёт доступа к данным.
-- AD provisioning ищет пользователя в LDAP по `sAMAccountName`, при необходимости сопоставляет по email с federated Keycloak-аккаунтом и загружает группы до первого входа.
+- Учётка AD опознаётся по `objectGUID` из токена (claim `ldap_id`) или по связи федерации в Keycloak, а не по имени или email. Добавление из AD в WebUI ищет по `sAMAccountName`, но связывает учётку по `objectGUID`; группы, включая вложенные, загружаются до первого входа.
+- Группы и признак отключения в AD перечитываются раз в `LORE_LDAP_REFRESH` (5 минут) для сессий WebUI и обмена токенов нативного клиента; при недоступности AD последние известные группы действуют `LORE_LDAP_OUTAGE_GRACE` (8 часов).
+- Токены нативного клиента принимаются только с `aud` сервера Lore и `azp` клиентов `lore-native` или `lore-control-plane`; обменянный токен живёт 5 минут и ограничен одним репозиторием.
+- Под именем `admin` входит только локальная учётка Keycloak: `setup` гарантирует её существование, Keycloak проверяет свои учётки раньше AD.
 - Секреты Keycloak, PostgreSQL и service account задаются deployment-окружением, а не фиксируются в исходниках.

@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Epic Games, Inc.
 // SPDX-License-Identifier: MIT
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -39,23 +41,44 @@ pub const SESSION_LIFETIME: Duration = Duration::from_secs(150);
 /// `ucs-auth://auth.example.com` -> `https://auth.example.com`
 /// `https://auth.example.com` -> `https://auth.example.com` (unchanged)
 /// `http://127.0.0.1:41339` -> `http://127.0.0.1:41339` (unchanged)
-/// `http+insecure://registry.internal` -> `http://registry.internal`
+/// `http://lore.corp:8080` -> unchanged after connecting to `lore://lore.corp`, see
+/// [`super::trust_server_host`]
+/// `http+insecure://registry.internal` -> `http://registry.internal` (server only, see below)
 /// `http://auth.example.com` -> `https://auth.example.com` (upgraded)
 ///
-/// The explicit `http+insecure` scheme is for trusted development environments;
-/// production deployments must use HTTPS. Plaintext `http` is honoured only for
-/// loopback hosts, where the traffic
+/// Plaintext `http` is honoured only for loopback hosts, where the traffic
 /// never leaves the machine — this lets a local test auth service run
 /// without a certificate. For any other host the scheme is upgraded to
 /// `https`: the auth URL arrives in the *remote server's* advertised
 /// environment config, so allowing http to an arbitrary host would let a rogue
 /// server downgrade the channel that carries login and exchange tokens.
+///
+/// The explicit `http+insecure` scheme reaches a service on a private network, such as a
+/// control plane in the same container network. It's honoured only after
+/// [`trust_configured_endpoints`], which a server calls because its endpoints come from its
+/// own configuration file. A client never calls it, so for a client `http+insecure` is
+/// upgraded to `https` like any other scheme, and a rogue server can't use it either.
 pub fn grpc_endpoint(auth_url: &str) -> String {
+    grpc_endpoint_for(auth_url, TRUST_CONFIGURED_ENDPOINTS.load(Ordering::Relaxed))
+}
+
+/// Whether this process honours `http+insecure` endpoints; see [`grpc_endpoint`].
+static TRUST_CONFIGURED_ENDPOINTS: AtomicBool = AtomicBool::new(false);
+
+/// Declares that this process's endpoints come from its own configuration, not from a
+/// remote peer, so `http+insecure` endpoints may be used. Only a server calls this.
+pub fn trust_configured_endpoints() {
+    TRUST_CONFIGURED_ENDPOINTS.store(true, Ordering::Relaxed);
+}
+
+/// [`grpc_endpoint`] with the trust decision made explicit.
+pub fn grpc_endpoint_for(auth_url: &str, trust_insecure: bool) -> String {
     match auth_url.split_once("://") {
         Some(("https", _)) => auth_url.to_string(),
-        Some(("http+insecure", rest)) => format!("http://{rest}"),
+        Some(("http+insecure", rest)) if trust_insecure => format!("http://{rest}"),
         Some(("http", _))
-            if url::Url::parse(auth_url).is_ok_and(|url| super::is_loopback_http_url(&url)) =>
+            if url::Url::parse(auth_url)
+                .is_ok_and(|url| super::is_permitted_plain_http_url(&url)) =>
         {
             auth_url.to_string()
         }

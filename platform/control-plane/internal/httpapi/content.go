@@ -94,6 +94,20 @@ func (s *Server) repositoryLocks(w http.ResponseWriter, r *http.Request) {
 		writeRepositoryContentError(w, err)
 		return
 	}
+	// Lore records the owner's account ID, like a revision's author; show the name. An
+	// owner the control plane doesn't know is shown as Lore reported it.
+	names := make(map[string]string)
+	for index := range result {
+		owner := result[index].Owner
+		if name, ok := names[owner]; ok {
+			result[index].Owner = name
+			continue
+		}
+		if user, err := s.store.GetUser(r.Context(), owner); err == nil {
+			names[owner] = accountName(user)
+			result[index].Owner = names[owner]
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": result})
 }
 

@@ -4,6 +4,9 @@ namespace LoreCompanion;
 
 internal sealed class ClientSettings
 {
+    /// <summary>The themes of the WebUI (platform/web/src/themes.css); the companion windows use the same set.</summary>
+    public static readonly string[] Themes = ["midnight", "sky", "ember", "sage", "aurora", "ocean", "retro", "autumn", "light", "cyberpunk"];
+
     public string Theme { get; set; } = "midnight";
     public Dictionary<string, string> SelectedAccounts { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -12,6 +15,13 @@ internal sealed class ClientSettings
     public void SelectAccount(string server, string identity)
     {
         SelectedAccounts[server] = identity;
+        Save();
+    }
+
+    public void SetTheme(string theme)
+    {
+        if (!Themes.Contains(theme)) throw new InvalidDataException($"Unknown theme: {theme}");
+        Theme = theme;
         Save();
     }
 
@@ -29,7 +39,7 @@ internal sealed class ClientSettings
         try
         {
             var settings = JsonSerializer.Deserialize<ClientSettings>(File.ReadAllText(Path())) ?? new ClientSettings();
-            if (settings.Theme is not ("midnight" or "light"))
+            if (!Themes.Contains(settings.Theme))
             {
                 settings.Theme = "midnight";
             }

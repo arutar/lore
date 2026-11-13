@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -147,12 +146,22 @@ func TestBulkImportReportsRowErrors(t *testing.T) {
 	if status != http.StatusOK || result["imported"] != float64(1) || len(result["errors"].([]any)) != 1 {
 		t.Fatalf("grant import status = %d, result = %v", status, result)
 	}
+	// Import changes role and status of existing accounts only; it never creates an
+	// account and never rewrites groups or the source.
 	status, users := client.request(http.MethodPost, "/web/v1/admin/users/import", []map[string]any{
-		{"id": "imported", "username": "bob", "role": "user"},
+		{"id": "member", "username": "renamed", "role": "admin", "groups": []string{"admins-guid"}},
 		{"id": "admin", "username": "admin", "role": "user"},
+		{"id": "nobody", "username": "nobody", "role": "admin"},
 	}, true)
-	if status != http.StatusOK || users["imported"] != float64(1) || len(users["errors"].([]any)) != 1 {
+	if status != http.StatusOK || users["imported"] != float64(1) || len(users["errors"].([]any)) != 2 {
 		t.Fatalf("user import status = %d, result = %v", status, users)
+	}
+	member, _ := storage.GetUser(context.Background(), "member")
+	if member.Role != model.RoleAdmin || member.Username != "member" || len(member.Groups) != 1 || member.Groups[0] != "ad-group-guid" {
+		t.Fatalf("import changed more than role and status: %+v", member)
+	}
+	if _, err := storage.GetUser(context.Background(), "nobody"); err == nil {
+		t.Fatal("import created an account")
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "/web/v1/repositories/"+id+"/grants/export?format=csv", nil)
@@ -166,16 +175,38 @@ func TestBulkImportReportsRowErrors(t *testing.T) {
 
 type fakeSubjectDirectory struct{}
 
-func (fakeSubjectDirectory) ListGroups(context.Context) ([]directory.Group, error) {
-	return []directory.Group{{ID: "ad-group-guid", Name: "Artists"}}, nil
+var fakeGroups = []directory.Group{{ID: "ad-group-guid", Name: "Artists"}, {ID: "ad-group-2", Name: "Art Directors"}}
+
+func (fakeSubjectDirectory) SearchGroups(_ context.Context, prefix string, limit int) ([]directory.Group, error) {
+	result := []directory.Group{}
+	for _, group := range fakeGroups {
+		if strings.HasPrefix(strings.ToLower(group.Name), strings.ToLower(prefix)) && len(result) < limit {
+			result = append(result, group)
+		}
+	}
+	return result, nil
 }
 
-func (fakeSubjectDirectory) GroupIDs(context.Context, string) ([]string, error) {
-	return []string{"ad-group-guid"}, nil
+func (fakeSubjectDirectory) LookupGroup(_ context.Context, id string) (directory.Group, error) {
+	for _, group := range fakeGroups {
+		if group.ID == id {
+			return group, nil
+		}
+	}
+	return directory.Group{}, directory.ErrGroupNotFound
+}
+
+const elessarGUID = "0b9c2f4e-1d2a-4c3b-9e8f-7a6b5c4d3e2f"
+
+func (fakeSubjectDirectory) LookupAccount(_ context.Context, id string) (directory.Account, error) {
+	if id != elessarGUID {
+		return directory.Account{}, directory.ErrUserNotFound
+	}
+	return directory.Account{User: directory.User{ID: id, Username: "elessar"}, Groups: []string{"ad-group-guid"}}, nil
 }
 
 func (fakeSubjectDirectory) FindUser(context.Context, string) (directory.User, error) {
-	return directory.User{Username: "elessar", Email: "elessar@example.com"}, nil
+	return directory.User{ID: elessarGUID, Username: "elessar", Email: "elessar@example.com"}, nil
 }
 
 func (fakeSubjectDirectory) SearchUsers(_ context.Context, query string) ([]directory.User, error) {
@@ -208,9 +239,31 @@ func TestGrantSubjectsAndReadableAudit(t *testing.T) {
 		t.Fatalf("create status = %d", status)
 	}
 	id := created["id"].(string)
+	// Suggestions need a search of two characters and never return the full lists.
 	status, subjects := client.request(http.MethodGet, "/web/v1/repositories/"+id+"/grants/subjects", nil, false)
-	if status != http.StatusOK || !strings.Contains(fmt.Sprintf("%v", subjects["items"]), "Artists") {
+	if status != http.StatusOK || len(subjects["items"].([]any)) != 0 {
+		t.Fatalf("subjects without a search = %d, %v", status, subjects)
+	}
+	storage.UpsertUser(t.Context(), model.User{ID: "u-arthur", Username: "arthur", DisplayName: "Arthur Dent", Email: "arthur@example.com", Source: "local"})
+	storage.UpsertUser(t.Context(), model.User{ID: "svc", Username: "service-account-lore-control-plane", Source: SourceService})
+	status, subjects = client.request(http.MethodGet, "/web/v1/repositories/"+id+"/grants/subjects?q=ar", nil, false)
+	text := fmt.Sprintf("%v", subjects["items"])
+	if status != http.StatusOK || !strings.Contains(text, "Artists") || !strings.Contains(text, "Arthur Dent") || strings.Contains(text, "service-account") {
 		t.Fatalf("subjects status = %d, body = %v", status, subjects)
+	}
+	// A typed username, email or exact group name resolves to the stored ID.
+	for _, typed := range []map[string]any{
+		{"subjectType": "user", "subject": "ARTHUR@example.com", "permission": "read"},
+		{"subjectType": "group", "subject": "artists", "permission": "write"},
+	} {
+		if status, body := client.request(http.MethodPut, "/web/v1/repositories/"+id+"/grants", typed, true); status != http.StatusOK {
+			t.Fatalf("typed subject %v: %d %v", typed, status, body)
+		}
+	}
+	status, grants := client.request(http.MethodGet, "/web/v1/repositories/"+id+"/grants/", nil, false)
+	text = fmt.Sprintf("%v", grants["items"])
+	if status != http.StatusOK || !strings.Contains(text, "subject:u-arthur") || !strings.Contains(text, "label:Arthur Dent") || !strings.Contains(text, "subject:ad-group-guid") || !strings.Contains(text, "label:Artists") {
+		t.Fatalf("labeled grants = %v", grants)
 	}
 	status, _ = client.request(http.MethodPut, "/web/v1/repositories/"+id+"/grants", map[string]any{
 		"subjectType": "user", "subject": "missing", "permission": "read",
@@ -225,6 +278,10 @@ func TestGrantSubjectsAndReadableAudit(t *testing.T) {
 	status, audit := client.request(http.MethodGet, "/web/v1/admin/audit", nil, false)
 	if status != http.StatusOK || !strings.Contains(fmt.Sprintf("%v", audit["items"]), "actorName") || !strings.Contains(fmt.Sprintf("%v", audit["items"]), "targetName") {
 		t.Fatalf("audit identities = %v", audit)
+	}
+	// Grant events name AD groups, not their objectGUID.
+	if text := fmt.Sprintf("%v", audit["items"]); !strings.Contains(text, "subjectName:Artists") {
+		t.Fatalf("group grant in the audit isn't named: %v", audit["items"])
 	}
 }
 
@@ -277,43 +334,17 @@ func TestCatalogPagination(t *testing.T) {
 	}
 }
 
-type fakeGroupDirectory struct {
-	err   error
-	calls int
-}
-
-func (f *fakeGroupDirectory) GroupIDs(context.Context, string) ([]string, error) {
-	f.calls++
-	return nil, f.err
-}
-
-func TestGroupIDsSupportsExternalEmailAndLDAPOutages(t *testing.T) {
-	external := &fakeGroupDirectory{err: errors.New("LDAP must not be called")}
-	auth := Authenticator{config: AuthConfig{GroupDirectory: external}}
-	groups, err := auth.groupIDs(t.Context(), "external@example.com", []string{"external-group"})
-	if err != nil || len(groups) != 1 || groups[0] != "external-group" || external.calls != 0 {
-		t.Fatalf("external email groups = %v, %v, LDAP calls = %d", groups, err, external.calls)
-	}
-
-	missing := &fakeGroupDirectory{err: directory.ErrUserNotFound}
-	auth.config.GroupDirectory = missing
-	groups, err = auth.groupIDs(t.Context(), "local-admin", []string{"local-group"})
-	if err != nil || len(groups) != 1 || groups[0] != "local-group" || missing.calls != 1 {
-		t.Fatalf("local account groups = %v, %v, LDAP calls = %d", groups, err, missing.calls)
-	}
-
-	unavailable := &fakeGroupDirectory{err: errors.New("LDAP unavailable")}
-	auth.config.GroupDirectory = unavailable
-	if _, err = auth.groupIDs(t.Context(), "ad-user", nil); err == nil {
-		t.Fatal("LDAP outage must not be hidden")
-	}
-}
-
 type fakeAccountManager struct {
 	enabled          *bool
 	logoutID         string
 	federatedMissing bool
 	syncCalls        int
+	wrongLink        bool
+	links            map[string]string
+}
+
+func (f *fakeAccountManager) DirectoryLink(_ context.Context, id string) (string, error) {
+	return f.links[id], nil
 }
 
 func (f *fakeAccountManager) CreateLocalUser(_ context.Context, email, displayName, _ string) (model.User, error) {
@@ -337,7 +368,11 @@ func (f *fakeAccountManager) GetFederatedUser(_ context.Context, username string
 	if username != "elessar" && username != "elessar@example.com" {
 		return model.User{}, ErrAccountNotFound
 	}
-	return model.User{ID: "ad-user-id", Username: username, DisplayName: "AD User", Role: model.RoleUser, Source: "ad"}, nil
+	link := elessarGUID
+	if f.wrongLink {
+		link = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	}
+	return model.User{ID: "ad-user-id", Username: username, DisplayName: "AD User", Role: model.RoleUser, Source: "ad", DirectoryID: link}, nil
 }
 
 func (f *fakeAccountManager) SyncFederatedUsers(context.Context) error {
@@ -360,8 +395,25 @@ func TestProvisionADUser(t *testing.T) {
 		t.Fatalf("AD provisioning status = %d, user = %v", status, provisioned)
 	}
 	stored, err := storage.GetUser(t.Context(), "ad-user-id")
-	if err != nil || stored.Source != "ad" {
+	if err != nil || stored.Source != "ad" || stored.DirectoryID != elessarGUID || stored.GroupsSyncedAt == nil {
 		t.Fatalf("stored AD user = %+v, %v", stored, err)
+	}
+}
+
+func TestProvisionADUserRefusesAMismatchedDirectoryLink(t *testing.T) {
+	storage := store.NewMemory()
+	auth, _ := NewAuthenticator(t.Context(), storage, AuthConfig{SessionTTL: time.Hour})
+	client := &testClient{t: t, handler: NewServer(storage, auth, Config{
+		DevAuth: true, DevUser: model.User{ID: "admin", Username: "admin", Role: model.RoleAdmin},
+		Accounts: &fakeAccountManager{wrongLink: true}, Directory: fakeSubjectDirectory{},
+	})}
+	client.login()
+	status, body := client.request(http.MethodPost, "/web/v1/admin/users/provision", map[string]any{"username": "elessar"}, true)
+	if status != http.StatusConflict {
+		t.Fatalf("mismatched link status = %d, body = %v", status, body)
+	}
+	if _, err := storage.GetUser(t.Context(), "ad-user-id"); err == nil {
+		t.Fatal("an account linked to another directory entry was stored")
 	}
 }
 

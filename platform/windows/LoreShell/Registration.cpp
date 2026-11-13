@@ -10,16 +10,27 @@ struct Registration
     const wchar_t* overlayName;
 };
 
+// Explorer loads overlay handlers in the order of these names and uses only the first 15, four of
+// which Windows keeps for itself. Three leading spaces sort ahead of TortoiseSVN, OneDrive and
+// most other clients (which use one or two); the digits keep the states that matter most first.
 const Registration registrations[] = {
     {&CLSID_ContextMenu, L"Lore Explorer context menu", nullptr},
-    {&CLSID_OverlayModified, L"Lore modified overlay", L" Lore Modified"},
-    {&CLSID_OverlayStaged, L"Lore staged overlay", L" Lore Staged"},
-    {&CLSID_OverlayConflicted, L"Lore conflicted overlay", L" Lore Conflicted"},
-    {&CLSID_OverlayLocked, L"Lore locked overlay", L" Lore Locked"},
-    {&CLSID_OverlayIgnored, L"Lore ignored overlay", L" Lore Ignored"},
-    {&CLSID_OverlayStagedModified, L"Lore staged and modified overlay", L" Lore Staged Modified"},
-    {&CLSID_OverlayClean, L"Lore clean repository overlay", L" Lore Clean"},
+    {&CLSID_OverlayModified, L"Lore modified overlay", L"   Lore2Modified"},
+    {&CLSID_OverlayStaged, L"Lore staged overlay", L"   Lore4Staged"},
+    {&CLSID_OverlayConflicted, L"Lore conflicted overlay", L"   Lore1Conflicted"},
+    {&CLSID_OverlayLocked, L"Lore locked overlay", L"   Lore3Locked"},
+    {&CLSID_OverlayIgnored, L"Lore ignored overlay", L"   Lore6Ignored"},
+    {&CLSID_OverlayStagedModified, L"Lore staged and modified overlay", L"   Lore5StagedModified"},
+    {&CLSID_OverlayClean, L"Lore clean repository overlay", L"   Lore7Clean"},
 };
+
+// Names used by 0.1.13 and earlier; removed on registration so an upgrade doesn't keep both.
+const wchar_t* legacyOverlayNames[] = {
+    L" Lore Modified", L" Lore Staged", L" Lore Conflicted", L" Lore Locked",
+    L" Lore Ignored", L" Lore Staged Modified", L" Lore Clean",
+};
+
+constexpr wchar_t overlayRoot[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ShellIconOverlayIdentifiers\\";
 
 HRESULT SetString(HKEY root, const std::wstring& path, const wchar_t* value, const std::wstring& data)
 {
@@ -43,6 +54,7 @@ HRESULT RegisterComponent(HKEY root)
 {
     wchar_t module[MAX_PATH]{};
     if (!GetModuleFileNameW(g_instance, module, MAX_PATH)) return HRESULT_FROM_WIN32(GetLastError());
+    for (const auto* legacy : legacyOverlayNames) RegDeleteTreeW(root, (std::wstring(overlayRoot) + legacy).c_str());
     for (const auto& registration : registrations)
     {
         const auto clsid = ClsidString(*registration.clsid);
@@ -87,6 +99,7 @@ HRESULT UnregisterComponent(HKEY root)
                 (std::wstring(L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ShellIconOverlayIdentifiers\\") + registration.overlayName).c_str());
         }
     }
+    for (const auto* legacy : legacyOverlayNames) RegDeleteTreeW(root, (std::wstring(overlayRoot) + legacy).c_str());
     const wchar_t* handlers[] = {L"*", L"Directory", L"Directory\\Background", L"Folder"};
     for (const auto* handler : handlers)
     {

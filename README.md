@@ -1,147 +1,243 @@
 <!-- markdownlint-disable MD033 MD041 -->
-<a id="readme-top"></a>
-
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/icons/Lore_TM_White_V1.svg">
-  <img alt="Lore — open source version control by Epic Games" src="docs/assets/icons/Lore_TM_Black_V1.svg" width="220">
-</picture>
+<img src="platform/web/public/favicon.svg" alt="" width="72" height="72">
 
-<h1>Lore</h1>
+# Lore Platform
 
-<p><strong>Next-generation open source version control</strong></p>
+**A self-hosted version control server for teams with large binary files —<br>
+as simple as SVN, built on [Epic Games' Lore](https://github.com/EpicGames/lore).**
 
-<p>
-  <a href="https://github.com/EpicGames/lore/releases">Download Lore</a>
-  &nbsp;&middot;&nbsp;
-  <a href="https://epicgames.github.io/lore/tutorials/quickstart/">Quickstart</a>
-  &nbsp;&middot;&nbsp;
-  <a href="https://epicgames.github.io/lore/">Read the docs</a>
-  &nbsp;&middot;&nbsp;
-  <a href="https://discord.gg/E4SFJKRPbg">Join the conversation</a>
-</p>
+Web interface · Active Directory sign-in · Windows Explorer integration · one-command Docker deployment
 
-<p>
-  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-informational"></a>
-  <img alt="Built with Rust" src="https://img.shields.io/badge/Built%20with-Rust-orange">
-</p>
+[![Release](https://img.shields.io/github/v/release/arutar/lore?filter=platform-v*&label=release)](../../releases)
+[![Platform Server](https://github.com/arutar/lore/actions/workflows/platform-server.yml/badge.svg)](https://github.com/arutar/lore/actions/workflows/platform-server.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+[Install](platform/docs/install.md) · [Download](../../releases) · [How it works](#how-it-works) · [Differences from Lore](#how-this-differs-from-upstream-lore) · [Status](#status)
+
+<img src="platform/docs/images/repository-files.png" alt="Repository files in the Lore Platform web interface" width="900">
 
 </div>
 
-<details>
-  <summary>Table of contents</summary>
+## Why this project exists
 
-- [About Lore](#about-lore)
-- [Get started with Lore](#get-started-with-lore)
-- [Overview](#overview)
-- [Lore's architecture](#lores-architecture)
-- [Lore's repositories](#lores-repositories)
-- [Fully open source](#fully-open-source)
-- [Contributing](#contributing)
-- [License](#license)
-- [Contact and community](#contact-and-community)
+Game studios, CAD and media teams version **large binary files**: textures, models, scenes,
+audio, video. Git struggles with them, SVN is showing its age, and commercial systems cost a lot
+per seat. Epic Games' **Lore** is a modern engine built exactly for this — large files, file
+locking, partial and virtual working copies — but Lore is an *engine*. A team needs more around
+it: a web interface, user and permission management, sign-in with their corporate accounts, a
+Windows client people actually use, and a server an administrator can set up in an afternoon.
 
-</details>
+That full product will come from upstream eventually. But **in a time when AI tooling moves
+in weeks, waiting a year or two for a finished system is a luxury we can't afford.** We need a
+system we can put to work *now*. This project assembles the missing pieces around Lore so a team
+can start using it today, keeps the changes to Lore itself small, and offers them upstream so
+the fork can shrink as Lore matures.
 
-## About Lore
+## What you get
 
-Lore is an open source version control system designed for unprecedented scalability of both data and teams. It is optimized for projects that combine code with large binary assets, including games and entertainment, and caters for the needs of developers and artists alike.
+- **Web interface** — browse files, history and locks; download any file at any revision; manage
+  repositories, access, users, audit log and settings. Russian and English, ten themes, works on
+  a phone.
+- **Simple permissions** — *Read*, *Write*, *Owner* per repository, for users, Active Directory
+  groups (nested groups included), all signed-in users or everyone (public). Private
+  repositories are invisible to people without access.
+- **Active Directory** — users sign in with their Windows login. Removing someone from a group or
+  disabling the account takes effect within minutes, also for desktop clients. Local email
+  accounts for external partners, optional self-registration.
+- **Windows client** — MSI with the `lore` CLI, Explorer context menu (Clone, Sync, Commit,
+  Stage, Status, History, Lock, Unlock) and status icons. Sign in once in the browser; the
+  session is kept.
+- **Linux CLI** built from this fork.
+- **Easy server** — Docker Compose bundle: `setup` generates the secrets, starts everything,
+  connects AD and mail, and prints the admin password. Backup and restore scripts included.
+- **Internal and external networks** — plain HTTP inside the office with nothing to configure on
+  the clients, or HTTPS with automatic Let's Encrypt certificates, or behind your own reverse
+  proxy. Works without internet access.
 
-> [!NOTE]
-> Lore is pre-1.0 and under active development. Interfaces, on-disk formats, and APIs may change between releases.
+## Screenshots
 
-<sub><a href="#readme-top">(back to top)</a></sub>
+| | |
+|---|---|
+| <img src="platform/docs/images/repository-history.png" alt="Revision history" width="440"><br>**History** — every revision with its author | <img src="platform/docs/images/repository-locks.png" alt="File locks" width="440"><br>**Locks** — who is editing which binary file |
+| <img src="platform/docs/images/repository-grant.png" alt="Granting access" width="440"><br>**Access** — grant to users and AD groups as you type | <img src="platform/docs/images/users.png" alt="Users" width="440"><br>**Users** — Active Directory and local accounts |
+| <img src="platform/docs/images/audit.png" alt="Audit log" width="440"><br>**Audit log** — who changed what | <img src="platform/docs/images/settings.png" alt="Settings" width="440"><br>**Settings** — theme, language, registration |
+| <img src="platform/docs/images/theme-sky.png" alt="Sky theme" width="440"><br>**Themes** — ten built-in themes | <img src="platform/docs/images/palette.png" alt="Command palette" width="440"><br>**Ctrl K** — jump to any repository or page |
 
-## Get started with Lore
+### Windows client
 
-- **Quickstart** — install Lore and make your first commit by following the [quickstart guide](https://epicgames.github.io/lore/tutorials/quickstart/).
-- **Read the docs** — delve into Lore's ethos and architecture in the [Lore documentation](https://epicgames.github.io/lore/).
-- **Have questions?** — the [FAQ](https://epicgames.github.io/lore/faq/) covers licensing, supported platforms, production readiness, and how Lore compares to other version control systems.
-- **See where Lore is headed** — the [roadmap](https://epicgames.github.io/lore/roadmap/) lays out the big-rock features by time horizon, from scalable locking to an open source desktop client.
-- **Join the conversation** — chat with us and our community on [Discord](https://discord.gg/E4SFJKRPbg).
+| | |
+|---|---|
+| <img src="platform/docs/images/companion-commit.png" alt="Commit window" width="300"><br>**Lore Commit...** from the Explorer menu | <img src="platform/docs/images/companion-accounts.png" alt="Accounts window" width="300"><br>**Accounts** — one sign-in per server, window theme |
 
-Or try it right now — install Lore and start a local server in demo mode:
+The Explorer context menu and status icons follow the Windows light or dark mode. The Lore
+windows (Clone, Commit, Accounts...) use the same ten themes as the WebUI: pick one under
+**Window theme** in Explorer → **Lore** → **Accounts**.
 
-**macOS / Linux**
+<sub>Screenshots show the real interface with demo data.</sub>
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/EpicGames/lore/main/scripts/install.sh | bash -s -- --demo
+## How it works
+
+```mermaid
+flowchart TB
+    Browser["🌐 Browser"]
+    Desktop["🪟 Windows Explorer · lore CLI<br/>🐧 Linux lore CLI"]
+    AD[("Active Directory<br/>users · groups")]
+
+    subgraph Host["Server host"]
+        subgraph Docker["Docker Compose"]
+            Web["WebUI + sign-in<br/>Caddy · control plane · Keycloak<br/>port 8080 or 443"]
+            Lore["Lore server<br/>files · revisions · locks<br/>port 41337"]
+            DB[("PostgreSQL")]
+        end
+        Disk[("Storage on the host<br/>repositories · databases · keys")]
+    end
+
+    Browser -->|"browse, manage access"| Web
+    Desktop -.->|"① sign in once"| Web
+    Desktop ==>|"② clone · sync · commit · lock"| Lore
+    Lore <-->|"may this user do this?"| Web
+    Web <-->|"LDAP, read-only"| AD
+    Web --- DB
+    DB --- Disk
+    Lore --- Disk
 ```
 
-**Windows (PowerShell)**
+**For the administrator:** one host with Docker runs five containers. All data — repository
+contents, the two databases and the signing key — lives in one directory on the host, which
+`backup.sh` archives. Users and groups come from Active Directory (read-only); access is managed in
+the WebUI.
 
-```powershell
-$env:LORE_DEMO=1; irm https://raw.githubusercontent.com/EpicGames/lore/main/scripts/install.ps1 | iex
+**For a user:**
+
+1. Open the WebUI, sign in with your Windows account, find the repository and copy its address
+   (`lore://server/team/project`).
+2. In Explorer: right-click → **Lore Clone...**, paste the address. The first time, a browser
+   window asks you to sign in; after that the client remembers you.
+3. Work as usual: **Lore Sync** to get changes, **Acquire locks** before editing a binary file,
+   **Lore Commit...** to send your work. Files, history and locks are visible in the WebUI.
+
+Under the hood: after sign-in the client asks the control plane for a short-lived token for one
+repository; the control plane checks the permissions (including current AD groups) and the Lore
+server accepts only that token. Permissions are therefore enforced in one place for the WebUI and
+the desktop clients.
+
+## Quick start
+
+```sh
+# 1. Download lore-platform-server-<version>.tar.gz from Releases and unpack it
+tar -xzf lore-platform-server-0.1.12.tar.gz && cd lore-platform-server-0.1.12
+
+# 2. Run setup with the name your users will type
+LORE_PUBLIC_HOST=lore.corp.local sh setup.sh        # Windows: .\setup.ps1 -PublicHost lore.corp.local
+
+# 3. Open http://lore.corp.local:8080 and sign in as "admin"
+#    with the password setup printed (also stored in .env)
 ```
 
-<sub><a href="#readme-top">(back to top)</a></sub>
+Add Active Directory by passing `LORE_LDAP_URL`, `LORE_LDAP_BASE_DN`, `LORE_LDAP_BIND_DN` and
+`LORE_LDAP_BIND_PASSWORD` to the same command. HTTPS, mail, backups, upgrades and all settings:
+**[the installation guide](platform/docs/install.md)**.
 
-## Overview
+Clients: `LoreClient-<version>-x64.msi` for Windows, `lore-cli-<version>-<arch>.tar.gz` for Linux,
+both on the [Releases](../../releases) page.
 
-- **Easy setup, on-demand scalability** — Get started in local mode in minutes. Then, scale up as far and as fast as you need.
-- **Fast and efficient processes** — Scale without slowdowns, thanks to shared, reusable data and as-needed downloads.
-- **Free branching** — Quickly and easily create, manage, and sync branches to freely experiment, iterate, and release.
-- **History you can trust** — Confidently track and manage revisions with Lore's verifiable tamper-evident source of truth.
-- **Intuitive interface** — Enjoy complete one-to-one access to the full Lore functionality via the CLI.
-- **Full-surface API** — Extend, customize, and integrate Lore via C/C++, C#, Rust, Go, Python, or JavaScript.
+## How this differs from upstream Lore
 
-> [!NOTE]
-> Lore is the built-in version control system for UEFN (Unreal Editor for Fortnite), but today's open source tooling can't yet talk to it: the UEFN build uses a proprietary compression format that can't ship with the open source project. We're actively moving UEFN onto an open compression format — the same one this open source project uses — to eliminate the gap between the two.
+| | [Upstream Lore](https://github.com/EpicGames/lore) | This project |
+|---|---|---|
+| Version control engine | ✔ | Same engine, tracked from upstream |
+| Web interface | — | Files, history, locks, downloads, administration |
+| Users and permissions | Token-based authorization (OIDC / JWT), no management UI | Read / Write / Owner for users, AD groups, all signed-in users, public |
+| Active Directory | — | Sign-in, nested groups, account status followed within minutes |
+| Local accounts, registration, password reset | — | Through Keycloak |
+| Windows Explorer integration | — | Context menu, status icons, MSI installer |
+| Server deployment | Server binary / container, you assemble the rest | Docker Compose bundle with setup, backup and restore |
+| Plain HTTP inside an internal network | Sign-in requires HTTPS (except localhost) | Allowed to the same host as the Lore server, no client configuration |
+| Anonymous clone of public repositories | — | Supported |
 
-<sub><a href="#readme-top">(back to top)</a></sub>
+**Why a fork and not a plugin.** Almost everything lives in [`platform/`](platform) and talks to
+Lore through its public gRPC services. A few things can only be done inside Lore itself — about
+fifteen files in `lore-server` and `lore-transport`:
 
-## Lore's architecture
+- the server accepts repository-scoped tokens issued by the control plane, with the key endpoint
+  reachable inside Docker;
+- clients fall back to an anonymous token for public repositories;
+- clients allow plain-HTTP sign-in when the sign-in server is the same host as the Lore server
+  they connect to (internal networks without certificates).
 
-Lore is a centralized, content-addressed version control system that represents repository state as Merkle trees and an immutable revision chain, optimized for binary-first storage, deduplication, and sparse/on-demand data hydration at scale. For the full model—on-disk formats, chunking internals, and the mechanics of the Merkle tree—read the [system design doc](https://epicgames.github.io/lore/explanation/system-design/).
+These changes are offered upstream ([EpicGames/lore#278](https://github.com/EpicGames/lore/issues/278)).
+The rest of the tree is upstream Lore, merged as it evolves; its original README is
+[README.upstream.md](README.upstream.md).
 
-### Highlights
+## Status
 
-- **Content-addressed storage** — Repository data is stored and referenced by content hash in a Merkle tree, enabling fast comparisons, integrity checks, and reuse across history and branches.
-- **Immutable revision chain** — A revision's hash signature is derived from its revision state, including parent revision hashes and contained data hashes, forming an immutable chain with cryptographic integrity.
-- **Chunked storage for large files** — Files are stored as reusable chunks with indexed lookup, reducing duplication and enabling efficient updates and transfer for large binary assets.
-- **On-demand hydration and sparse workspaces** — Workspaces can stay lightweight by fetching file data only when needed, so you don't have to download everything up front.
-- **Centralized service with caching** — A service-backed architecture uses caching in front of durable storage to scale throughput for large teams and repositories.
-- **Lightweight branches and fast switching** — Branches are lightweight mutable references, so creating and switching branches is low-overhead without duplication of underlying data.
+Version 0.1.x — in use on an internal test installation with a live Active Directory.
 
+Verified: clean install and re-install, AD sign-in with nested groups, group removal and account
+disabling reaching desktop clients, AD outage handling, clone / commit / push from Windows,
+backup and restore, the WebUI. An end-to-end test (setup → sign-in → permissions → backup →
+restore) passes on that installation and is wired into CI.
 
-<sub><a href="#readme-top">(back to top)</a></sub>
+Not yet verified: public DNS with Let's Encrypt on an internet-facing host; signed release
+binaries. See [platform/docs/current-status.md](platform/docs/current-status.md) (Russian) for
+details.
 
-## Lore's repositories
+## Performance
 
-Lore spans a family of repositories: the core library, server, and CLI in this repository, plus a software development kit (SDK) for each supported language.
+The WebUI stays responsive with tens of thousands of repositories and Active Directory accounts:
+searches use trigram indexes, AD group checks a GIN index, paging walks the primary key, and every
+query is planned for its actual values so the indexes are always used.
 
-| Repository | Description | Link |
-| --- | --- | --- |
-| **Lore Library, Server & CLI** | The core Lore library, the Lore Server, and the Lore CLI. You are here. | [View on GitHub](https://github.com/EpicGames/lore) |
-| **JavaScript SDK** | The JavaScript binding for the Lore API. | [View on GitHub](https://github.com/EpicGames/lore-js) |
-| **Python SDK** | The Python binding for the Lore API. | [View on GitHub](https://github.com/EpicGames/lore-python) |
-| **C# SDK** | The C# binding for the Lore API. | [View on GitHub](https://github.com/EpicGames/lore-dotnet) |
-| **Go SDK** | The Go binding for the Lore API. | [View on GitHub](https://github.com/EpicGames/lore-go) |
+Measured through the control plane's storage layer (the same code and connection pool the server
+uses), PostgreSQL 18, default configuration, on a modest 8-core Xeon E5-2630 (2012) server.
+Data: **50,000 repositories, 50,000 users, 151,000 permissions, 1,000 AD groups** (126 MB database).
 
-<sub><a href="#readme-top">(back to top)</a></sub>
+| Operation | median | p95 |
+|---|---|---|
+| Repository list, administrator, any page | 1.7 ms | 2.1 ms |
+| Repository search by name | 6.9 ms | 7.4 ms |
+| Repository list of a user (direct + AD group permissions) | 6.5 ms | 7.9 ms |
+| Repository search of a user | 4.1 ms | 5.1 ms |
+| User search (Users page, "grant access" suggestions) | 3.3 ms | 4.3 ms |
+| Does an AD group have members | 0.3 ms | 0.4 ms |
+| Permissions of a repository (Access tab) | 0.2 ms | 0.3 ms |
+| Audit log page | 0.2 ms | 0.2 ms |
+| Session check (every request) | 0.2 ms | 0.2 ms |
 
-## Fully open source
+Expired sign-in sessions are removed as new ones are created, so the session table stays small.
 
-We believe a truly open ecosystem is built collectively using open standards. Lore is fully open source under an [MIT license](LICENSE), and we invite you to build the version control system of the future in the open. See [CONTRIBUTING.md](CONTRIBUTING.md) to get involved.
+## Repository layout
 
-<sub><a href="#readme-top">(back to top)</a></sub>
+| Path | What |
+|---|---|
+| [`platform/deploy`](platform/deploy) | Docker Compose, setup, backup, restore, end-to-end test |
+| [`platform/control-plane`](platform/control-plane) | Go: WebUI API, permissions, AD, token exchange |
+| [`platform/web`](platform/web) | React + TypeScript WebUI |
+| [`platform/windows`](platform/windows) | Explorer extension (C++), sign-in companion (C#/WebView2), MSI (WiX) |
+| [`platform/docs`](platform/docs) | Installation guide, architecture, status |
+| everything else | Upstream Lore (Rust) with the small changes listed above |
 
-## Contributing
+## Building and testing
 
-Contributions of every kind are welcome — code, documentation, bug reports, and reviews. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow, then read the [Code of Conduct](CODE_OF_CONDUCT.md) and the project [governance model](GOVERNANCE.md). New to the codebase? The [`good-first-issue`](https://github.com/EpicGames/lore/labels/good-first-issue) label is a good place to start.
+```sh
+cd platform/control-plane && go test ./...       # with TEST_DATABASE_URL also against PostgreSQL
+cd platform/web && npm ci && npm run build
+cargo build --release -p lore-client --bin lore  # the CLI
+pwsh platform/windows/Build-Client.ps1           # Windows client; Build-Msi.ps1 for the installer
+```
 
-<sub><a href="#readme-top">(back to top)</a></sub>
+Releases are built by GitHub Actions when a `platform-vX.Y.Z` tag is pushed: Windows MSI and ZIP,
+Linux CLI (x86-64 and ARM64), the server bundle, checksums, and the container images on GHCR.
+
+## Authors
+
+- **Arsen Arutyunyan** (arutar, [GitHub](https://github.com/arutar))
+- **Vlad Tagintsev** (Fiend3d, [GitHub](https://github.com/Fiend3d))
+
+Built on [Lore](https://github.com/EpicGames/lore) by Epic Games and its contributors.
 
 ## License
 
-Lore is released under the MIT License. See [LICENSE](LICENSE) for the full text. Copyright (c) 2026 Epic Games, Inc.
-
-<sub><a href="#readme-top">(back to top)</a></sub>
-
-## Contact and community
-
-- **Discord —** chat with the team and community on [Discord](https://discord.gg/E4SFJKRPbg).
-- **GitHub Issues —** report bugs and request features through [GitHub Issues](https://github.com/EpicGames/lore/issues).
-
-<sub><a href="#readme-top">(back to top)</a></sub>
+MIT, like upstream Lore — see [LICENSE](LICENSE).

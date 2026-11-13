@@ -134,13 +134,17 @@ func TestTokenExchangeAnonymousReadOnly(t *testing.T) {
 	if response.Code != http.StatusOK || claims["sub"] != "anonymous" || len(permissions) != 1 || permissions[0] != "read" {
 		t.Fatalf("anonymous response = %d, claims = %+v", response.Code, claims)
 	}
-	response, _ = requestToken("lore-name:private")
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("private name exchange status = %d, want 400", response.Code)
+	// Private and missing repositories get the same answer, by name and by ID.
+	answers := map[string]string{}
+	for _, resource := range []string{"lore-name:private", "lore-name:missing", "lore-" + strings.ReplaceAll(privateID, "-", ""), "lore-923e4567e89b42d3a456426614174000"} {
+		response, _ = requestToken(resource)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("%s exchange status = %d, want 403", resource, response.Code)
+		}
+		answers[response.Body.String()] = resource
 	}
-	response, _ = requestToken("lore-" + strings.ReplaceAll(privateID, "-", ""))
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("private ID exchange status = %d, want 403", response.Code)
+	if len(answers) != 1 {
+		t.Fatalf("answers differ between private and missing repositories: %v", answers)
 	}
 }
 

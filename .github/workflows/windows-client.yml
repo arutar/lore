@@ -10,8 +10,13 @@ on:
       - "platform/windows/**"
   push:
     branches: [main]
-    tags: ["platform-v*"]
   workflow_dispatch:
+  # platform-release.yml calls this for platform-v* tags and publishes the MSI with the
+  # rest of the release.
+  workflow_call:
+    outputs:
+      version:
+        value: ${{ jobs.build.outputs.version }}
 
 permissions: {}
 
@@ -99,23 +104,3 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  release:
-    name: Publish platform release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/platform-v')
-    needs: build
-    runs-on: windows-latest
-    environment: platform-release
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: windows-client-${{ github.sha }}
-          path: release
-
-      - name: Publish release assets
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: gh release create "${{ needs.build.outputs.release_tag }}" release/* --title "${{ needs.build.outputs.release_tag }}" --generate-notes

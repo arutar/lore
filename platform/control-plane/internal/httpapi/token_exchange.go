@@ -29,6 +29,13 @@ const tokenExchangeGrant = "urn:ietf:params:oauth:grant-type:token-exchange"
 const anonymousGrant = "urn:lore:grant-type:anonymous"
 const accessTokenType = "urn:ietf:params:oauth:token-type:access_token"
 
+// anonymousSubject is the subject of tokens issued without a user. No account may use it.
+const anonymousSubject = "anonymous"
+
+const repositoryUnavailable = "Repository doesn't exist or access isn't granted"
+
+var errInvalidResource = errors.New("invalid repository resource")
+
 type BearerAuthenticator interface {
 	AuthenticateBearer(ctx context.Context, token string) (model.User, error)
 }
@@ -162,7 +169,7 @@ func (t *TokenExchange) exchange(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		authenticated, err := t.auth.AuthenticateBearer(r.Context(), r.Form.Get("subject_token"))
-		if err != nil || authenticated.Disabled {
+		if err != nil || !authenticated.Active() {
 			writeOAuthError(w, http.StatusUnauthorized, "invalid_grant", "Subject token is invalid")
 			return
 		}
@@ -174,8 +181,18 @@ func (t *TokenExchange) exchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repository, err := t.repositoryForResource(r.Context(), resources[0], anonymous)
+	if errors.Is(err, errInvalidResource) {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_target", "Repository resource is invalid")
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		// The same answer as for a private repository below, so the endpoint can't be
+		// used to learn which repository IDs exist.
+		writeOAuthError(w, http.StatusForbidden, "access_denied", repositoryUnavailable)
+		return
+	}
 	if err != nil {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_target", "Repository isn't available")
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "Repository lookup failed")
 		return
 	}
 	grants, err := t.store.ListGrants(r.Context(), repository.ID)
@@ -184,7 +201,7 @@ func (t *TokenExchange) exchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !policy.CanRead(user, grants) {
-		writeOAuthError(w, http.StatusForbidden, "access_denied", "Repository access isn't granted")
+		writeOAuthError(w, http.StatusForbidden, "access_denied", repositoryUnavailable)
 		return
 	}
 	permissions := []string{"read"}
@@ -194,7 +211,7 @@ func (t *TokenExchange) exchange(w http.ResponseWriter, r *http.Request) {
 	if policy.CanManage(user, grants) {
 		permissions = append(permissions, "owner")
 	}
-	subject, username := "anonymous", "anonymous"
+	subject, username := anonymousSubject, anonymousSubject
 	if user != nil {
 		subject, username = user.ID, user.Username
 	}
@@ -236,28 +253,21 @@ func (t *TokenExchange) exchange(w http.ResponseWriter, r *http.Request) {
 func (t *TokenExchange) repositoryForResource(ctx context.Context, resource string, anonymous bool) (model.Repository, error) {
 	if anonymous {
 		if name, ok := strings.CutPrefix(resource, "lore-name:"); ok {
-			cursor := ""
-			for {
-				page, err := t.store.Catalog(ctx, nil, cursor, 100)
-				if err != nil {
-					return model.Repository{}, err
-				}
-				for _, repository := range page.Items {
-					if repository.Name == name {
-						return repository, nil
-					}
-				}
-				if page.NextCursor == "" {
-					return model.Repository{}, store.ErrNotFound
-				}
-				cursor = page.NextCursor
+			// Only public repositories resolve by name for an anonymous caller.
+			repository, err := t.store.GetRepositoryByName(ctx, name)
+			if err != nil {
+				return model.Repository{}, err
 			}
+			if !repository.Public {
+				return model.Repository{}, store.ErrNotFound
+			}
+			return repository, nil
 		}
 	}
 	rawID, ok := strings.CutPrefix(resource, "lore-")
 	id, validID := canonicalRepositoryID(rawID)
 	if !ok || !validID {
-		return model.Repository{}, errors.New("invalid repository resource")
+		return model.Repository{}, errInvalidResource
 	}
 	return t.store.GetRepository(ctx, id)
 }
@@ -295,8 +305,11 @@ func (t *TokenExchange) authenticate(ctx context.Context, token string) (model.U
 	if claims.Issuer != t.issuer || claims.Expires <= time.Now().Unix() || !slices.Contains(claims.Audience, "lore-server") {
 		return model.User{}, errors.New("token claims are invalid")
 	}
+	if claims.Subject == anonymousSubject {
+		return model.User{}, errors.New("anonymous token has no user")
+	}
 	user, err := t.store.GetUser(ctx, claims.Subject)
-	if err != nil || user.Disabled {
+	if err != nil || !user.Active() {
 		return model.User{}, errors.New("user is unavailable")
 	}
 	return user, nil

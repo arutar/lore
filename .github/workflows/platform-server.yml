@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: MIT
+
+name: Platform Server
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/platform-server.yml"
+      - "platform/control-plane/**"
+      - "platform/web/**"
+      - "platform/deploy/**"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: platform-server-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  control-plane:
+    name: Control plane tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container: golang:1.27.3
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: lore
+          POSTGRES_PASSWORD: lore-ci-only
+          POSTGRES_DB: lore
+        options: >-
+          --health-cmd "pg_isready -U lore -d lore"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      # The store tests run against PostgreSQL as well as the in-memory store when this is set.
+      TEST_DATABASE_URL: postgres://lore:lore-ci-only@postgres:5432/lore?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check formatting
+        working-directory: platform/control-plane
+        run: test -z "$(gofmt -l cmd internal)"
+      - name: Vet
+        working-directory: platform/control-plane
+        run: go vet ./...
+      - name: Test
+        working-directory: platform/control-plane
+        run: go test ./... -count=1 -race
+
+  web:
+    name: WebUI build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: platform/web/package-lock.json
+      - name: Build
+        working-directory: platform/web
+        run: npm ci && npm run build
+
+  deploy-scripts:
+    name: Deployment script syntax
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Shell scripts parse and have LF line endings
+        run: |
+          for script in platform/deploy/*.sh platform/clients/*.sh; do
+            sh -n "$script"
+            if grep -q "$(printf '\r')" "$script"; then echo "$script has CRLF line endings" >&2; exit 1; fi
+          done
+          for script in platform/deploy/keycloak/*.sh platform/deploy/test/*.sh; do
+            bash -n "$script"
+            if grep -q "$(printf '\r')" "$script"; then echo "$script has CRLF line endings" >&2; exit 1; fi
+          done

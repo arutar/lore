@@ -30,11 +30,16 @@ func (f fakeAuth) AuthenticateBearer(_ context.Context, token string) (model.Use
 
 func testServices(t *testing.T) (userv1.UserServiceClient, userv1.RepositoryRegistryServiceClient, context.Context, *store.Memory) {
 	t.Helper()
+	return testServicesAs(t, model.User{ID: "user", Username: "alice", Role: model.RoleAdmin})
+}
+
+func testServicesAs(t *testing.T, caller model.User) (userv1.UserServiceClient, userv1.RepositoryRegistryServiceClient, context.Context, *store.Memory) {
+	t.Helper()
 	storage := store.NewMemory()
 	storage.UpsertUser(context.Background(), model.User{ID: "user", Username: "alice", DisplayName: "Alice", Role: model.RoleUser})
 	listener := bufconn.Listen(1024 * 1024)
 	server := grpc.NewServer()
-	New(storage, fakeAuth{user: model.User{ID: "user", Username: "alice", Role: model.RoleUser}}).Register(server)
+	New(storage, fakeAuth{user: caller}).Register(server)
 	go server.Serve(listener)
 	t.Cleanup(server.Stop)
 	connection, err := grpc.NewClient("passthrough:///bufnet", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
@@ -73,6 +78,33 @@ func TestDirectoryAndRegistryRoundTrip(t *testing.T) {
 	}
 	if _, err := registry.RepositoryUnregister(ctx, &userv1.RepositoryUnregisterRequest{Id: id}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRegistryAllowsOnlyAdministratorsAndTheServiceAccount(t *testing.T) {
+	id := make([]byte, 16)
+	id[15] = 7
+	for _, testCase := range []struct {
+		name   string
+		caller model.User
+		want   codes.Code
+	}{
+		{"user", model.User{ID: "user", Username: "alice", Role: model.RoleUser}, codes.PermissionDenied},
+		{"service account", model.User{ID: "svc", Username: "service-account-lore-control-plane", Role: model.RoleUser, Source: serviceSource}, codes.OK},
+		{"administrator", model.User{ID: "user", Username: "alice", Role: model.RoleAdmin}, codes.OK},
+	} {
+		_, registry, ctx, storage := testServicesAs(t, testCase.caller)
+		_, err := registry.RepositoryRegister(ctx, &userv1.RepositoryRegisterRequest{Id: id, Name: "assets"})
+		if status.Code(err) != testCase.want {
+			t.Fatalf("%s: RepositoryRegister error = %v, want %s", testCase.name, err, testCase.want)
+		}
+		if _, err := storage.GetRepository(context.Background(), "00000000-0000-0000-0000-000000000007"); (err == nil) != (testCase.want == codes.OK) {
+			t.Fatalf("%s: repository stored = %v", testCase.name, err == nil)
+		}
+	}
+	_, registry, ctx, _ := testServices(t)
+	if _, err := registry.RepositoryRegister(ctx, &userv1.RepositoryRegisterRequest{Id: id, Name: "../escape"}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("invalid name error = %v", err)
 	}
 }
 

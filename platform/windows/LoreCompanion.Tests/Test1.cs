@@ -193,3 +193,37 @@ public sealed class RequestContractTests
         await Assert.ThrowsExactlyAsync<InvalidDataException>(() => SsoLogout.Logout("oidc+file:///tmp/logout", "", "token"));
     }
 }
+
+[TestClass]
+public sealed class AccountReplacementTests
+{
+    [TestMethod]
+    public void SignInReplacesOtherAccountsOfTheSameIdentityProvider()
+    {
+        var signedIn = new StoredAccount("oidc+https://lore.example/auth/realms/lore", "new", "bob", "lore.example");
+        var accounts = new[]
+        {
+            signedIn,
+            new StoredAccount("oidc+https://LORE.example/auth/realms/lore", "old", "alice", "lore.example"),
+            new StoredAccount("oidc+https://other.example/auth/realms/lore", "elsewhere", "carol", "other.example"),
+        };
+        var replaced = LoreAccounts.Superseded(accounts, signedIn);
+        Assert.HasCount(1, replaced);
+        Assert.AreEqual("old", replaced[0].UserId);
+    }
+
+    [TestMethod]
+    public void SigningInAgainWithTheSameAccountReplacesNothing()
+    {
+        var signedIn = new StoredAccount("oidc+https://lore.example/auth/realms/lore", "same", "bob", "lore.example");
+        Assert.HasCount(0, LoreAccounts.Superseded([signedIn, signedIn with { Domains = "lore.example, cdn.lore.example" }], signedIn));
+    }
+
+    [TestMethod]
+    public void SignInMessageNamesTheReplacedAccount()
+    {
+        StringAssert.Contains(LoreAccounts.SignInMessage(new SignInResult("new", ["alice"], true)), "alice");
+        StringAssert.Contains(LoreAccounts.SignInMessage(new SignInResult("new", ["alice"], false)), "couldn't be reached");
+        Assert.AreEqual("Signed in.", LoreAccounts.SignInMessage(new SignInResult("new", [], true)));
+    }
+}

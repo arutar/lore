@@ -6,9 +6,23 @@ command -v docker >/dev/null 2>&1 || { echo "Docker is required" >&2; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 is required" >&2; exit 1; }
 docker info >/dev/null 2>&1 || { echo "Docker engine isn't running" >&2; exit 1; }
 
-if [ -f .env ]; then
-    set -a; . ./.env; set +a
-fi
+# load_env reads KEY=VALUE lines literally (no shell evaluation, so values may contain
+# spaces, quotes or $). A variable already set in the environment wins over .env, so
+# `LORE_PUBLIC_HOST=new.example sh setup.sh` changes a saved setting.
+load_env() {
+    [ -f .env ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line%"$(printf '\r')"}
+        case "$line" in
+            ''|'#'*) continue ;;
+            *=*) key=${line%%=*}; value=${line#*=} ;;
+            *) continue ;;
+        esac
+        case "$key" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
+        if eval "[ -z \"\${$key+set}\" ]"; then export "$key=$value"; fi
+    done < .env
+}
+load_env
 PUBLIC_HOST=${LORE_PUBLIC_HOST:-host.docker.internal}
 SCHEME=${LORE_PUBLIC_SCHEME:-http}
 if [ "$SCHEME" = "https" ]; then
@@ -37,10 +51,14 @@ if [ ! -f .env ]; then
     } > .env
 fi
 chmod 600 .env 2>/dev/null || true
-set -a; . ./.env; set +a
+load_env
 : "${POSTGRES_PASSWORD:?}" "${KEYCLOAK_ADMIN_PASSWORD:?}" "${LORE_ADMIN_PASSWORD:?}" "${LORE_SERVICE_CLIENT_SECRET:?}"
 
-mkdir -p data/generated/caddy data/postgres data/lore data/control-plane data/caddy
+# Every path below derives from the data root, so a custom LORE_DATA_ROOT moves the
+# generated configuration together with the data that compose mounts from it.
+DATA_ROOT=${LORE_DATA_ROOT:-./data}
+GENERATED=$DATA_ROOT/generated
+mkdir -p "$GENERATED/caddy" "$DATA_ROOT/postgres" "$DATA_ROOT/lore" "$DATA_ROOT/control-plane" "$DATA_ROOT/caddy"
 escape_sed() { printf '%s' "$1" | sed 's/[&|\\]/\\&/g'; }
 escape_json() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 set_env() {
@@ -62,23 +80,21 @@ set_env LORE_PUBLIC_ADDRESS "$PUBLIC_ADDRESS"
 if [ "$SCHEME" = "https" ]; then set_env SECURE_COOKIES true; else set_env SECURE_COOKIES false; fi
 for name in LORE_LDAP_URL LORE_LDAP_BASE_DN LORE_LDAP_BIND_DN LORE_LDAP_BIND_PASSWORD \
     LORE_LDAP_USERNAME_ATTRIBUTE LORE_LDAP_STARTTLS LORE_LDAP_INSECURE_SKIP_VERIFY LORE_LDAP_TIMEOUT \
+    LORE_LDAP_REFRESH LORE_LDAP_OUTAGE_GRACE \
     LORE_SMTP_HOST LORE_SMTP_PORT LORE_SMTP_FROM LORE_SMTP_FROM_NAME LORE_SMTP_USERNAME LORE_SMTP_PASSWORD \
-    LORE_SMTP_STARTTLS LORE_SMTP_SSL LORE_DATA_ROOT LORE_PROXY_BIND; do
+    LORE_SMTP_STARTTLS LORE_SMTP_SSL LORE_DATA_ROOT LORE_PROXY_BIND LORE_CONTROL_PLANE_IMAGE LORE_SERVER_IMAGE; do
     eval "value=\${$name:-}"
     if [ -n "$value" ]; then set_env "$name" "$value"; fi
 done
 WEB_ESCAPED=$(escape_sed "$WEB_URL")
 KEYCLOAK_ESCAPED=$(escape_sed "$KEYCLOAK_URL")
 HOST_ESCAPED=$(escape_sed "$PUBLIC_HOST")
-SERVICE_ESCAPED=$(escape_sed "$LORE_SERVICE_CLIENT_SECRET")
-ADMIN_ESCAPED=$(escape_sed "$LORE_ADMIN_PASSWORD")
 sed -e "s|http://host.docker.internal:8080/auth|$KEYCLOAK_ESCAPED|g" -e "s|http://host.docker.internal:8080|$WEB_ESCAPED|g" \
-    lore/docker.toml > data/generated/lore.toml
+    lore/docker.toml > "$GENERATED/lore.toml"
 sed -e "s|http://localhost:8080|$WEB_ESCAPED|g" -e "s|host.docker.internal|$HOST_ESCAPED|g" \
-    -e "s|lore-service-dev-only|$SERVICE_ESCAPED|g" -e "s|admin-dev-only|$ADMIN_ESCAPED|g" \
-    keycloak/lore-realm.json > data/generated/lore-realm.json
+    keycloak/lore-realm.json > "$GENERATED/lore-realm.json"
 if [ "$SCHEME" = "https" ]; then
-    sed -i 's/"sslRequired": "none"/"sslRequired": "external"/' data/generated/lore-realm.json
+    sed -i 's/"sslRequired": "none"/"sslRequired": "external"/' "$GENERATED/lore-realm.json"
 fi
 if [ -n "${LORE_SMTP_HOST:-}" ]; then
     case "${LORE_SMTP_FROM:-}" in
@@ -89,12 +105,12 @@ if [ -n "${LORE_SMTP_HOST:-}" ]; then
     SMTP_BLOCK=$(printf '"smtpServer": {"host":"%s","port":"%s","from":"%s","fromDisplayName":"%s","starttls":"%s","ssl":"%s","auth":"%s","user":"%s","password":"%s"}' \
         "$(escape_json "$LORE_SMTP_HOST")" "$(escape_json "${LORE_SMTP_PORT:-587}")" "$(escape_json "${LORE_SMTP_FROM:-}")" \
         "$(escape_json "${LORE_SMTP_FROM_NAME:-Lore}")" "$(escape_json "${LORE_SMTP_STARTTLS:-true}")" "$(escape_json "${LORE_SMTP_SSL:-false}")" \
-        "$SMTP_AUTH" "$(escape_json "${LORE_SMTP_USERNAME:-}")" "$(escape_json "${LORE_SMTP_PASSWORD:-}")")
-    SMTP_BLOCK="$SMTP_BLOCK" awk '{if (index($0, "\"smtpServer\": {}")) print ENVIRON["SMTP_BLOCK"] ","; else print}' data/generated/lore-realm.json > data/generated/lore-realm.tmp
-    mv data/generated/lore-realm.tmp data/generated/lore-realm.json
-    sed -i 's/"resetPasswordAllowed": false/"resetPasswordAllowed": true/' data/generated/lore-realm.json
+        "$SMTP_AUTH" "$(escape_json "${LORE_SMTP_USERNAME:-}")" '${LORE_SMTP_PASSWORD}')
+    SMTP_BLOCK="$SMTP_BLOCK" awk '{if (index($0, "\"smtpServer\": {}")) print ENVIRON["SMTP_BLOCK"] ","; else print}' "$GENERATED/lore-realm.json" > "$GENERATED/lore-realm.tmp"
+    mv "$GENERATED/lore-realm.tmp" "$GENERATED/lore-realm.json"
+    sed -i 's/"resetPasswordAllowed": false/"resetPasswordAllowed": true/' "$GENERATED/lore-realm.json"
 else
-    sed -i -e 's/"verifyEmail": true/"verifyEmail": false/' -e 's/"resetPasswordAllowed": true/"resetPasswordAllowed": false/' data/generated/lore-realm.json
+    sed -i -e 's/"verifyEmail": true/"verifyEmail": false/' -e 's/"resetPasswordAllowed": true/"resetPasswordAllowed": false/' "$GENERATED/lore-realm.json"
 fi
 if [ -n "${LORE_LDAP_URL:-}" ]; then
     LDAP_STARTTLS=${LORE_LDAP_STARTTLS:-false}
@@ -103,14 +119,13 @@ if [ -n "${LORE_LDAP_URL:-}" ]; then
     LDAP_URL=$(escape_sed "$(escape_json "$LORE_LDAP_URL")")
     LDAP_BASE_DN=$(escape_sed "$(escape_json "$LORE_LDAP_BASE_DN")")
     LDAP_BIND_DN=$(escape_sed "$(escape_json "$LORE_LDAP_BIND_DN")")
-    LDAP_BIND_PASSWORD=$(escape_sed "$(escape_json "$LORE_LDAP_BIND_PASSWORD")")
     sed -e "s|__LORE_LDAP_URL__|$LDAP_URL|g" -e "s|__LORE_LDAP_BASE_DN__|$LDAP_BASE_DN|g" \
-        -e "s|__LORE_LDAP_BIND_DN__|$LDAP_BIND_DN|g" -e "s|__LORE_LDAP_BIND_PASSWORD__|$LDAP_BIND_PASSWORD|g" \
+        -e "s|__LORE_LDAP_BIND_DN__|$LDAP_BIND_DN|g" \
         -e "s|__LORE_LDAP_STARTTLS__|$LDAP_STARTTLS|g" -e "s|__LORE_LDAP_USE_TRUSTSTORE__|$LDAP_TRUSTSTORE|g" \
-        keycloak/ldap-provider.json > data/generated/ldap-provider.json
+        keycloak/ldap-provider.json > "$GENERATED/ldap-provider.json"
     awk 'FNR==NR {provider=provider $0 "\n"; next} index($0, "\"components\": {}") {printf "\"components\": {\"org.keycloak.storage.UserStorageProvider\":[\n%s]},\n", provider; next} {print}' \
-        data/generated/ldap-provider.json data/generated/lore-realm.json > data/generated/lore-realm.tmp
-    mv data/generated/lore-realm.tmp data/generated/lore-realm.json
+        "$GENERATED/ldap-provider.json" "$GENERATED/lore-realm.json" > "$GENERATED/lore-realm.tmp"
+    mv "$GENERATED/lore-realm.tmp" "$GENERATED/lore-realm.json"
     LDAP_HOST=$(printf '%s' "$LORE_LDAP_URL" | sed -E 's|^[a-zA-Z]+://||; s|[:/].*$||')
     case "$LDAP_HOST" in
         *.*|localhost) ;;
@@ -123,10 +138,10 @@ if [ -n "${LORE_LDAP_URL:-}" ]; then
             ;;
     esac
 fi
-rm -f data/generated/caddy/auth.conf
+rm -f "$GENERATED/caddy/auth.conf"
 if [ "$KEYCLOAK_URL" != "$WEB_URL/auth" ]; then
     AUTH_ADDRESS=$(printf '%s' "$KEYCLOAK_URL" | sed -E 's|^https?://||; s|/.*$||')
-    printf '%s\n\nreverse_proxy keycloak:8080\n' "$AUTH_ADDRESS" > data/generated/caddy/auth.conf
+    printf '%s {\n\timport keycloak_guard\n\thandle {\n\t\treverse_proxy keycloak:8080\n\t}\n}\n' "$AUTH_ADDRESS" > "$GENERATED/caddy/auth.conf"
 fi
 
 export POSTGRES_PASSWORD KEYCLOAK_ADMIN_PASSWORD LORE_SERVICE_CLIENT_SECRET
@@ -135,17 +150,25 @@ export LORE_EXCHANGE_PUBLIC_URL=$WEB_URL
 export KEYCLOAK_PUBLIC_URL=$KEYCLOAK_URL
 export LORE_PUBLIC_ADDRESS=$PUBLIC_ADDRESS
 export LORE_PROXY_BIND=${LORE_PROXY_BIND:-0.0.0.0}
-export LORE_REALM_FILE=./data/generated/lore-realm.json
-export LORE_CONFIG_FILE=./data/generated/lore.toml
+export LORE_REALM_FILE=$GENERATED/lore-realm.json
+export LORE_CONFIG_FILE=$GENERATED/lore.toml
 export LORE_TOKEN_SIGNING_KEY_FILE=//data/token-exchange-signing.pem
 if [ "$SCHEME" = "https" ]; then export SECURE_COOKIES=true; else export SECURE_COOKIES=false; fi
 
+# Published images (LORE_CONTROL_PLANE_IMAGE and LORE_SERVER_IMAGE, for example
+# ghcr.io/arutar/lore-platform-control-plane:0.1.12) are pulled; otherwise both are built
+# from this checkout, which compiles the Rust server and takes much longer.
+if [ -n "${LORE_CONTROL_PLANE_IMAGE:-}" ] && [ -n "${LORE_SERVER_IMAGE:-}" ]; then
+    BUILD=--pull=always
+else
+    BUILD=--build
+fi
 if [ "${LORE_DIRECT_CADDY:-false}" = "true" ]; then
     COMPOSE_FILES="-f compose.yaml -f compose.caddy.yaml"
     case "$PUBLIC_HOST" in localhost|*.internal) COMPOSE_FILES="$COMPOSE_FILES -f compose.caddy-local.yaml" ;; esac
     case "$COMPOSE_FILES" in
         *caddy-local.yaml)
-            docker compose $COMPOSE_FILES up -d --build --wait --wait-timeout 240 caddy
+            docker compose $COMPOSE_FILES up -d $BUILD --wait --wait-timeout 240 caddy
             CERTIFICATE="${LORE_DATA_ROOT:-./data}/caddy/caddy/pki/authorities/local/root.crt"
             for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
                 [ -f "$CERTIFICATE" ] && break
@@ -154,13 +177,22 @@ if [ "${LORE_DIRECT_CADDY:-false}" = "true" ]; then
             [ -f "$CERTIFICATE" ] || { echo "Caddy local CA wasn't created" >&2; exit 1; }
             ;;
     esac
-    docker compose $COMPOSE_FILES up -d --build --wait --wait-timeout 240
+    docker compose $COMPOSE_FILES up -d $BUILD --wait --wait-timeout 240
 else
     COMPOSE_FILES="-f compose.yaml"
-    docker compose $COMPOSE_FILES up -d --build --wait --wait-timeout 240
+    docker compose $COMPOSE_FILES up -d $BUILD --wait --wait-timeout 240
 fi
 
-docker compose $COMPOSE_FILES exec -T keycloak bash -c 'set -e; KC=/opt/keycloak/bin/kcadm.sh; "$KC" config credentials --server http://127.0.0.1:8080/auth --realm master --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD"; "$KC" add-roles -r lore --uusername service-account-lore-control-plane --cclientid realm-management --rolename manage-realm; "$KC" add-roles -r lore --uusername service-account-lore-control-plane --cclientid realm-management --rolename manage-users'
+# The realm file is imported only on the first start; bring an existing realm in line with
+# the current settings. Secrets reach the script through the container environment.
+docker compose $COMPOSE_FILES exec -T \
+    -e LORE_PUBLIC_URL="$WEB_URL" -e LORE_PUBLIC_HOST="$PUBLIC_HOST" -e LORE_PUBLIC_SCHEME="$SCHEME" \
+    -e LORE_SMTP_HOST="${LORE_SMTP_HOST:-}" -e LORE_SMTP_PORT="${LORE_SMTP_PORT:-}" -e LORE_SMTP_FROM="${LORE_SMTP_FROM:-}" \
+    -e LORE_SMTP_FROM_NAME="${LORE_SMTP_FROM_NAME:-}" -e LORE_SMTP_USERNAME="${LORE_SMTP_USERNAME:-}" \
+    -e LORE_SMTP_STARTTLS="${LORE_SMTP_STARTTLS:-}" -e LORE_SMTP_SSL="${LORE_SMTP_SSL:-}" \
+    -e LORE_LDAP_URL="${LORE_LDAP_URL:-}" -e LORE_LDAP_BASE_DN="${LORE_LDAP_BASE_DN:-}" -e LORE_LDAP_BIND_DN="${LORE_LDAP_BIND_DN:-}" \
+    -e LORE_LDAP_STARTTLS="${LORE_LDAP_STARTTLS:-}" -e LORE_LDAP_INSECURE_SKIP_VERIFY="${LORE_LDAP_INSECURE_SKIP_VERIFY:-}" \
+    keycloak bash /opt/lore/configure-realm.sh
 
-printf '\nLore is ready.\nWebUI: %s\nKeycloak: %s\nAdministrator: admin\nInitial administrator password: %s\nData: %s/data\n' \
-    "$WEB_URL" "$KEYCLOAK_URL" "$LORE_ADMIN_PASSWORD" "$(pwd)"
+printf '\nLore is ready.\nWebUI: %s\nKeycloak: %s\nAdministrator: admin\nInitial administrator password: %s\nData: %s\n' \
+    "$WEB_URL" "$KEYCLOAK_URL" "$LORE_ADMIN_PASSWORD" "$(cd "$DATA_ROOT" && pwd)"

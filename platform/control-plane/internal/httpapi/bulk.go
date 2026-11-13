@@ -13,6 +13,7 @@ import (
 
 	"github.com/arutar/lore/platform/control-plane/internal/model"
 	"github.com/arutar/lore/platform/control-plane/internal/policy"
+	"github.com/arutar/lore/platform/control-plane/internal/store"
 )
 
 const maxBulkRows = 10_000
@@ -78,6 +79,12 @@ func (s *Server) importGrants(w http.ResponseWriter, r *http.Request) {
 			result.Errors = append(result.Errors, bulkError{Line: line, Message: "Grant is invalid"})
 			return
 		}
+		resolved, err := s.resolveSubject(r.Context(), grant)
+		if err != nil {
+			result.Errors = append(result.Errors, bulkError{Line: line, Message: "Couldn't validate user or group"})
+			return
+		}
+		grant.Subject = resolved
 		valid, err := s.validGrantSubject(r.Context(), grant)
 		if err != nil {
 			result.Errors = append(result.Errors, bulkError{Line: line, Message: "Couldn't validate user or group"})
@@ -105,7 +112,7 @@ func (s *Server) importGrants(w http.ResponseWriter, r *http.Request) {
 		})
 	} else {
 		var grants []model.Grant
-		if err = decodeBulkJSON(w, r, &grants); err == nil {
+		if err = decodeBulkJSON(w, r, &grants, true); err == nil {
 			if len(grants) > maxBulkRows {
 				err = errors.New("too many rows")
 			} else {
@@ -145,11 +152,15 @@ func (s *Server) exportUsers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) importUsers(w http.ResponseWriter, r *http.Request) {
 	actor, _ := currentUser(r.Context())
 	result := bulkResult{Errors: []bulkError{}}
+	// Import changes only the role and status of accounts that already exist. Accounts
+	// come from Active Directory or local creation; groups come from the directory. An
+	// import that created accounts or set groups could squat a name or grant a group's
+	// access to anyone, and a plain export-import round trip used to rewrite every
+	// directory account as an imported one.
 	apply := func(line int, record userRecord) {
 		record.ID = strings.TrimSpace(record.ID)
-		record.Username = strings.TrimSpace(record.Username)
-		if record.ID == "" || record.Username == "" || len(record.ID) > 512 || len(record.Username) > 256 {
-			result.Errors = append(result.Errors, bulkError{Line: line, Message: "ID and username are required"})
+		if record.ID == "" || len(record.ID) > 512 {
+			result.Errors = append(result.Errors, bulkError{Line: line, Message: "ID is required"})
 			return
 		}
 		if record.Role == "" {
@@ -159,20 +170,24 @@ func (s *Server) importUsers(w http.ResponseWriter, r *http.Request) {
 			result.Errors = append(result.Errors, bulkError{Line: line, Message: "Role must be admin or user"})
 			return
 		}
+		existing, err := s.store.GetUser(r.Context(), record.ID)
+		if errors.Is(err, store.ErrNotFound) {
+			result.Errors = append(result.Errors, bulkError{Line: line, Message: "User doesn't exist. Add it from Active Directory or create a local account first"})
+			return
+		}
+		if err != nil {
+			result.Errors = append(result.Errors, bulkError{Line: line, Message: "Couldn't read user"})
+			return
+		}
 		if actor.ID == record.ID && (record.Disabled || record.Role != model.RoleAdmin) {
 			result.Errors = append(result.Errors, bulkError{Line: line, Message: "You can't disable or demote your own account"})
 			return
 		}
-		user, err := s.store.UpsertUser(r.Context(), model.User{
-			ID: record.ID, Username: record.Username, Email: record.Email, DisplayName: record.DisplayName,
-			Role: record.Role, Groups: record.Groups, Source: "import",
-		})
-		if err == nil && (user.Role != record.Role || user.Disabled != record.Disabled) {
-			user, err = s.store.UpdateUser(r.Context(), actor.ID, user.ID, record.Role, record.Disabled)
-		}
-		if err != nil {
-			result.Errors = append(result.Errors, bulkError{Line: line, Message: "Couldn't save user"})
-			return
+		if existing.Role != record.Role || existing.Disabled != record.Disabled {
+			if _, err := s.store.UpdateUser(r.Context(), actor.ID, record.ID, record.Role, record.Disabled); err != nil {
+				result.Errors = append(result.Errors, bulkError{Line: line, Message: "Couldn't save user"})
+				return
+			}
 		}
 		result.Imported++
 	}
@@ -193,7 +208,9 @@ func (s *Server) importUsers(w http.ResponseWriter, r *http.Request) {
 		})
 	} else {
 		var users []userRecord
-		if err = decodeBulkJSON(w, r, &users); err == nil {
+		// Lenient: a JSON export lists every user field, and only id, role and disabled
+		// matter here, so the export must load back as is.
+		if err = decodeBulkJSON(w, r, &users, false); err == nil {
 			if len(users) > maxBulkRows {
 				err = errors.New("too many rows")
 			} else {
@@ -214,7 +231,7 @@ func (s *Server) allUsers(ctx context.Context) ([]model.User, error) {
 	users := []model.User{}
 	cursor := ""
 	for {
-		page, err := s.store.ListUsers(ctx, cursor, 100)
+		page, err := s.store.ListUsers(ctx, "", cursor, 100)
 		if err != nil {
 			return nil, err
 		}
@@ -226,9 +243,11 @@ func (s *Server) allUsers(ctx context.Context) ([]model.User, error) {
 	}
 }
 
-func decodeBulkJSON(w http.ResponseWriter, r *http.Request, destination any) error {
+func decodeBulkJSON(w http.ResponseWriter, r *http.Request, destination any, strict bool) error {
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxJSONBody))
-	decoder.DisallowUnknownFields()
+	if strict {
+		decoder.DisallowUnknownFields()
+	}
 	if err := decoder.Decode(destination); err != nil {
 		return errors.New("expected a JSON array")
 	}

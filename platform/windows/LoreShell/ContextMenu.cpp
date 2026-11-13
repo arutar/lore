@@ -2,7 +2,7 @@
 #include "Resource.h"
 #include <shlwapi.h>
 #include <shellapi.h>
-#include <gdiplus.h>
+#include <cstring>
 #include <sstream>
 
 namespace
@@ -55,41 +55,60 @@ struct Invocation
     std::vector<std::wstring> paths;
 };
 
+// Menu item bitmaps must be 32-bit premultiplied ARGB. Gdiplus::Bitmap(HICON) drops the alpha
+// channel and keeps only the 1-bit mask, which gave the icons hard, jagged edges; DrawIconEx into a
+// zeroed 32-bit DIB keeps the icon's own antialiasing. The size follows the system DPI, so at 125 %
+// or 150 % Windows doesn't stretch a 16 px bitmap.
+HBITMAP IconBitmap(int resource, int size)
+{
+    // The icons carry 16, 20, 24, 32 and 48 px images, so LoadImage picks an exact size for the usual
+    // scale factors and only stretches for unusual ones.
+    HICON icon = static_cast<HICON>(LoadImageW(g_instance, MAKEINTRESOURCEW(resource), IMAGE_ICON, size, size, LR_DEFAULTCOLOR));
+    if (!icon) return nullptr;
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = size;
+    info.bmiHeader.biHeight = -size;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HDC screen = GetDC(nullptr);
+    HBITMAP bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HDC dc = CreateCompatibleDC(screen);
+    ReleaseDC(nullptr, screen);
+    if (bitmap && dc)
+    {
+        std::memset(bits, 0, static_cast<size_t>(size) * size * 4);
+        const auto previous = SelectObject(dc, bitmap);
+        DrawIconEx(dc, 0, 0, icon, size, size, 0, nullptr, DI_NORMAL);
+        SelectObject(dc, previous);
+        GdiFlush();
+    }
+    if (dc) DeleteDC(dc);
+    DestroyIcon(icon);
+    return bitmap;
+}
+
 HBITMAP LoreMenuBitmap(int operation = -1)
 {
     constexpr int operationCount = 9;
     if (operation < -1 || operation >= operationCount) return nullptr;
-    static HBITMAP bitmaps[operationCount + 1]{};
     constexpr int resources[operationCount + 1]{
         IDI_LORE, IDI_LORE_CLONE, IDI_LORE_SYNC, IDI_LORE_COMMIT,
         IDI_LORE_STAGE, IDI_LORE_STATUS, IDI_LORE_HISTORY, IDI_LORE_LOCK, IDI_LORE_UNLOCK, IDI_LORE_STATUS,
     };
-    auto& bitmap = bitmaps[operation + 1];
-    if (bitmap) return bitmap;
-    const auto resource = resources[operation + 1];
-    bitmap = [resource]
+    const int size = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem());
+    static int cachedSize = 0;
+    static HBITMAP bitmaps[operationCount + 1]{};
+    if (size != cachedSize)
     {
-        static ULONG_PTR gdiplus = []
-        {
-            Gdiplus::GdiplusStartupInput input;
-            ULONG_PTR token = 0;
-            return Gdiplus::GdiplusStartup(&token, &input, nullptr) == Gdiplus::Ok ? token : 0;
-        }();
-        if (!gdiplus) return static_cast<HBITMAP>(nullptr);
-        HICON icon = static_cast<HICON>(LoadImageW(g_instance, MAKEINTRESOURCE(resource), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
-        if (!icon) return static_cast<HBITMAP>(nullptr);
-        Gdiplus::Bitmap source(icon);
-        Gdiplus::Bitmap canvas(16, 16, PixelFormat32bppARGB);
-        Gdiplus::Graphics graphics(&canvas);
-        graphics.Clear(Gdiplus::Color(0, 0, 0, 0));
-        graphics.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-        graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-        graphics.DrawImage(&source, Gdiplus::Rect(0, 0, 16, 16));
-        HBITMAP created = nullptr;
-        const auto status = canvas.GetHBITMAP(Gdiplus::Color(0, 0, 0, 0), &created);
-        DestroyIcon(icon);
-        return status == Gdiplus::Ok ? created : nullptr;
-    }();
+        // Menus keep using the handles they were given, so old bitmaps are left alive.
+        for (auto& bitmap : bitmaps) bitmap = nullptr;
+        cachedSize = size;
+    }
+    auto& bitmap = bitmaps[operation + 1];
+    if (!bitmap) bitmap = IconBitmap(resources[operation + 1], size);
     return bitmap;
 }
 

@@ -1,60 +1,80 @@
 # Текущее состояние Lore Platform
 
-Обновлено после локальной HTTP-приёмки WebUI, AD/SMTP и native Lore; изменения пока находятся в рабочей ветке.
+Обновлено 2026-11-13, после независимого ревью и исправлений по нему (фазы 0–4). Изменения пока в рабочем дереве, не в ветке на GitHub.
 
 ## Цель
 
-Self-hosted Lore с React WebUI, Go control plane, PostgreSQL, Keycloak, AD/LDAP и внешними email-пользователями. Роли admin/user/guest, additive grants `none < read < write < owner`, приватные репозитории скрыты без grant. Windows клиент включает CLI, companion и Explorer integration; Linux использует CLI.
+Простой аналог SVN на основе Lore: self-hosted сервер с WebUI, интеграция с Проводником Windows, работа во внутренней сети без интернета и во внешней сети, установка одной командой через Docker Compose. Вход через Keycloak: учётки Active Directory и локальные (email). Роли admin/user, права на репозиторий `none < read < write < owner`, приватные репозитории без права не видны. Windows-клиент — CLI, Companion и расширение Проводника; Linux — CLI.
+
+## Состав
+
+| Компонент | Что делает |
+|---|---|
+| Go control plane | WebUI API, сессии, права, аудит, обмен токенов для нативного клиента, gRPC для сервера Lore |
+| PostgreSQL | две базы: `lore` (control plane) и `keycloak` |
+| Keycloak 26.4 | вход OIDC, device flow, федерация AD, регистрация и письма; запускается в production-режиме |
+| Сервер Lore | форк EpicGames/lore: хранилище, ревизии, блокировки |
+| Caddy | единый вход HTTP/HTTPS; админка Keycloak и realm `master` закрыты |
+| WebUI | React + TypeScript, вариант «Studio», русский и английский, 10 тем |
+| Windows | C++ COM-расширение Проводника, C# Companion (WebView2), MSI на WiX |
 
 ## Реализовано и проверено
 
-- WebUI: каталог, пользователи, репозитории, grants, audit, CSV/JSON import/export и глобальные темы из SoftwareVoronezh.
-- Lore gRPC `UserService` и `RepositoryRegistryService`.
-- Настоящий `RepositoryCreate` из WebUI через service account.
-- ACL-aware OIDC token exchange с repository-scoped JWT.
-- Реальный сценарий `Clone → Stage → Commit → Sync` через официальный `LoreVcs` SDK.
-- Compose с PostgreSQL, Keycloak, Lore, Caddy и healthchecks.
-- Host bind storage: `platform/deploy/data/`; `LORE_DATA_ROOT` меняет расположение.
-- Setup: `platform/deploy/setup.sh` и `setup.ps1`; случайные секреты, один домен по умолчанию, отдельный auth-домен опционально. Публичный URL, LDAP и SMTP сохраняются в `.env`, обычный `docker compose up` после restart не требует ручных переменных. Все сервисы имеют `restart: unless-stopped`.
-- Registration toggle синхронизирован с Keycloak Admin API; service account автоматически получает `manage-realm` и `manage-users`. Без SMTP setup отключает verification/reset email, локальные учётки создаёт администратор.
-- Реальный AD вход проверен через полный OIDC flow. Control plane получил 17 nested groups как стабильные `objectGUID`; LDAP provider использует read-only mode и доверенные AD email. Внешние email-пользователи не вызывают LDAP, режим без LDAP проверен.
-- Локальные пользователи создаются из WebUI с email и временным паролем; disable/enable синхронизирован с Keycloak. Полный OIDC logout завершает обе сессии и требует пароль при следующем входе. Админка Keycloak и master realm закрыты на Caddy, отдельный порт Keycloak не публикуется.
-- Реальный SSL SMTP на порту 465 и внешняя регистрация проверены через форму Keycloak; verification email успешно отправлен. Регистрация восстановлена в выключенное состояние.
-- Native HTTP E2E: browser/device login, clone, запрет push при read-only, push после write grant и sync во втором рабочем каталоге. Исправлены read permission и `root_domains` в exchanged JWT.
-- WebUI показывает tree, history и locks через штатные Lore gRPC services. History сопоставляет UUID авторов с логинами; используются официальные Lore favicon и знак без TM. Download проверяет путь в ревизии, читает полный CAS address и собирает fragmented/LZ4/Zstd content.
-- На реальном репозитории проверены OIDC permissions, tree/history/locks и побайтовое скачивание README и fragmented 1 МиБ файла. Go unit tests и WebUI build проходят.
-- Backup/restore включает базы `lore` и `keycloak`, CAS storage и signing key. Windows и shell архивы взаимно совместимы; кросс-restore, SHA-256 и healthchecks после запуска проверены.
-- LDAP/SMTP JSON generation и escaping проверены для обеих setup-версий, включая свежий setup в Windows PowerShell 5.
-- Caddy HTTPS проверен локально на `lore.internal`; публичный ACME ещё не проверен.
-- Linux CLI installer проверен в чистом Debian container.
-- Windows companion на локальном React + WebView2 для всех восьми операций; WPF используется только как оконный host. Старый XAML UI удалён.
-- JSON request files вместо named pipe, all-users/per-user installers, проверка WebView2 Runtime и выбор локального bootstrapper, читаемые ошибки операций.
-- Полный набор из 28 SVG-иконок, PNG/ICO exports, воспроизводимые генераторы и автономный просмотрщик: `platform/windows/shared/svg/preview.html`.
-- Per-machine MSI на WiX 7.0.1: нативная регистрация shell/COM, machine PATH, стабильный UpgradeCode. GitHub Actions собрал MSI/ZIP/SHA256SUMS и успешно выполнил install/uninstall smoke.
-- MSI versioning исправлен: единый `PlatformVersion` попадает в companion, shell и installer. Подтверждена замена старой unversioned DLL; итоговая установка в `C:\Program Files\Lore` побайтово совпадает с payload и проходит shell smoke. Companion tests: 21 passed, 4 live tests пропущены по назначению.
-- Accounts поддерживает выбор и удаление сохранённых учёток. Add и вход из Retry автоматически назначают учётку серверу; операции получают её явный `userId`. Живой Clone приватного `megatest_repo` под admin проходит. Remove передаёт текущий access token в `/web/v1/native-logout`; control plane проверяет подпись и владельца, включая истёкшие JWT, и завершает его Keycloak-сессии через Admin API, затем выполняет Lore AuthLogout. Refresh и Sync перед удалением не нужны; учётка без токена тоже удаляется локально. Тихий выход без браузера подтверждён пользователем. Device flow и один экран Grant Access сохраняются.
-- Bootstrap admin получает `default-roles-lore` с `offline_access`; скрытый приватный Clone показывает ошибку доступа и кнопку смены учётки.
-- Explorer визуально принят: группа меню с сепараторами, прозрачные иконки и clean-overlay на корневой папке. CLSID MSI сверены с `Guids.h`; shell smoke проверяет separators, alpha и clean membership. Status агрегирует состояния в родительские папки, `.lore` скрывается, пустой commit message разрешён.
-- Upstream contribution для `http+insecure`: открыт EpicGames/lore#278. До ответа maintainers PR не создаётся; затем patch, release note, DCO и Rust проверки на свежем `upstream/main`.
+**Идентичность и права**
+- Учётка AD определяется по `objectGUID` (атрибут `LDAP_ID` Keycloak, claim `ldap_id`), а не по виду имени. Переименование в AD не создаёт новую учётку; новая учётка с занятым именем вытесняет прежнюю, права по имени не наследуются.
+- Группы AD, включая вложенные, читаются по `objectGUID`. Исключение из группы и отключение в AD доходят до WebUI и нативного клиента за `LORE_LDAP_REFRESH` (по умолчанию 5 минут). При недоступности AD известные группы действуют `LORE_LDAP_OUTAGE_GRACE` (8 часов), потом доступ по группам закрывается; локальные учётки входят без обращения к AD.
+- Локальный `admin` всегда существует: `setup` создаёт его заново, если его нет или если имя занято учёткой из AD. Keycloak ищет свои учётки раньше AD, поэтому под именем `admin` входит только локальная. Если прежде администратором была AD-учётка `admin`, роль переходит к локальной.
+- Первый администратор назначается один раз и только локальной учётке; учётка AD с именем `admin` роль не получает.
+- Токены нативного клиента принимаются только выпущенные для Lore (`aud`) клиентами `lore-native` или `lore-control-plane` (`azp`). Регистрация репозитория через gRPC — только администратору или сервисной учётке.
+- Анонимный clone — только для публичного репозитория, поиск по точному имени; приватный и несуществующий неотличимы (403).
+- Права выдаются пользователям и группам с поиском по имени; подсказки — от 2 символов, не больше 10 пользователей и 10 групп. WebUI не даёт понизить или удалить последнего владельца; сервер это не запрещает, но администратор управляет любым репозиторием.
+- Аудит: права, пользователи, репозитории, настройки, вытеснение учётки; новые события сверху, постранично.
 
-## Важные ограничения
+**Развёртывание**
+- `setup.sh` / `setup.ps1`: случайные секреты в `.env`, без секретов в шаблонах. Повторный запуск применяет изменения публичного адреса, LDAP, SMTP и секрета сервисного клиента к существующему realm (`keycloak/configure-realm.sh`) — Keycloak импортирует файл realm только при первом старте.
+- `LORE_DATA_ROOT` переносит все данные и сгенерированную конфигурацию; backup и restore берут его из `.env`.
+- Готовые образы: при заданных `LORE_CONTROL_PLANE_IMAGE` и `LORE_SERVER_IMAGE` setup скачивает их вместо сборки (workflow `platform-images.yml` публикует их в GHCR).
+- Backup: обе базы, хранилище Lore, ключ подписи, `.env`; архив доступен только владельцу, незавершённый backup не выглядит готовым, без хранилища или ключа backup отказывается выполняться.
+- Restore: проверка контрольных сумм до остановки сервисов, восстановление в отдельный каталог, страховочная копия текущих баз, восстановление каждой базы одной транзакцией, откат при ошибке. Повреждённый архив отклоняется без остановки сервисов.
+- Режим HTTP для внутренней сети: нативный клиент разрешает обычный HTTP к Keycloak на том же хосте, что и подключённый сервер Lore, без настройки на клиенте.
+- Заголовки безопасности: CSP, `X-Frame-Options`, `nosniff`, Referrer-Policy, Permissions-Policy, HSTS при HTTPS.
 
-- Одна старая renamed DLL остаётся занятой запущенным Total Commander до его перезапуска; рабочая MSI DLL установлена и используется новым Explorer.
-- WiX Burn setup и code signing пока не реализованы.
-- Публичный HTTPS/DNS с ACME ещё не проверены; compose-конфигурации direct Caddy и внешнего reverse proxy валидны, но для реальной проверки нужны публичный DNS и доступные порты 80/443.
-- Production release hardening ещё не завершён.
-- Dev-пароли в исходных шаблонах не предназначены для production; setup создаёт случайные значения.
+**WebUI**
+- Список репозиториев с поиском, подгрузкой и копированием адреса `lore://`; файлы, история, блокировки и скачивание через gRPC-сервисы Lore; доступ с поиском субъектов и отменой; пользователи с добавлением из AD; аудит; настройки темы, языка по умолчанию и регистрации; палитра команд Ctrl K; ширина от 390 px.
+- Поиск и постраничный вывод на сервере для каталога, репозиториев и пользователей.
+
+**Windows**
+- Вход в новую учётку на тот же сервер заменяет прежнюю: старые учётные данные удаляются, повторно входить не нужно.
+- Иконки команд меню Проводника — значок команды во весь размер, читаемый в 16 px; генератор `platform/windows/shared/svg/build-icons.mjs`, экспорт PNG/ICO — `export-icons.mjs`.
+- MSI на WiX 7.0.1 (per-machine, регистрация COM, PATH), единая версия компонентов; сборка и smoke install/uninstall в GitHub Actions — проверены для 0.1.11.
+
+**Проверки**
+- Go: модульные тесты; тесты хранилища выполняются и на памяти, и на PostgreSQL (`TEST_DATABASE_URL`, в CI — сервис PostgreSQL); `go test -race` в CI.
+- Сквозной тест `platform/deploy/test/e2e.sh`: setup → вход администратора через форму Keycloak → репозиторий и локальный пользователь → вход пользователя со сменой временного пароля → право → backup → изменения → restore → проверка состояния. В CI — `platform-e2e.yml`.
+- На стенде с живым AD и Keycloak (2026-11-12): чистая установка и повторный setup, вход, поиск в AD, нативные clone/commit/push, исключение из группы, отключение в AD, недоступность AD, backup/restore, повреждённый архив, WebUI.
+
+## Не проверено и ограничения
+
+- Клиент 0.1.12 (изменения входа и режима HTTP) не собран в MSI; вход с другой машины по HTTP и замена учётки в установленном клиенте не проверены.
+- Публичный DNS и ACME — нужен внешний сервер с портами 80/443.
+- Подпись релиза и WiX Burn (автоматическая установка WebView2) не реализованы.
+- Windows даёт ограниченное число слотов overlay-иконок; при установленных OneDrive, Dropbox или TortoiseSVN значки состояния Lore могут не отображаться.
+- Нативный протокол использует порт 41337 (TCP и UDP); из внешних сетей он может быть закрыт.
+- Сквозной тест в CI ещё не запускался на GitHub.
+- Сервер Lore — форк; изменения аутентификации предложены upstream в EpicGames/lore#278, до ответа maintainers переносятся вручную.
 
 ## Следующие этапы
 
-1. Проверить публичный DNS/ACME на внешнем сервере.
-2. Настроить подписанный release.
+1. Запустить `platform-e2e.yml` и сборку клиента 0.1.12 в GitHub Actions.
+2. Проверить MSI 0.1.12: установка, обновление поверх 0.1.11, замена учётки, вход по HTTP с другой машины.
+3. Публичный DNS/ACME на внешнем сервере.
+4. Подписанный релиз.
 
 ## Полезные команды
 
 ```powershell
-# Запуск хоста
-platform/deploy/setup.ps1
+# Установка и повторное применение настроек
+platform/deploy/setup.ps1            # или sh platform/deploy/setup.sh
 
 # Backup и restore
 platform/deploy/backup.ps1
@@ -64,8 +84,10 @@ platform/deploy/restore.ps1 -Backup platform/deploy/backups/BACKUP_NAME
 platform/clients/Install-Windows.ps1 -AllUsers
 
 # Проверки
-cd platform/control-plane; go test ./...
+cd platform/control-plane; go test ./...         # с TEST_DATABASE_URL — и на PostgreSQL
 cd platform/web; npm run build
+# Сквозной тест: только на тестовой установке, он выполняет restore
+LORE_E2E=destroy-test-data bash platform/deploy/test/e2e.sh
 ```
 
 Подробная архитектура и диаграммы: `platform/docs/architecture.md`.

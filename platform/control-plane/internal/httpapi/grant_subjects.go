@@ -4,86 +4,217 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"sort"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/arutar/lore/platform/control-plane/internal/directory"
 	"github.com/arutar/lore/platform/control-plane/internal/model"
 	"github.com/arutar/lore/platform/control-plane/internal/store"
 )
 
+// subjectSearchLimit caps each kind of suggestion: the grant form needs a handful of
+// matches, and an owner must not be able to page through the whole user list or directory.
+const subjectSearchLimit = 10
+
 type grantSubject struct {
-	Type      model.SubjectType `json:"type"`
-	ID        string            `json:"id"`
-	Value     string            `json:"value"`
-	Label     string            `json:"label"`
-	Detail    string            `json:"detail"`
-	Automated bool              `json:"automated"`
+	Type   model.SubjectType `json:"type"`
+	ID     string            `json:"id"`
+	Value  string            `json:"value"`
+	Label  string            `json:"label"`
+	Detail string            `json:"detail"`
 }
 
+// labeledGrant is a grant with a readable name for its subject.
+type labeledGrant struct {
+	model.Grant
+	Label  string `json:"label"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// grantSubjects suggests users and groups for the grant form. It answers only a search of
+// at least two characters with a few matches, never the full list.
 func (s *Server) grantSubjects(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := s.manageableRepository(w, r); !ok {
 		return
 	}
-	subjects, err := s.subjectList(r.Context())
+	query := searchQuery(r)
+	if len([]rune(query)) < 2 {
+		writeJSON(w, http.StatusOK, map[string]any{"items": []grantSubject{}})
+		return
+	}
+	subjects, err := s.searchSubjects(r.Context(), query)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "directory_unavailable", "Couldn't load users and groups")
+		writeError(w, http.StatusBadGateway, "directory_unavailable", "Couldn't search users and groups")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": subjects})
 }
 
-func (s *Server) subjectList(ctx context.Context) ([]grantSubject, error) {
-	users, err := s.allUsers(ctx)
+func (s *Server) searchSubjects(ctx context.Context, query string) ([]grantSubject, error) {
+	subjects := []grantSubject{}
+	page, err := s.store.ListUsers(ctx, query, "", subjectSearchLimit*2)
 	if err != nil {
 		return nil, err
 	}
-	subjects := make([]grantSubject, 0, len(users))
-	groupIDs := make(map[string]struct{})
-	for _, user := range users {
-		label := user.DisplayName
-		if label == "" {
-			label = user.Username
+	for _, user := range page.Items {
+		if !user.Active() || user.Source == SourceService || strings.HasPrefix(user.Username, "service-account-") {
+			continue
 		}
-		automated := strings.HasPrefix(user.Username, "service-account-")
-		if automated {
-			label = "Lore service (automation)"
-		}
-		subjects = append(subjects, grantSubject{
-			Type: model.SubjectUser, ID: user.ID, Value: user.Username, Label: label,
-			Detail: user.Email, Automated: automated,
-		})
-		for _, group := range user.Groups {
-			groupIDs[group] = struct{}{}
+		subjects = append(subjects, userSubject(user))
+		if len(subjects) == subjectSearchLimit {
+			break
 		}
 	}
-	groups := make(map[string]grantSubject)
 	if s.config.Directory != nil {
-		directoryGroups, err := s.config.Directory.ListGroups(ctx)
+		groups, err := s.config.Directory.SearchGroups(ctx, query, subjectSearchLimit)
 		if err != nil {
 			return nil, err
 		}
-		for _, group := range directoryGroups {
-			groups[group.ID] = grantSubject{Type: model.SubjectGroup, ID: group.ID, Value: group.Name, Label: group.Name, Detail: "Active Directory"}
+		for _, group := range groups {
+			subjects = append(subjects, groupSubject(group))
 		}
 	}
-	for id := range groupIDs {
-		if _, ok := groups[id]; !ok {
-			groups[id] = grantSubject{Type: model.SubjectGroup, ID: id, Value: id, Label: "Group " + shortIdentity(id), Detail: "Local or unavailable directory group"}
-		}
-	}
-	for _, group := range groups {
-		subjects = append(subjects, group)
-	}
-	sort.Slice(subjects, func(i, j int) bool {
-		if subjects[i].Type != subjects[j].Type {
-			return subjects[i].Type == model.SubjectUser
-		}
-		if subjects[i].Label != subjects[j].Label {
-			return strings.ToLower(subjects[i].Label) < strings.ToLower(subjects[j].Label)
-		}
-		return subjects[i].ID < subjects[j].ID
-	})
 	return subjects, nil
+}
+
+func userSubject(user model.User) grantSubject {
+	label := user.DisplayName
+	if label == "" {
+		label = user.Username
+	}
+	detail := user.Username
+	if user.Email != "" && user.Email != user.Username {
+		detail += " · " + user.Email
+	}
+	return grantSubject{Type: model.SubjectUser, ID: user.ID, Value: user.Username, Label: label, Detail: detail}
+}
+
+func groupSubject(group directory.Group) grantSubject {
+	detail := "Active Directory"
+	if group.Description != "" {
+		detail += " · " + group.Description
+	}
+	return grantSubject{Type: model.SubjectGroup, ID: group.ID, Value: group.Name, Label: group.Name, Detail: detail}
+}
+
+// labelGrants names the subject of every grant, so the access page needn't load any list.
+func (s *Server) labelGrants(ctx context.Context, grants []model.Grant) []labeledGrant {
+	items := make([]labeledGrant, 0, len(grants))
+	for _, grant := range grants {
+		item := labeledGrant{Grant: grant}
+		switch grant.SubjectType {
+		case model.SubjectAnonymous:
+			item.Label = "Anyone"
+		case model.SubjectAuthenticated:
+			item.Label = "Any signed-in user"
+		case model.SubjectUser:
+			if user, err := s.store.GetUser(ctx, grant.Subject); err == nil {
+				subject := userSubject(user)
+				item.Label, item.Detail = subject.Label, subject.Detail
+			} else {
+				item.Label, item.Detail = "Former user", grant.Subject
+			}
+		case model.SubjectGroup:
+			if group, ok := s.groupName(ctx, grant.Subject); ok {
+				subject := groupSubject(group)
+				item.Label, item.Detail = subject.Label, subject.Detail
+			} else if directory.NormalizeGUID(grant.Subject) == "" {
+				item.Label, item.Detail = grant.Subject, "Identity provider group"
+			} else {
+				item.Label, item.Detail = "Group "+shortIdentity(grant.Subject), "Not found in Active Directory"
+			}
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+// groupCache keeps group names for a few minutes: the access page shows the same groups
+// on every visit, and the directory needn't be asked each time.
+type groupCache struct {
+	mu      sync.Mutex
+	entries map[string]groupCacheEntry
+}
+
+type groupCacheEntry struct {
+	group   directory.Group
+	found   bool
+	expires time.Time
+}
+
+const groupCacheLifetime = 5 * time.Minute
+
+func (s *Server) groupName(ctx context.Context, id string) (directory.Group, bool) {
+	if s.config.Directory == nil {
+		return directory.Group{}, false
+	}
+	s.groups.mu.Lock()
+	entry, ok := s.groups.entries[id]
+	s.groups.mu.Unlock()
+	if ok && time.Now().Before(entry.expires) {
+		return entry.group, entry.found
+	}
+	group, err := s.config.Directory.LookupGroup(ctx, id)
+	if err != nil && !errors.Is(err, directory.ErrGroupNotFound) {
+		return directory.Group{}, false // outage: don't cache, try again next time
+	}
+	entry = groupCacheEntry{group: group, found: err == nil, expires: time.Now().Add(groupCacheLifetime)}
+	s.groups.mu.Lock()
+	if s.groups.entries == nil {
+		s.groups.entries = map[string]groupCacheEntry{}
+	}
+	s.groups.entries[id] = entry
+	s.groups.mu.Unlock()
+	return entry.group, entry.found
+}
+
+// resolveSubject accepts what a person types or a file contains: a user ID, username or
+// email, or a group objectGUID or exact group name. It returns the stored ID; when nothing
+// matches, the subject is returned unchanged and validGrantSubject rejects it.
+func (s *Server) resolveSubject(ctx context.Context, grant model.Grant) (string, error) {
+	subject := grant.Subject
+	switch grant.SubjectType {
+	case model.SubjectUser:
+		if _, err := s.store.GetUser(ctx, subject); err == nil {
+			return subject, nil
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return "", err
+		}
+		page, err := s.store.ListUsers(ctx, subject, "", 50)
+		if err != nil {
+			return "", err
+		}
+		var match *model.User
+		for index, user := range page.Items {
+			if strings.EqualFold(user.Username, subject) || (user.Email != "" && strings.EqualFold(user.Email, subject)) {
+				if match != nil {
+					return subject, nil // ambiguous: refuse rather than guess
+				}
+				match = &page.Items[index]
+			}
+		}
+		if match != nil {
+			return match.ID, nil
+		}
+	case model.SubjectGroup:
+		if id := directory.NormalizeGUID(subject); id != "" {
+			return id, nil
+		}
+		if s.config.Directory == nil {
+			return subject, nil
+		}
+		groups, err := s.config.Directory.SearchGroups(ctx, subject, subjectSearchLimit)
+		if err != nil {
+			return "", err
+		}
+		for _, group := range groups {
+			if strings.EqualFold(group.Name, subject) {
+				return group.ID, nil
+			}
+		}
+	}
+	return subject, nil
 }
 
 func (s *Server) validGrantSubject(ctx context.Context, grant model.Grant) (bool, error) {
@@ -97,15 +228,18 @@ func (s *Server) validGrantSubject(ctx context.Context, grant model.Grant) (bool
 		}
 		return err == nil, err
 	case model.SubjectGroup:
-		subjects, err := s.subjectList(ctx)
-		if err != nil {
-			return false, err
-		}
-		for _, subject := range subjects {
-			if subject.Type == model.SubjectGroup && subject.ID == grant.Subject {
+		// One lookup by objectGUID instead of listing every group in the directory.
+		if s.config.Directory != nil {
+			_, err := s.config.Directory.LookupGroup(ctx, grant.Subject)
+			if err == nil {
 				return true, nil
 			}
+			if !errors.Is(err, directory.ErrGroupNotFound) {
+				return false, err
+			}
 		}
+		// Not an Active Directory group: an identity provider group some account is in.
+		return s.store.GroupHasMembers(ctx, grant.Subject)
 	}
 	return false, nil
 }

@@ -26,7 +26,7 @@ internal sealed class WebViewOperationWindow : Window
             CompanionOperation.Commit => 500,
             CompanionOperation.Status => 450,
             CompanionOperation.History => 420,
-            CompanionOperation.Accounts => 500,
+            CompanionOperation.Accounts => 600,
             _ => 430,
         };
         Title = $"Lore {request.Operation}";
@@ -153,10 +153,10 @@ internal sealed class WebViewOperationWindow : Window
                 case "accounts-add":
                     if (running) break;
                     running = true;
-                    await LoreAccounts.Add(root.GetProperty("remoteUrl").GetString() ?? "", text => Send(new { type = "progress", text }));
+                    var signIn = await LoreAccounts.Add(root.GetProperty("remoteUrl").GetString() ?? "", text => Send(new { type = "progress", text }));
                     running = false;
                     await SendAccounts();
-                    Send(new { type = "complete", text = "Account added successfully." });
+                    Send(new { type = "complete", text = LoreAccounts.SignInMessage(signIn) });
                     break;
                 case "accounts-select":
                     if (running) break;
@@ -170,10 +170,20 @@ internal sealed class WebViewOperationWindow : Window
                 case "accounts-remove":
                     if (running) break;
                     running = true;
-                    await LoreAccounts.Remove(root.GetProperty("authUrl").GetString() ?? "", root.GetProperty("userId").GetString() ?? "", request.ServerUrl());
+                    var ssoCleared = await LoreAccounts.Remove(root.GetProperty("authUrl").GetString() ?? "", root.GetProperty("userId").GetString() ?? "", request.ServerUrl());
                     running = false;
                     await SendAccounts();
-                    Send(new { type = "complete", text = "Account removed and its Keycloak SSO sessions signed out. You can add another account." });
+                    Send(new
+                    {
+                        type = "complete",
+                        text = ssoCleared
+                            ? "Signed out. The saved sign-in was deleted from this computer and the server session ended."
+                            : "The saved sign-in was deleted from this computer. The server couldn't be reached to end its session; it expires on its own.",
+                    });
+                    break;
+                case "theme-set":
+                    settings.SetTheme(root.GetProperty("theme").GetString() ?? "");
+                    Send(new { type = "theme", theme = settings.Theme });
                     break;
                 case "cancel":
                     Close();

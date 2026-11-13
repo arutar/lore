@@ -3,6 +3,9 @@ export type Permission = "read" | "write" | "owner";
 export type SubjectType = "user" | "group" | "anonymous" | "authenticated";
 
 export interface User {
+  directoryId?: string;
+  directoryDisabled?: boolean;
+  groupsSyncedAt?: string;
   id: string;
   username: string;
   email: string;
@@ -14,6 +17,7 @@ export interface User {
 }
 
 export interface ADUser {
+  id?: string;
   username: string;
   email: string;
   displayName: string;
@@ -33,11 +37,15 @@ export interface PublicConfig {
   externalUrl: string;
   nativeRepositoryUrl: string;
   theme: string;
+  language: Language;
 }
+
+export type Language = "ru" | "en";
 
 export interface GlobalSettings {
   registrationEnabled: boolean;
   theme: string;
+  language: Language;
 }
 
 export interface Repository {
@@ -47,6 +55,8 @@ export interface Repository {
   ownerId: string;
   ownerName?: string;
   public: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface Grant {
@@ -56,16 +66,23 @@ export interface Grant {
   permission: Permission;
 }
 
+export interface LabeledGrant extends Grant {
+  label: string;
+  detail?: string;
+}
+
 export interface GrantSubject {
   type: "user" | "group";
   id: string;
   value: string;
   label: string;
   detail: string;
-  automated: boolean;
 }
 
 export interface AuditEvent {
+  subjectType?: SubjectType;
+  subject?: string;
+  subjectName?: string;
   id: number;
   actorId: string;
   actorName?: string;

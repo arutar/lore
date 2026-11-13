@@ -93,10 +93,47 @@ fn grpc_endpoint_custom_scheme() {
 }
 
 #[test]
-fn grpc_endpoint_explicit_insecure_scheme() {
+fn grpc_endpoint_explicit_insecure_scheme_on_a_server() {
     assert_eq!(
-        grpc_endpoint("http+insecure://control-plane:9090"),
+        grpc_endpoint_for("http+insecure://control-plane:9090", true),
         "http://control-plane:9090"
+    );
+}
+
+#[test]
+fn grpc_endpoint_upgrades_insecure_scheme_for_a_client() {
+    // A client learns endpoints from the remote server: a rogue server must not be able to
+    // downgrade the channel that carries tokens by advertising http+insecure.
+    assert_eq!(
+        grpc_endpoint_for("http+insecure://attacker.example:9090", false),
+        "https://attacker.example:9090"
+    );
+    assert_eq!(
+        grpc_endpoint("http+insecure://attacker.example:9090"),
+        "https://attacker.example:9090"
+    );
+}
+
+#[test]
+fn grpc_endpoint_allows_http_to_the_connected_server_host_only() {
+    // Before connecting, plain http to a private host is upgraded like any other.
+    assert_eq!(
+        grpc_endpoint_for("http://lore-a.corp:8080", false),
+        "https://lore-a.corp:8080"
+    );
+    lore_transport::auth::trust_server_host("lore://LORE-A.corp:41337/assets");
+    assert_eq!(
+        grpc_endpoint_for("http://lore-a.corp:8080", false),
+        "http://lore-a.corp:8080"
+    );
+    // Another host, and userinfo tricks, stay upgraded.
+    assert_eq!(
+        grpc_endpoint_for("http://evil.example:8080", false),
+        "https://evil.example:8080"
+    );
+    assert_eq!(
+        grpc_endpoint_for("http://lore-a.corp@evil.example:8080", false),
+        "https://lore-a.corp@evil.example:8080"
     );
 }
 

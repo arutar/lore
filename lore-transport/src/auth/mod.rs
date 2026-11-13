@@ -9,7 +9,9 @@ pub mod user_directory;
 pub mod user_service_v1;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::Once;
 
 use lore_base::error::NotSupported;
@@ -196,6 +198,40 @@ pub(crate) fn require_custom_resources(resource_ids: &[&str]) -> Result<(), Prot
         ));
     }
     Ok(())
+}
+
+/// Hosts of the Lore servers this process asked for their environment, lowercased.
+static SERVER_HOSTS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+
+/// Records the host of a Lore server the user connects to. Its own identity provider may
+/// then be reached over plain http on the same host, which is how a server deployed for a
+/// private network without certificates works (`lore://lore.corp` with the provider at
+/// `http://lore.corp:8080`).
+///
+/// This doesn't weaken what the https rule protects against: the server learns the
+/// client's credentials anyway, while a server still can't point the client at another
+/// host over plain http, so it can't hand the credentials to a third party in clear text.
+pub fn trust_server_host(remote_url: &str) {
+    if let Some(host) = url::Url::parse(remote_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        && !host.is_empty()
+    {
+        SERVER_HOSTS.lock().insert(host);
+    }
+}
+
+/// Whether `url` may carry identity provider traffic over plain http: a loopback host, or
+/// the host of a Lore server this process connected to (see [`trust_server_host`]).
+pub(crate) fn is_permitted_plain_http_url(url: &url::Url) -> bool {
+    if is_loopback_http_url(url) {
+        return true;
+    }
+    if url.scheme() != "http" || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    url.host_str()
+        .is_some_and(|host| SERVER_HOSTS.lock().contains(&host.to_ascii_lowercase()))
 }
 
 /// Whether `url` is a plain-http URL naming a loopback host, where the traffic never leaves

@@ -22,7 +22,7 @@ func Rank(permission model.Permission) int {
 }
 
 func Effective(user *model.User, grants []model.Grant) model.Permission {
-	if user != nil && user.Disabled {
+	if user != nil && !user.Active() {
 		return model.PermissionNone
 	}
 	if user != nil && user.Role == model.RoleAdmin {

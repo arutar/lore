@@ -1,26 +1,23 @@
 package directory
 
-import (
-	"encoding/base64"
-	"testing"
-)
+import "testing"
 
-func TestObjectGUIDStringUsesMicrosoftByteOrder(t *testing.T) {
-	raw, err := base64.StdEncoding.DecodeString("humVWn7kO0enTqsrp37RVA==")
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestObjectGUIDFilterRoundTrip(t *testing.T) {
+	// The bytes AD stores for objectGUID 4e2f9c0b-2a1d-3b4c-9e8f-7a6b5c4d3e2f.
+	raw := []byte{0x0b, 0x9c, 0x2f, 0x4e, 0x1d, 0x2a, 0x4c, 0x3b, 0x9e, 0x8f, 0x7a, 0x6b, 0x5c, 0x4d, 0x3e, 0x2f}
 	id, err := ObjectGUIDString(raw)
+	if err != nil || id != "4e2f9c0b-2a1d-3b4c-9e8f-7a6b5c4d3e2f" {
+		t.Fatalf("ObjectGUIDString = %q, %v", id, err)
+	}
+	filter, err := objectGUIDFilter(id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id != "5a95e986-e47e-473b-a74e-ab2ba77ed154" {
-		t.Fatalf("unexpected GUID: %s", id)
+	want := `(objectGUID=\0b\9c\2f\4e\1d\2a\4c\3b\9e\8f\7a\6b\5c\4d\3e\2f)`
+	if filter != want {
+		t.Fatalf("filter = %s, want %s", filter, want)
 	}
-}
-
-func TestObjectGUIDStringRejectsInvalidInput(t *testing.T) {
-	if _, err := ObjectGUIDString([]byte("not-a-guid")); err == nil {
-		t.Fatal("expected invalid GUID error")
+	if _, err := objectGUIDFilter("*)(objectClass=*"); err == nil {
+		t.Fatal("a non-GUID value reached the LDAP filter")
 	}
 }

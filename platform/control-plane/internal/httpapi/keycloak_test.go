@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -157,31 +158,36 @@ func TestKeycloakSyncFederatedUsers(t *testing.T) {
 }
 
 func TestKeycloakGetFederatedUser(t *testing.T) {
+	const guid = "0b9c2f4e-1d2a-4c3b-9e8f-7a6b5c4d3e2f"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/realms/lore/protocol/openid-connect/token":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "service-token", "token_type": "Bearer"})
 		case "/admin/realms/lore/users":
-			if r.Method != http.MethodGet || r.URL.Query().Get("max") != "20" || r.Header.Get("Authorization") != "Bearer service-token" {
-				t.Errorf("unexpected user lookup: %s, query = %v", r.Method, r.URL.Query())
+			query := r.URL.Query()
+			if r.Method != http.MethodGet || query.Get("exact") != "true" || query.Get("search") != "" || r.Header.Get("Authorization") != "Bearer service-token" {
+				t.Errorf("unexpected user lookup: %s, query = %v", r.Method, query)
 			}
-			lookup := r.URL.Query().Get("search")
-			federation := "ldap"
-			if lookup == "local" {
-				federation = ""
-			}
-			accountName := lookup
-			email := ""
-			if lookup == "legacy@example.com" {
-				accountName = "legacy-ad-user"
-				email = lookup
+			accounts := []map[string]any{}
+			switch {
+			case query.Get("username") == "elessar":
+				accounts = append(accounts, map[string]any{"id": "ad-user-id", "username": "elessar", "firstName": "AD", "lastName": "User",
+					"enabled": true, "federationLink": "ldap", "attributes": map[string][]string{"LDAP_ID": {strings.ToUpper(guid)}}})
+			case query.Get("username") == "local":
+				accounts = append(accounts, map[string]any{"id": "local-id", "username": "local", "enabled": true})
+			case query.Get("email") == "legacy@example.com":
+				accounts = append(accounts, map[string]any{"id": "legacy-id", "username": "legacy-ad-user", "email": "legacy@example.com",
+					"enabled": true, "federationLink": "ldap", "attributes": map[string][]string{"LDAP_ID": {guid}}})
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]map[string]any{{
-				"id": "ad-user-id", "username": accountName, "email": email, "firstName": "AD", "lastName": "User",
-				"enabled": true, "federationLink": federation,
-			}})
+			_ = json.NewEncoder(w).Encode(accounts)
+		case "/admin/realms/lore/users/ad-user-id":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "ad-user-id", "federationLink": "ldap", "attributes": map[string][]string{"LDAP_ID": {guid}}})
+		case "/admin/realms/lore/users/local-id":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "local-id"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -192,7 +198,7 @@ func TestKeycloakGetFederatedUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	user, err := admin.GetFederatedUser(t.Context(), "elessar")
-	if err != nil || user.ID != "ad-user-id" || user.Source != "ad" || user.DisplayName != "AD User" {
+	if err != nil || user.ID != "ad-user-id" || user.Source != "ad" || user.DisplayName != "AD User" || user.DirectoryID != guid {
 		t.Fatalf("federated user = %+v, %v", user, err)
 	}
 	if _, err := admin.GetFederatedUser(t.Context(), "local"); err != ErrNotFederated {
@@ -201,5 +207,13 @@ func TestKeycloakGetFederatedUser(t *testing.T) {
 	legacy, err := admin.GetFederatedUser(t.Context(), "legacy@example.com")
 	if err != nil || legacy.Username != "legacy-ad-user" {
 		t.Fatalf("legacy email lookup = %+v, %v", legacy, err)
+	}
+	if _, err := admin.GetFederatedUser(t.Context(), "elessa"); err != ErrAccountNotFound {
+		t.Fatalf("a partial name must not match: %v", err)
+	}
+	for id, want := range map[string]string{"ad-user-id": guid, "local-id": "", "deleted-id": ""} {
+		if link, err := admin.DirectoryLink(t.Context(), id); err != nil || link != want {
+			t.Fatalf("directory link of %s = %q, %v; want %q", id, link, err, want)
+		}
 	}
 }

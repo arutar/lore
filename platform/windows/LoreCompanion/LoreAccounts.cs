@@ -7,6 +7,9 @@ namespace LoreCompanion;
 
 public sealed record StoredAccount(string AuthUrl, string UserId, string Username, string Domains);
 
+/// <summary>The outcome of signing in: the new account and the sign-ins it replaced.</summary>
+public sealed record SignInResult(string UserId, IReadOnlyList<string> Replaced, bool SsoCleared);
+
 public static class LoreAccounts
 {
     public static async Task<IReadOnlyList<StoredAccount>> List()
@@ -45,7 +48,12 @@ public static class LoreAccounts
         return accounts.OrderBy(account => account.Username).ThenBy(account => account.AuthUrl).ToArray();
     }
 
-    public static async Task Add(string remoteUrl, Action<string> report)
+    /// <summary>
+    /// Signs in to a server and keeps a single account for it: every other saved sign-in of
+    /// the same identity provider is signed out and deleted, so switching accounts never
+    /// leaves the previous credentials on the machine.
+    /// </summary>
+    public static async Task<SignInResult> Add(string remoteUrl, Action<string> report)
     {
         if (!Uri.TryCreate(remoteUrl, UriKind.Absolute, out var uri) || uri.Scheme != "lore" || string.IsNullOrEmpty(uri.Host))
         {
@@ -67,7 +75,40 @@ public static class LoreAccounts
         }).WaitAsync();
         if (string.IsNullOrWhiteSpace(userId)) throw new InvalidDataException("The server returned no account identity after sign-in.");
         Select(remoteUrl, userId);
+
+        var accounts = await List();
+        var signedIn = accounts.FirstOrDefault(account => account.UserId == userId);
+        var replaced = new List<string>();
+        var ssoCleared = true;
+        if (signedIn is not null)
+        {
+            foreach (var previous in Superseded(accounts, signedIn))
+            {
+                report($"Signing out the previous account {DisplayName(previous)}…");
+                ssoCleared &= await Remove(previous.AuthUrl, previous.UserId, remoteUrl);
+                replaced.Add(DisplayName(previous));
+            }
+        }
+        return new SignInResult(userId, replaced, ssoCleared);
     }
+
+    /// <summary>Saved sign-ins that the new account replaces: same identity provider, another user.</summary>
+    public static IReadOnlyList<StoredAccount> Superseded(IEnumerable<StoredAccount> accounts, StoredAccount signedIn) =>
+        accounts.Where(account => string.Equals(account.AuthUrl, signedIn.AuthUrl, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(account.UserId, signedIn.UserId, StringComparison.Ordinal))
+            .ToArray();
+
+    public static string SignInMessage(SignInResult result)
+    {
+        if (result.Replaced.Count == 0) return "Signed in.";
+        var previous = string.Join(", ", result.Replaced);
+        return result.SsoCleared
+            ? $"Signed in. The previous account ({previous}) was signed out and deleted from this computer."
+            : $"Signed in. The previous account ({previous}) was deleted from this computer; the server couldn't be reached to end its session.";
+    }
+
+    private static string DisplayName(StoredAccount account) =>
+        string.IsNullOrWhiteSpace(account.Username) ? account.UserId : account.Username;
 
     public static void Select(string remoteUrl, string userId)
     {
@@ -78,17 +119,31 @@ public static class LoreAccounts
         ClientSettings.Load().SelectAccount(uri.Host.ToLowerInvariant(), userId);
     }
 
-    public static async Task Remove(string authUrl, string userId, string remoteUrl)
+    /// <summary>
+    /// Deletes a saved sign-in. Ending the identity provider's SSO session is best effort:
+    /// the local credentials are always deleted, even when the server can't be reached.
+    /// Returns whether the SSO session was ended too.
+    /// </summary>
+    public static async Task<bool> Remove(string authUrl, string userId, string remoteUrl)
     {
-        var accessToken = await IdentityToken(authUrl, userId);
-        if (!string.IsNullOrWhiteSpace(accessToken))
+        var ssoCleared = true;
+        try
         {
-            await SsoLogout.Logout(authUrl, remoteUrl, accessToken);
+            var accessToken = await IdentityToken(authUrl, userId);
+            if (!string.IsNullOrWhiteSpace(accessToken))
+            {
+                await SsoLogout.Logout(authUrl, remoteUrl, accessToken);
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            ssoCleared = false;
         }
         using var globals = new LoreGlobalArgs();
         using var args = new LoreAuthLogoutArgs { AuthUrl = authUrl, UserId = userId };
         await Lore.AuthLogout(globals, args).WaitAsync();
         ClientSettings.Load().RemoveAccount(userId);
+        return ssoCleared;
     }
 
     private static async Task<string> IdentityToken(string authUrl, string userId)

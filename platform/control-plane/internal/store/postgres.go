@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,7 +25,18 @@ type Postgres struct {
 }
 
 func NewPostgres(ctx context.Context, databaseURL string) (*Postgres, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("configure postgres: %w", err)
+	}
+	// pgx prepares and caches statements; after a few runs PostgreSQL may switch a statement to
+	// a generic plan, which can't tell a selective search pattern or group from an unselective
+	// one and falls back to reading whole tables instead of the trigram and GIN indexes. The
+	// queries are small, so planning each execution for its actual values costs far less.
+	if _, set := config.ConnConfig.RuntimeParams["plan_cache_mode"]; !set {
+		config.ConnConfig.RuntimeParams["plan_cache_mode"] = "force_custom_plan"
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("configure postgres: %w", err)
 	}
@@ -85,48 +97,86 @@ func (p *Postgres) migrate(ctx context.Context) error {
 	return nil
 }
 
-func (p *Postgres) Catalog(ctx context.Context, user *model.User, after string, limit int) (model.Page[model.Repository], error) {
-	if user != nil && user.Role == model.RoleAdmin && !user.Disabled {
-		return p.ListRepositories(ctx, after, limit)
-	}
+const repositoryColumns = `r.id, r.name, r.description, r.owner_id, r.created_at, r.updated_at,
+	EXISTS (SELECT 1 FROM grants AS public_grant WHERE public_grant.repository_id = r.id AND public_grant.subject_type = 'anonymous' AND public_grant.permission = 'read')`
 
-	query := `
-		SELECT r.id, r.name, r.description, r.owner_id, r.created_at, r.updated_at,
-		       EXISTS (SELECT 1 FROM grants AS public_grant WHERE public_grant.repository_id = r.id AND public_grant.subject_type = 'anonymous' AND public_grant.permission = 'read')
-		FROM repositories AS r
-		WHERE ($1 = '' OR r.id > $1)
-		  AND EXISTS (
-			SELECT 1 FROM grants AS g
-			WHERE g.repository_id = r.id
-			  AND g.permission IN ('read', 'write', 'owner')
-			  AND (
-				(g.subject_type = 'anonymous' AND g.permission = 'read')
-				OR ($2 AND g.subject_type = 'authenticated' AND g.permission = 'read')
-				OR ($2 AND g.subject_type = 'user' AND g.subject = $3)
-				OR ($2 AND g.subject_type = 'group' AND g.subject = ANY($4))
-			  )
-		  )
-		ORDER BY r.id
-		LIMIT $5`
-	authenticated := user != nil && !user.Disabled
-	userID := ""
-	groups := []string{}
-	if user != nil {
-		userID = user.ID
-		groups = user.Groups
-	}
-	return p.repositoryPage(ctx, query, after, authenticated, userID, groups, limit+1, limit)
+// containsPattern turns a search into a LIKE pattern matching it anywhere: %, _ and \ typed
+// by a user are escaped, so they match literally. Lowered in SQL (lower($n)) to use the
+// trigram indexes on lower(column).
+func containsPattern(search string) string {
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(search)
+	return "%" + escaped + "%"
 }
 
-func (p *Postgres) ListRepositories(ctx context.Context, after string, limit int) (model.Page[model.Repository], error) {
-	query := `
-		SELECT id, name, description, owner_id, created_at, updated_at,
-		       EXISTS (SELECT 1 FROM grants AS public_grant WHERE public_grant.repository_id = repositories.id AND public_grant.subject_type = 'anonymous' AND public_grant.permission = 'read')
-		FROM repositories
-		WHERE ($1 = '' OR id > $1)
-		ORDER BY id
-		LIMIT $2`
-	return p.repositoryPage(ctx, query, after, limit+1, limit)
+// pageConditions builds the cursor and search conditions only when they apply: a predicate
+// like ($1 = ” OR id > $1) keeps a cached generic plan from using the indexes.
+func pageConditions(after, search string, columns []string, args []any) ([]string, []any) {
+	var conditions []string
+	if after != "" {
+		args = append(args, after)
+		conditions = append(conditions, fmt.Sprintf("%s > $%d", columns[0], len(args)))
+	}
+	if search != "" {
+		args = append(args, containsPattern(search))
+		var matches []string
+		for _, column := range columns[1:] {
+			matches = append(matches, fmt.Sprintf(`lower(%s) LIKE lower($%d) ESCAPE '\'`, column, len(args)))
+		}
+		conditions = append(conditions, "("+strings.Join(matches, " OR ")+")")
+	}
+	return conditions, args
+}
+
+var repositorySearchColumns = []string{"r.id", "r.name", "r.description"}
+
+func (p *Postgres) Catalog(ctx context.Context, user *model.User, search, after string, limit int) (model.Page[model.Repository], error) {
+	if user != nil && user.Role == model.RoleAdmin && user.Active() {
+		return p.ListRepositories(ctx, search, after, limit)
+	}
+	authenticated := user != nil && user.Active()
+	args := []any{}
+	visible := []string{"(g.subject_type = 'anonymous' AND g.permission = 'read')"}
+	if authenticated {
+		args = append(args, user.ID, user.Groups)
+		visible = append(visible,
+			"(g.subject_type = 'authenticated' AND g.permission = 'read')",
+			"(g.subject_type = 'user' AND g.subject = $1)",
+			"(g.subject_type = 'group' AND g.subject = ANY($2))")
+	}
+	conditions, args := pageConditions(after, search, repositorySearchColumns, args)
+	conditions = append(conditions, `EXISTS (
+			SELECT 1 FROM grants AS g
+			WHERE g.repository_id = r.id AND g.permission IN ('read', 'write', 'owner')
+			  AND (`+strings.Join(visible, " OR ")+`))`)
+	args = append(args, limit+1)
+	query := `SELECT ` + repositoryColumns + ` FROM repositories AS r WHERE ` + strings.Join(conditions, " AND ") +
+		fmt.Sprintf(" ORDER BY r.id LIMIT $%d", len(args))
+	return p.repositoryPage(ctx, query, append(args, limit)...)
+}
+
+func (p *Postgres) ListRepositories(ctx context.Context, search, after string, limit int) (model.Page[model.Repository], error) {
+	conditions, args := pageConditions(after, search, repositorySearchColumns, nil)
+	where := ""
+	if len(conditions) > 0 {
+		where = " WHERE " + strings.Join(conditions, " AND ")
+	}
+	args = append(args, limit+1)
+	query := `SELECT ` + repositoryColumns + ` FROM repositories AS r` + where + fmt.Sprintf(" ORDER BY r.id LIMIT $%d", len(args))
+	return p.repositoryPage(ctx, query, append(args, limit)...)
+}
+
+func (p *Postgres) GetRepositoryByName(ctx context.Context, name string) (model.Repository, error) {
+	var repository model.Repository
+	err := p.pool.QueryRow(ctx, "SELECT "+repositoryColumns+" FROM repositories AS r WHERE r.name = $1", name).Scan(
+		&repository.ID, &repository.Name, &repository.Description, &repository.OwnerID, &repository.CreatedAt, &repository.UpdatedAt, &repository.Public,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.Repository{}, ErrNotFound
+	}
+	if err != nil {
+		return model.Repository{}, fmt.Errorf("get repository by name: %w", err)
+	}
+	return repository, nil
 }
 
 func (p *Postgres) repositoryPage(ctx context.Context, query string, args ...any) (model.Page[model.Repository], error) {
@@ -210,29 +260,54 @@ func (p *Postgres) CreateRepository(ctx context.Context, actorID string, reposit
 	if err := insertAudit(ctx, tx, actorID, "repository.create", "repository", repository.ID, "", repository.Name); err != nil {
 		return model.Repository{}, err
 	}
+	if repository.Public {
+		if err := setPublicTx(ctx, tx, actorID, repository.ID, true); err != nil {
+			return model.Repository{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return model.Repository{}, fmt.Errorf("commit repository create: %w", err)
 	}
 	return repository, nil
 }
 
-func (p *Postgres) UpdateRepository(ctx context.Context, actorID string, repository model.Repository) (model.Repository, error) {
+func (p *Postgres) RepositoryNameTaken(ctx context.Context, name, exceptID string) (bool, error) {
+	var taken bool
+	err := p.pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM repositories WHERE name = $1 AND id <> $2)", name, exceptID).Scan(&taken)
+	if err != nil {
+		return false, fmt.Errorf("check repository name: %w", err)
+	}
+	return taken, nil
+}
+
+func (p *Postgres) UpdateRepository(ctx context.Context, actorID string, repository model.Repository, public *bool) (model.Repository, error) {
 	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return model.Repository{}, fmt.Errorf("begin repository update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	result, err := tx.Exec(ctx, `
-		UPDATE repositories SET name = $2, description = $3, updated_at = $4 WHERE id = $1`,
-		repository.ID, repository.Name, repository.Description, time.Now().UTC())
-	if err != nil {
-		return model.Repository{}, classifyConflict("update repository", err)
-	}
-	if result.RowsAffected() == 0 {
+	var beforeName, beforeDescription string
+	err = tx.QueryRow(ctx, "SELECT name, description FROM repositories WHERE id = $1 FOR UPDATE", repository.ID).Scan(&beforeName, &beforeDescription)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Repository{}, ErrNotFound
 	}
-	if err := insertAudit(ctx, tx, actorID, "repository.update", "repository", repository.ID, "", repository.Name); err != nil {
-		return model.Repository{}, err
+	if err != nil {
+		return model.Repository{}, fmt.Errorf("lock repository: %w", err)
+	}
+	if beforeName != repository.Name || beforeDescription != repository.Description {
+		if _, err := tx.Exec(ctx, `
+			UPDATE repositories SET name = $2, description = $3, updated_at = $4 WHERE id = $1`,
+			repository.ID, repository.Name, repository.Description, time.Now().UTC()); err != nil {
+			return model.Repository{}, classifyConflict("update repository", err)
+		}
+		if err := insertAudit(ctx, tx, actorID, "repository.update", "repository", repository.ID, beforeName, repository.Name); err != nil {
+			return model.Repository{}, err
+		}
+	}
+	if public != nil {
+		if err := setPublicTx(ctx, tx, actorID, repository.ID, *public); err != nil {
+			return model.Repository{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return model.Repository{}, fmt.Errorf("commit repository update: %w", err)
@@ -263,19 +338,23 @@ func (p *Postgres) DeleteRepository(ctx context.Context, actorID, id string) err
 	return nil
 }
 
-func (p *Postgres) ListUsers(ctx context.Context, after string, limit int) (model.Page[model.User], error) {
-	rows, err := p.pool.Query(ctx, `
-		SELECT id, username, email, display_name, role, groups, source, disabled, created_at, updated_at
-		FROM users WHERE ($1 = '' OR id > $1) ORDER BY id LIMIT $2`, after, limit+1)
+func (p *Postgres) ListUsers(ctx context.Context, search, after string, limit int) (model.Page[model.User], error) {
+	conditions, args := pageConditions(after, search, []string{"id", "username", "display_name", "email"}, nil)
+	where := ""
+	if len(conditions) > 0 {
+		where = " WHERE " + strings.Join(conditions, " AND ")
+	}
+	args = append(args, limit+1)
+	rows, err := p.pool.Query(ctx, "SELECT "+userColumns+" FROM users"+where+fmt.Sprintf(" ORDER BY id LIMIT $%d", len(args)), args...)
 	if err != nil {
 		return model.Page[model.User]{}, fmt.Errorf("list users: %w", err)
 	}
 	defer rows.Close()
 	items := make([]model.User, 0, limit+1)
 	for rows.Next() {
-		var user model.User
-		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.Role, &user.Groups, &user.Source, &user.Disabled, &user.CreatedAt, &user.UpdatedAt); err != nil {
-			return model.Page[model.User]{}, fmt.Errorf("scan user: %w", err)
+		user, err := scanUser(rows)
+		if err != nil {
+			return model.Page[model.User]{}, err
 		}
 		items = append(items, user)
 	}
@@ -290,42 +369,127 @@ func (p *Postgres) ListUsers(ctx context.Context, after string, limit int) (mode
 	return model.Page[model.User]{Items: items, NextCursor: next}, nil
 }
 
-func (p *Postgres) GetUser(ctx context.Context, id string) (model.User, error) {
+const userColumns = "id, username, email, display_name, role, groups, source, disabled, created_at, updated_at, directory_id, directory_disabled, groups_synced_at"
+
+func scanUser(row pgx.Row) (model.User, error) {
 	var user model.User
-	err := p.pool.QueryRow(ctx, `
-		SELECT id, username, email, display_name, role, groups, source, disabled, created_at, updated_at
-		FROM users WHERE id = $1`, id).Scan(
-		&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.Role, &user.Groups, &user.Source, &user.Disabled, &user.CreatedAt, &user.UpdatedAt,
-	)
+	err := row.Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.Role, &user.Groups, &user.Source, &user.Disabled,
+		&user.CreatedAt, &user.UpdatedAt, &user.DirectoryID, &user.DirectoryDisabled, &user.GroupsSyncedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.User{}, ErrNotFound
 	}
 	if err != nil {
-		return model.User{}, fmt.Errorf("get user: %w", err)
+		return model.User{}, fmt.Errorf("scan user: %w", err)
 	}
 	return user, nil
 }
 
+func (p *Postgres) GetUser(ctx context.Context, id string) (model.User, error) {
+	return scanUser(p.pool.QueryRow(ctx, "SELECT "+userColumns+" FROM users WHERE id = $1", id))
+}
+
 func (p *Postgres) UpsertUser(ctx context.Context, user model.User) (model.User, error) {
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return model.User{}, fmt.Errorf("begin user upsert: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	now := time.Now().UTC()
-	err := p.pool.QueryRow(ctx, `
-		INSERT INTO users(id, username, email, display_name, role, groups, source, disabled, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, COALESCE(NULLIF($5, ''), 'user'), COALESCE($6, '{}'::text[]), $7, FALSE, $8, $8)
+	var formerID, formerName string
+	err = tx.QueryRow(ctx, "SELECT id, username FROM users WHERE username = $1 AND id <> $2 FOR UPDATE", user.Username, user.ID).Scan(&formerID, &formerName)
+	switch {
+	case err == nil:
+		retired := formerName + "~" + formerID
+		// Only the name is freed. The former record keeps its status: it may be a person who
+		// was renamed in the directory and will take their new name at the next sign-in.
+		if _, err := tx.Exec(ctx, "UPDATE users SET username = $2, updated_at = $3 WHERE id = $1", formerID, retired, now); err != nil {
+			return model.User{}, fmt.Errorf("retire former identity: %w", err)
+		}
+		if err := insertAudit(ctx, tx, "", "user.supersede", "user", formerID, formerName, user.ID); err != nil {
+			return model.User{}, err
+		}
+	case !errors.Is(err, pgx.ErrNoRows):
+		return model.User{}, fmt.Errorf("check username: %w", err)
+	}
+	stored, err := scanUser(tx.QueryRow(ctx, `
+		INSERT INTO users(id, username, email, display_name, role, groups, source, disabled, created_at, updated_at, directory_id, directory_disabled, groups_synced_at)
+		VALUES ($1, $2, $3, $4, COALESCE(NULLIF($5, ''), 'user'), COALESCE($6, '{}'::text[]), $7, FALSE, $8, $8, $9, $10, $11)
 		ON CONFLICT (id) DO UPDATE SET
 			username = EXCLUDED.username,
 			email = EXCLUDED.email,
 			display_name = EXCLUDED.display_name,
 			groups = EXCLUDED.groups,
 			source = EXCLUDED.source,
+			directory_id = EXCLUDED.directory_id,
+			directory_disabled = EXCLUDED.directory_disabled,
+			groups_synced_at = EXCLUDED.groups_synced_at,
 			updated_at = EXCLUDED.updated_at
-		RETURNING id, username, email, display_name, role, groups, source, disabled, created_at, updated_at`,
-		user.ID, user.Username, user.Email, user.DisplayName, user.Role, user.Groups, user.Source, now).Scan(
-		&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.Role, &user.Groups, &user.Source, &user.Disabled, &user.CreatedAt, &user.UpdatedAt,
-	)
+		RETURNING `+userColumns,
+		user.ID, user.Username, user.Email, user.DisplayName, user.Role, user.Groups, user.Source, now,
+		user.DirectoryID, user.DirectoryDisabled, user.GroupsSyncedAt))
 	if err != nil {
 		return model.User{}, fmt.Errorf("upsert user: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return model.User{}, fmt.Errorf("commit user upsert: %w", err)
+	}
+	return stored, nil
+}
+
+func (p *Postgres) UpdateDirectoryState(ctx context.Context, id string, state DirectoryState) (model.User, error) {
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return model.User{}, fmt.Errorf("begin directory update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var wasDisabled bool
+	err = tx.QueryRow(ctx, "SELECT directory_disabled FROM users WHERE id = $1 FOR UPDATE", id).Scan(&wasDisabled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.User{}, ErrNotFound
+	}
+	if err != nil {
+		return model.User{}, fmt.Errorf("lock user: %w", err)
+	}
+	groups := state.Groups
+	if groups == nil {
+		groups = []string{}
+	}
+	user, err := scanUser(tx.QueryRow(ctx, `
+		UPDATE users SET directory_id = $2, groups = $3, directory_disabled = $4, groups_synced_at = $5
+		WHERE id = $1 RETURNING `+userColumns, id, state.DirectoryID, groups, state.Disabled, state.SyncedAt))
+	if err != nil {
+		return model.User{}, err
+	}
+	if wasDisabled != state.Disabled {
+		action := "user.directory_enable"
+		if state.Disabled {
+			action = "user.directory_disable"
+		}
+		if err := insertAudit(ctx, tx, "", action, "user", id, "", ""); err != nil {
+			return model.User{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return model.User{}, fmt.Errorf("commit directory update: %w", err)
+	}
 	return user, nil
+}
+
+func (p *Postgres) GroupHasMembers(ctx context.Context, group string) (bool, error) {
+	var exists bool
+	if err := p.pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM users WHERE groups @> ARRAY[$1]::text[])", group).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check group members: %w", err)
+	}
+	return exists, nil
+}
+
+func (p *Postgres) HasActiveAdmin(ctx context.Context) (bool, error) {
+	var exists bool
+	err := p.pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM users WHERE role = 'admin' AND NOT disabled AND NOT directory_disabled)").Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check administrators: %w", err)
+	}
+	return exists, nil
 }
 
 func (p *Postgres) UpdateUser(ctx context.Context, actorID, id string, role model.Role, disabled bool) (model.User, error) {
@@ -335,7 +499,8 @@ func (p *Postgres) UpdateUser(ctx context.Context, actorID, id string, role mode
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var before string
-	err = tx.QueryRow(ctx, "SELECT role FROM users WHERE id = $1 FOR UPDATE", id).Scan(&before)
+	var beforeDisabled bool
+	err = tx.QueryRow(ctx, "SELECT role, disabled FROM users WHERE id = $1 FOR UPDATE", id).Scan(&before, &beforeDisabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.User{}, ErrNotFound
 	}
@@ -345,8 +510,19 @@ func (p *Postgres) UpdateUser(ctx context.Context, actorID, id string, role mode
 	if _, err := tx.Exec(ctx, "UPDATE users SET role = $2, disabled = $3, updated_at = $4 WHERE id = $1", id, role, disabled, time.Now().UTC()); err != nil {
 		return model.User{}, fmt.Errorf("update user: %w", err)
 	}
-	if err := insertAudit(ctx, tx, actorID, "user.update", "user", id, before, string(role)); err != nil {
-		return model.User{}, err
+	if before != string(role) {
+		if err := insertAudit(ctx, tx, actorID, "user.update", "user", id, before, string(role)); err != nil {
+			return model.User{}, err
+		}
+	}
+	if beforeDisabled != disabled {
+		action := "user.enable"
+		if disabled {
+			action = "user.disable"
+		}
+		if err := insertAudit(ctx, tx, actorID, action, "user", id, "", ""); err != nil {
+			return model.User{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return model.User{}, fmt.Errorf("commit user update: %w", err)
@@ -382,16 +558,7 @@ func (p *Postgres) SetGrant(ctx context.Context, actorID string, grant model.Gra
 		return fmt.Errorf("begin grant set: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var before string
-	_ = tx.QueryRow(ctx, "SELECT permission FROM grants WHERE repository_id = $1 AND subject_type = $2 AND subject = $3", grant.RepositoryID, grant.SubjectType, grant.Subject).Scan(&before)
-	_, err = tx.Exec(ctx, `
-		INSERT INTO grants(repository_id, subject_type, subject, permission) VALUES ($1, $2, $3, $4)
-		ON CONFLICT(repository_id, subject_type, subject) DO UPDATE SET permission = EXCLUDED.permission`,
-		grant.RepositoryID, grant.SubjectType, grant.Subject, grant.Permission)
-	if err != nil {
-		return fmt.Errorf("set grant: %w", err)
-	}
-	if err := insertAudit(ctx, tx, actorID, "grant.set", "repository", grant.RepositoryID, before, string(grant.Permission)); err != nil {
+	if err := setGrantTx(ctx, tx, actorID, grant); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -406,17 +573,7 @@ func (p *Postgres) RemoveGrant(ctx context.Context, actorID string, grant model.
 		return fmt.Errorf("begin grant remove: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var before string
-	err = tx.QueryRow(ctx, `
-		DELETE FROM grants WHERE repository_id = $1 AND subject_type = $2 AND subject = $3
-		RETURNING permission`, grant.RepositoryID, grant.SubjectType, grant.Subject).Scan(&before)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("remove grant: %w", err)
-	}
-	if err := insertAudit(ctx, tx, actorID, "grant.remove", "repository", grant.RepositoryID, before, ""); err != nil {
+	if err := removeGrantTx(ctx, tx, actorID, grant); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -425,9 +582,57 @@ func (p *Postgres) RemoveGrant(ctx context.Context, actorID string, grant model.
 	return nil
 }
 
+// setGrantTx upserts a grant and audits it only when the permission really changes.
+func setGrantTx(ctx context.Context, tx pgx.Tx, actorID string, grant model.Grant) error {
+	var before string
+	err := tx.QueryRow(ctx, `
+		SELECT permission FROM grants WHERE repository_id = $1 AND subject_type = $2 AND subject = $3 FOR UPDATE`,
+		grant.RepositoryID, grant.SubjectType, grant.Subject).Scan(&before)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("read grant: %w", err)
+	}
+	if before == string(grant.Permission) {
+		return nil
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO grants(repository_id, subject_type, subject, permission) VALUES ($1, $2, $3, $4)
+		ON CONFLICT(repository_id, subject_type, subject) DO UPDATE SET permission = EXCLUDED.permission`,
+		grant.RepositoryID, grant.SubjectType, grant.Subject, grant.Permission)
+	if err != nil {
+		var databaseError *pgconn.PgError
+		if errors.As(err, &databaseError) && databaseError.Code == "23503" {
+			return ErrNotFound
+		}
+		return fmt.Errorf("set grant: %w", err)
+	}
+	return insertGrantAudit(ctx, tx, actorID, "grant.set", grant, before, string(grant.Permission))
+}
+
+func removeGrantTx(ctx context.Context, tx pgx.Tx, actorID string, grant model.Grant) error {
+	var before string
+	err := tx.QueryRow(ctx, `
+		DELETE FROM grants WHERE repository_id = $1 AND subject_type = $2 AND subject = $3
+		RETURNING permission`, grant.RepositoryID, grant.SubjectType, grant.Subject).Scan(&before)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("remove grant: %w", err)
+	}
+	return insertGrantAudit(ctx, tx, actorID, "grant.remove", grant, before, "")
+}
+
+func setPublicTx(ctx context.Context, tx pgx.Tx, actorID, repositoryID string, public bool) error {
+	grant := model.Grant{RepositoryID: repositoryID, SubjectType: model.SubjectAnonymous, Permission: model.PermissionRead}
+	if public {
+		return setGrantTx(ctx, tx, actorID, grant)
+	}
+	return removeGrantTx(ctx, tx, actorID, grant)
+}
+
 func (p *Postgres) GetSettings(ctx context.Context) (model.Settings, error) {
-	settings := model.Settings{Theme: model.DefaultTheme}
-	err := p.pool.QueryRow(ctx, "SELECT registration_enabled, theme FROM settings WHERE id = 'global'").Scan(&settings.RegistrationEnabled, &settings.Theme)
+	settings := model.Settings{Theme: model.DefaultTheme, Language: model.DefaultLanguage}
+	err := p.pool.QueryRow(ctx, "SELECT registration_enabled, theme, language FROM settings WHERE id = 'global'").Scan(&settings.RegistrationEnabled, &settings.Theme, &settings.Language)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return settings, nil
 	}
@@ -448,11 +653,12 @@ func (p *Postgres) UpdateSettings(ctx context.Context, actorID string, settings 
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO settings(id, registration_enabled, theme) VALUES ('global', $1, $2)
-		ON CONFLICT(id) DO UPDATE SET registration_enabled = EXCLUDED.registration_enabled, theme = EXCLUDED.theme`, settings.RegistrationEnabled, settings.Theme); err != nil {
+		INSERT INTO settings(id, registration_enabled, theme, language) VALUES ('global', $1, $2, $3)
+		ON CONFLICT(id) DO UPDATE SET registration_enabled = EXCLUDED.registration_enabled, theme = EXCLUDED.theme, language = EXCLUDED.language`,
+		settings.RegistrationEnabled, settings.Theme, settings.Language); err != nil {
 		return fmt.Errorf("update settings: %w", err)
 	}
-	if err := insertAudit(ctx, tx, actorID, "settings.update", "settings", "global", strconv.FormatBool(before.RegistrationEnabled)+":"+before.Theme, strconv.FormatBool(settings.RegistrationEnabled)+":"+settings.Theme); err != nil {
+	if err := insertAudit(ctx, tx, actorID, "settings.update", "settings", "global", strconv.FormatBool(before.RegistrationEnabled)+":"+before.Theme+":"+before.Language, strconv.FormatBool(settings.RegistrationEnabled)+":"+settings.Theme+":"+settings.Language); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -461,10 +667,10 @@ func (p *Postgres) UpdateSettings(ctx context.Context, actorID string, settings 
 	return nil
 }
 
-func (p *Postgres) ListAudit(ctx context.Context, after int64, limit int) (model.Page[model.AuditEvent], error) {
+func (p *Postgres) ListAudit(ctx context.Context, before int64, limit int) (model.Page[model.AuditEvent], error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT id, actor_id, action, target_type, target_id, before, after, created_at
-		FROM audit_events WHERE id > $1 ORDER BY id LIMIT $2`, after, limit+1)
+		SELECT id, actor_id, action, target_type, target_id, before, after, subject_type, subject, created_at
+		FROM audit_events WHERE ($1::bigint = 0 OR id < $1::bigint) ORDER BY id DESC LIMIT $2`, before, limit+1)
 	if err != nil {
 		return model.Page[model.AuditEvent]{}, fmt.Errorf("list audit: %w", err)
 	}
@@ -472,7 +678,7 @@ func (p *Postgres) ListAudit(ctx context.Context, after int64, limit int) (model
 	items := make([]model.AuditEvent, 0, limit+1)
 	for rows.Next() {
 		var event model.AuditEvent
-		if err := rows.Scan(&event.ID, &event.ActorID, &event.Action, &event.TargetType, &event.TargetID, &event.Before, &event.After, &event.CreatedAt); err != nil {
+		if err := rows.Scan(&event.ID, &event.ActorID, &event.Action, &event.TargetType, &event.TargetID, &event.Before, &event.After, &event.SubjectType, &event.Subject, &event.CreatedAt); err != nil {
 			return model.Page[model.AuditEvent]{}, fmt.Errorf("scan audit: %w", err)
 		}
 		items = append(items, event)
@@ -488,7 +694,20 @@ func (p *Postgres) ListAudit(ctx context.Context, after int64, limit int) (model
 	return model.Page[model.AuditEvent]{Items: items, NextCursor: next}, nil
 }
 
+func (p *Postgres) RecordAudit(ctx context.Context, event model.AuditEvent) error {
+	_, err := p.pool.Exec(ctx, auditInsert,
+		event.ActorID, event.Action, event.TargetType, event.TargetID, event.Before, event.After, event.SubjectType, event.Subject, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("insert audit: %w", err)
+	}
+	return nil
+}
+
 func (p *Postgres) CreateSession(ctx context.Context, session model.Session) error {
+	// Expired sessions are never read again; drop them as new ones arrive (sessions_expiry_idx).
+	if _, err := p.pool.Exec(ctx, "DELETE FROM sessions WHERE expires_at < $1", time.Now().UTC()); err != nil {
+		return fmt.Errorf("remove expired sessions: %w", err)
+	}
 	_, err := p.pool.Exec(ctx, `
 		INSERT INTO sessions(id_hash, csrf_token, user_id, id_token, expires_at) VALUES ($1, $2, $3, $4, $5)`,
 		session.IDHash, session.CSRFToken, session.UserID, session.IDToken, session.ExpiresAt)
@@ -522,11 +741,20 @@ func (p *Postgres) DeleteSession(ctx context.Context, idHash string) error {
 	return nil
 }
 
+const auditInsert = `
+	INSERT INTO audit_events(actor_id, action, target_type, target_id, before, after, subject_type, subject, created_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+
 func insertAudit(ctx context.Context, tx pgx.Tx, actorID, action, targetType, targetID, before, after string) error {
-	_, err := tx.Exec(ctx, `
-		INSERT INTO audit_events(actor_id, action, target_type, target_id, before, after, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		actorID, action, targetType, targetID, before, after, time.Now().UTC())
+	_, err := tx.Exec(ctx, auditInsert, actorID, action, targetType, targetID, before, after, "", "", time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("insert audit: %w", err)
+	}
+	return nil
+}
+
+func insertGrantAudit(ctx context.Context, tx pgx.Tx, actorID, action string, grant model.Grant, before, after string) error {
+	_, err := tx.Exec(ctx, auditInsert, actorID, action, "repository", grant.RepositoryID, before, after, grant.SubjectType, grant.Subject, time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("insert audit: %w", err)
 	}

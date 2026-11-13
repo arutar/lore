@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestLDAPLiveGroupIDs(t *testing.T) {
+func TestLDAPLiveAccount(t *testing.T) {
 	if os.Getenv("LORE_LDAP_LIVE_TEST") != "1" {
 		t.Skip("live LDAP test is disabled")
 	}
@@ -17,12 +17,19 @@ func TestLDAPLiveGroupIDs(t *testing.T) {
 	if directory == nil {
 		t.Fatal("LORE_LDAP_URL is required")
 	}
-	groups, err := directory.GroupIDs(context.Background(), os.Getenv("LORE_LDAP_TEST_USER"))
+	user, err := directory.FindUser(context.Background(), os.Getenv("LORE_LDAP_TEST_USER"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups) == 0 {
-		t.Fatal("expected at least one group")
+	if user.ID == "" {
+		t.Fatal("the account has no objectGUID")
 	}
-	t.Logf("received %d stable group IDs", len(groups))
+	account, err := directory.LookupAccount(context.Background(), user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.Username != user.Username || len(account.Groups) == 0 {
+		t.Fatalf("lookup by objectGUID returned %q with %d groups", account.Username, len(account.Groups))
+	}
+	t.Logf("%s: disabled=%v, %d stable group IDs", account.Username, account.Disabled, len(account.Groups))
 }

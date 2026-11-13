@@ -74,7 +74,9 @@ function overlay(color, symbol, { cx = 150, cy = 362, r = 132, ring = 24, scale 
 const arrowDown = `<path d="M0 -62 V34"/><path d="M-38 6 L0 44 L38 6"/>`;
 const sym = {
   arrowDown,
-  clone: `${arrowDown}<path d="M-52 66 H52"/>`,
+  // Clone and Commit are a pair: the same plain arrow, down and up.
+  clone: `<path d="M0 -56 V52"/><path d="M-42 10 L0 52 L42 10"/>`,
+  commit: `<path d="M0 56 V-52"/><path d="M-42 -10 L0 -52 L42 -10"/>`,
   installer: `<path d="M0 -62 V14"/><path d="M-32 -12 L0 20 L32 -12"/><path d="M-52 34 V62 H52 V34"/>`,
   minus: `<path d="M-54 0 H54"/>`,
   plus: `<path d="M0 -56 V56"/><path d="M-56 0 H56"/>`,
@@ -93,7 +95,6 @@ const sym = {
   </g>`,
 };
 
-const commitSymbol = `<g transform="translate(-2 1)">${sym.check}</g>`;
 const successSymbol = `<g transform="translate(-2 6.8829176)">${sym.check}</g>`;
 const historySymbol = `<circle cx="0" cy="0" r="41.28"/><path d="M-2.96085 5.6939439 V-21.8260561"/><path d="M-2.96085 5.6939439 H17.67915"/>`;
 
@@ -152,17 +153,29 @@ function stateIcon(color, symbol, { stroke = 44, scale = 1 } = {}) {
 const out = new Map();
 const action = (name, title, desc, color, symbol, options = {}) =>
   out.set(name, doc(title, desc, `${SIGN}\n  ${badge(color, symbol, options)}`));
+// Explorer menu commands: the badge alone, filling the canvas. At 16 px a badge in the corner of the
+// sign was too small to tell the commands apart; the menu already says they belong to Lore. No white
+// ring: next to other menu icons it read as a hard cut edge, so the circle takes its place instead
+// (radius 228 of 256, the ring's outer edge) and the symbol grows with it.
+const COMMAND_SCALE = (2 * 228 / 208).toFixed(4);
+const command = (name, title, desc, color, symbol, options = {}) =>
+  out.set(name, doc(title, desc, `<g transform="matrix(${COMMAND_SCALE} 0 0 ${COMMAND_SCALE} ${f(256 - 396 * COMMAND_SCALE)} ${f(256 - 396 * COMMAND_SCALE)})">${badge(color, symbol, { ...options, ring: 0 })}</g>`));
 
 // ---- Explorer: actions and Companion windows --------------------------------
 out.set('lore', doc('Lore', 'Lore main sign: the Lore mark on blue.', SIGN_PLAIN));
-action('clone', 'Lore Clone', 'Clone a repository: Lore mark with a green download arrow.', C.green, sym.clone);
-action('sync', 'Lore Sync', 'Sync a repository: Lore mark with green circular arrows.', C.green, syncSymbol, { scale: 1, stroke: 25.8 });
-action('commit', 'Lore Commit', 'Commit changes: Lore mark with a green check.', C.green, commitSymbol);
-action('stage', 'Lore Stage', 'Stage selected paths: Lore mark with a blue plus.', C.deepBlue, sym.plus);
-action('status', 'Lore Status', 'Repository status: Lore mark with an information sign.', C.deepBlue, sym.info);
-action('history', 'Lore History', 'Revision history: Lore mark with a clock.', C.purple, historySymbol, { scale: 1, stroke: 15.48 });
-action('lock', 'Lore Acquire Locks', 'Acquire locks: Lore mark with a closed padlock.', C.muted, sym.lock(false));
-action('unlock', 'Lore Release Locks', 'Release locks: Lore mark with an open padlock.', C.green, sym.lock(true));
+// The "Lore" submenu in Explorer: the Lore mark in white on a blue circle, same shape and size as
+// the command icons. The square main sign was too small at 16 px next to them.
+out.set('menu', doc('Lore menu', 'Lore submenu in Explorer: white Lore mark on a blue circle.',
+  `<circle cx="256" cy="256" r="228" fill="${C.deepBlue}"/>
+  <g transform="translate(76.8 76.8) scale(0.7)"><path d="${LORE_D}" fill="${C.white}"/></g>`));
+command('clone', 'Lore Clone', 'Clone a repository: green arrow down.', C.green, sym.clone);
+command('sync', 'Lore Sync', 'Sync a repository: green circular arrows.', C.green, syncSymbol, { scale: 1, stroke: 25.8 });
+command('commit', 'Lore Commit', 'Commit changes: green arrow up.', C.green, sym.commit);
+command('stage', 'Lore Stage', 'Stage selected paths: blue plus.', C.deepBlue, sym.plus);
+command('status', 'Lore Status', 'Repository status: information sign.', C.deepBlue, sym.info);
+command('history', 'Lore History', 'Revision history: clock.', C.purple, historySymbol, { scale: 1, stroke: 15.48 });
+command('lock', 'Lore Acquire Locks', 'Acquire locks: closed padlock.', C.muted, sym.lock(false));
+command('unlock', 'Lore Release Locks', 'Release locks: open padlock.', C.green, sym.lock(true));
 out.set('folder-open', doc('Select folder', 'Open folder used to pick a directory.', folder()));
 
 // ---- Explorer: state overlays, lower left corner ----------------------------
@@ -202,8 +215,8 @@ out.set('settings', doc('Settings', 'Gear.', `<g transform="translate(256 256)">
 out.set('app', doc('Lore', 'Lore application icon: the Lore mark on blue.', SIGN_APP));
 action('app-installer', 'Lore installer', 'Install Lore: Lore mark with a green install badge.', C.green, sym.installer);
 action('app-uninstaller', 'Lore uninstaller', 'Remove Lore: Lore mark with a red removal badge.', C.red, sym.minus);
-action('cli', 'Lore CLI', 'Lore command line: Lore mark with a terminal badge.', C.ink, sym.terminal);
-action('update', 'Lore update', 'Update the Lore client: Lore mark with a green update arrow.', C.green, updateSymbol);
+command('cli', 'Lore CLI', 'Lore command line: terminal badge.', C.ink, sym.terminal);
+command('update', 'Lore update', 'Update the Lore client: green update arrow.', C.green, updateSymbol);
 
 for (const [name, content] of out) fs.writeFileSync(path.join(dir, `${name}.svg`), content);
 console.log(`wrote ${out.size} icons`);

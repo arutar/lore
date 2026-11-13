@@ -24,7 +24,8 @@ function New-HexSecret {
 }
 function Write-Utf8NoBom([string]$Path, [Parameter(ValueFromPipeline = $true)][string]$Text) {
     process {
-        $fullPath = Join-Path (Get-Location).Path $Path
+        # Combine keeps an absolute path as is, so a data root on another drive works.
+        $fullPath = [IO.Path]::Combine((Get-Location).Path, $Path)
         [IO.File]::WriteAllText($fullPath, $Text, [Text.UTF8Encoding]::new($false))
     }
 }
@@ -88,19 +89,23 @@ Set-EnvSetting "SECURE_COOKIES" $(if ($Scheme -eq "https") { "true" } else { "fa
 foreach ($name in @(
     "LORE_LDAP_URL", "LORE_LDAP_BASE_DN", "LORE_LDAP_BIND_DN", "LORE_LDAP_BIND_PASSWORD",
     "LORE_LDAP_USERNAME_ATTRIBUTE", "LORE_LDAP_STARTTLS", "LORE_LDAP_INSECURE_SKIP_VERIFY", "LORE_LDAP_TIMEOUT",
+    "LORE_LDAP_REFRESH", "LORE_LDAP_OUTAGE_GRACE",
     "LORE_SMTP_HOST", "LORE_SMTP_PORT", "LORE_SMTP_FROM", "LORE_SMTP_FROM_NAME",
     "LORE_SMTP_USERNAME", "LORE_SMTP_PASSWORD", "LORE_SMTP_STARTTLS", "LORE_SMTP_SSL",
-    "LORE_DATA_ROOT", "LORE_PROXY_BIND"
+    "LORE_DATA_ROOT", "LORE_PROXY_BIND", "LORE_CONTROL_PLANE_IMAGE", "LORE_SERVER_IMAGE"
 )) {
     $value = [Environment]::GetEnvironmentVariable($name)
     if ($value) { Set-EnvSetting $name $value }
 }
 
-$generated = "data/generated"
-New-Item -ItemType Directory -Force -Path "$generated/caddy", "data/postgres", "data/lore", "data/control-plane", "data/caddy" | Out-Null
+# Every path below derives from the data root, so a custom LORE_DATA_ROOT moves the
+# generated configuration together with the data that compose mounts from it.
+$dataRoot = if ($env:LORE_DATA_ROOT) { $env:LORE_DATA_ROOT } else { "./data" }
+$generated = "$dataRoot/generated"
+New-Item -ItemType Directory -Force -Path "$generated/caddy", "$dataRoot/postgres", "$dataRoot/lore", "$dataRoot/control-plane", "$dataRoot/caddy" | Out-Null
 (Get-Content lore/docker.toml -Raw).Replace("http://host.docker.internal:8080/auth", $AuthUrl).Replace("http://host.docker.internal:8080", $PublicUrl) |
     Write-Utf8NoBom "$generated/lore.toml"
-(Get-Content keycloak/lore-realm.json -Raw).Replace("http://localhost:8080", $PublicUrl).Replace("host.docker.internal", $PublicHost).Replace("lore-service-dev-only", $settings.LORE_SERVICE_CLIENT_SECRET).Replace("admin-dev-only", $settings.LORE_ADMIN_PASSWORD) |
+(Get-Content keycloak/lore-realm.json -Raw).Replace("http://localhost:8080", $PublicUrl).Replace("host.docker.internal", $PublicHost) |
     Write-Utf8NoBom "$generated/lore-realm.json"
 $realm = Get-Content "$generated/lore-realm.json" -Raw | ConvertFrom-Json
 if ($Scheme -eq "https") { $realm.sslRequired = "external" }
@@ -116,7 +121,8 @@ if ($env:LORE_SMTP_HOST) {
         ssl = $(if ($env:LORE_SMTP_SSL) { $env:LORE_SMTP_SSL } else { "false" })
         auth = [bool]($env:LORE_SMTP_USERNAME -or $env:LORE_SMTP_PASSWORD)
         user = $env:LORE_SMTP_USERNAME
-        password = $env:LORE_SMTP_PASSWORD
+        # Resolved by Keycloak from its environment at import; never written to the file.
+        password = '${LORE_SMTP_PASSWORD}'
     }
     $realm.verifyEmail = $true
     $realm.resetPasswordAllowed = $true
@@ -132,7 +138,6 @@ if ($env:LORE_LDAP_URL) {
         "__LORE_LDAP_URL__" = $env:LORE_LDAP_URL
         "__LORE_LDAP_BASE_DN__" = $env:LORE_LDAP_BASE_DN
         "__LORE_LDAP_BIND_DN__" = $env:LORE_LDAP_BIND_DN
-        "__LORE_LDAP_BIND_PASSWORD__" = $env:LORE_LDAP_BIND_PASSWORD
         "__LORE_LDAP_STARTTLS__" = $startTls
         "__LORE_LDAP_USE_TRUSTSTORE__" = $truststore
     }
@@ -155,7 +160,7 @@ $realm | ConvertTo-Json -Depth 100 | Write-Utf8NoBom "$generated/lore-realm.json
 Remove-Item "$generated/caddy/auth.conf" -ErrorAction SilentlyContinue
 if ($AuthUrl -ne "$PublicUrl/auth") {
     $authAddress = ([Uri]$AuthUrl).Authority
-    Write-Utf8NoBom "$generated/caddy/auth.conf" "$authAddress`n`nreverse_proxy keycloak:8080`n"
+    Write-Utf8NoBom "$generated/caddy/auth.conf" "$authAddress {`n`timport keycloak_guard`n`thandle {`n`t`treverse_proxy keycloak:8080`n`t}`n}`n"
 }
 
 $env:LORE_WEB_PUBLIC_URL = $PublicUrl
@@ -163,8 +168,8 @@ $env:LORE_EXCHANGE_PUBLIC_URL = $PublicUrl
 $env:KEYCLOAK_PUBLIC_URL = $AuthUrl
 $env:LORE_PUBLIC_ADDRESS = if ($Scheme -eq "https") { ([Uri]$PublicUrl).Authority } else { $PublicUrl }
 if (-not $env:LORE_PROXY_BIND) { $env:LORE_PROXY_BIND = "0.0.0.0" }
-$env:LORE_REALM_FILE = "./data/generated/lore-realm.json"
-$env:LORE_CONFIG_FILE = "./data/generated/lore.toml"
+$env:LORE_REALM_FILE = "$generated/lore-realm.json"
+$env:LORE_CONFIG_FILE = "$generated/lore.toml"
 $env:LORE_TOKEN_SIGNING_KEY_FILE = "/data/token-exchange-signing.pem"
 $env:SECURE_COOKIES = if ($Scheme -eq "https") { "true" } else { "false" }
 $env:POSTGRES_PASSWORD = $settings.POSTGRES_PASSWORD
@@ -176,17 +181,32 @@ $composeFiles = @("compose", "-f", "compose.yaml")
 if ($direct) { $composeFiles += @("-f", "compose.caddy.yaml") }
 if ($localCa) { $composeFiles += @("-f", "compose.caddy-local.yaml") }
 $arguments = @("up", "-d", "--wait", "--wait-timeout", "240")
-if (-not $SkipBuild) { $arguments += "--build" }
+# Published images (LORE_CONTROL_PLANE_IMAGE and LORE_SERVER_IMAGE) are pulled; otherwise
+# both are built from this checkout, which compiles the Rust server and takes much longer.
+if ($env:LORE_CONTROL_PLANE_IMAGE -and $env:LORE_SERVER_IMAGE) { $arguments += "--pull=always" }
+elseif (-not $SkipBuild) { $arguments += "--build" }
 if ($localCa) {
     & docker @composeFiles @arguments caddy
     if ($LASTEXITCODE -ne 0) { throw "Caddy startup failed" }
-    $certificate = Join-Path $(if ($env:LORE_DATA_ROOT) { $env:LORE_DATA_ROOT } else { "./data" }) "caddy/caddy/pki/authorities/local/root.crt"
+    $certificate = Join-Path $dataRoot "caddy/caddy/pki/authorities/local/root.crt"
     for ($attempt = 0; $attempt -lt 12 -and -not (Test-Path $certificate); $attempt++) { Start-Sleep 2 }
     if (-not (Test-Path $certificate)) { throw "Caddy local CA wasn't created" }
 }
 & docker @composeFiles @arguments
 if ($LASTEXITCODE -ne 0) { throw "Docker Compose failed" }
-& docker @composeFiles exec -T keycloak bash -c 'set -e; KC=/opt/keycloak/bin/kcadm.sh; "$KC" config credentials --server http://127.0.0.1:8080/auth --realm master --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD"; "$KC" add-roles -r lore --uusername service-account-lore-control-plane --cclientid realm-management --rolename manage-realm; "$KC" add-roles -r lore --uusername service-account-lore-control-plane --cclientid realm-management --rolename manage-users'
-if ($LASTEXITCODE -ne 0) { throw "Keycloak service account configuration failed" }
+# The realm file is imported only on the first start; bring an existing realm in line with
+# the current settings. Secrets reach the script through the container environment.
+$realmSettings = @{
+    LORE_PUBLIC_URL = $PublicUrl; LORE_PUBLIC_HOST = $PublicHost; LORE_PUBLIC_SCHEME = $Scheme
+}
+foreach ($name in @("LORE_SMTP_HOST", "LORE_SMTP_PORT", "LORE_SMTP_FROM", "LORE_SMTP_FROM_NAME", "LORE_SMTP_USERNAME",
+        "LORE_SMTP_STARTTLS", "LORE_SMTP_SSL", "LORE_LDAP_URL", "LORE_LDAP_BASE_DN", "LORE_LDAP_BIND_DN",
+        "LORE_LDAP_STARTTLS", "LORE_LDAP_INSECURE_SKIP_VERIFY")) {
+    $realmSettings[$name] = [string][Environment]::GetEnvironmentVariable($name)
+}
+$execArguments = @("exec", "-T")
+foreach ($entry in $realmSettings.GetEnumerator()) { $execArguments += @("-e", "$($entry.Key)=$($entry.Value)") }
+& docker @composeFiles @execArguments keycloak bash /opt/lore/configure-realm.sh
+if ($LASTEXITCODE -ne 0) { throw "Keycloak realm configuration failed" }
 
-Write-Host "`nLore is ready.`nWebUI: $PublicUrl`nKeycloak: $AuthUrl`nAdministrator: admin`nInitial administrator password: $($settings.LORE_ADMIN_PASSWORD)`nData: $PSScriptRoot/data"
+Write-Host "`nLore is ready.`nWebUI: $PublicUrl`nKeycloak: $AuthUrl`nAdministrator: admin`nInitial administrator password: $($settings.LORE_ADMIN_PASSWORD)`nData: $([IO.Path]::GetFullPath($dataRoot))"

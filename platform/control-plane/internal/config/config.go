@@ -32,6 +32,8 @@ type Config struct {
 	LoreGRPCSecure        bool
 	TokenExchangeIssuer   string
 	TokenSigningKeyFile   string
+	DirectoryRefresh      time.Duration
+	DirectoryOutageGrace  time.Duration
 }
 
 func FromEnv() (Config, error) {
@@ -77,6 +79,14 @@ func FromEnv() (Config, error) {
 			return Config{}, fmt.Errorf("SESSION_TTL must be between 1m and 720h")
 		}
 	}
+	config.DirectoryRefresh, err = durationEnv("LORE_LDAP_REFRESH", 5*time.Minute, 30*time.Second, 24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	config.DirectoryOutageGrace, err = durationEnv("LORE_LDAP_OUTAGE_GRACE", 8*time.Hour, 0, 7*24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
 	if config.OIDCRedirectURL == "" {
 		config.OIDCRedirectURL = config.ExternalURL + "/web/v1/oidc/callback"
 	}
@@ -97,6 +107,18 @@ func env(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func durationEnv(name string, fallback, minimum, maximum time.Duration) (time.Duration, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < minimum || parsed > maximum {
+		return 0, fmt.Errorf("%s must be a duration between %s and %s", name, minimum, maximum)
+	}
+	return parsed, nil
 }
 
 func boolEnv(name string, fallback bool) (bool, error) {

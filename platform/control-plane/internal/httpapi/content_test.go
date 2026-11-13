@@ -30,7 +30,7 @@ func (f *fakeRepositoryContent) History(context.Context, string, string) (lorecl
 
 func (f *fakeRepositoryContent) Locks(context.Context, string) ([]loreclient.RepositoryLock, error) {
 	f.calls++
-	return []loreclient.RepositoryLock{{Path: "README.md", Owner: "user"}}, nil
+	return []loreclient.RepositoryLock{{Path: "README.md", Owner: "author-id"}, {Path: "art.psd", Owner: "unknown-owner"}}, nil
 }
 
 func (f *fakeRepositoryContent) Download(context.Context, string, string, string) (*loreclient.Download, error) {
@@ -68,6 +68,15 @@ func TestRepositoryContentUsesWebPermissions(t *testing.T) {
 			revision := body["items"].([]any)[0].(map[string]any)
 			if revision["author"] != "alice" || revision["committer"] != "alice" {
 				t.Fatalf("history identity = %v", revision)
+			}
+		}
+		if endpoint == "locks" {
+			locks := body["items"].([]any)
+			if owner := locks[0].(map[string]any)["owner"]; owner != "alice" {
+				t.Fatalf("lock owner = %v, want the account name", owner)
+			}
+			if owner := locks[1].(map[string]any)["owner"]; owner != "unknown-owner" {
+				t.Fatalf("unknown lock owner = %v, want it unchanged", owner)
 			}
 		}
 	}

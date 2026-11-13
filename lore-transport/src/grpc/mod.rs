@@ -1057,6 +1057,9 @@ pub async fn environment(
     connection: Weak<Connection>,
     remote_url: &str,
 ) -> Result<Arc<dyn Environment>, ProtocolError> {
+    // The environment names the server's identity provider; let the client reach it over
+    // plain http when it runs on the server's own host.
+    crate::auth::trust_server_host(remote_url);
     let connection = connect(connection, remote_url, true).await?;
     environment_client(connection)
 }

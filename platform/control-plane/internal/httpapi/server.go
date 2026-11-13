@@ -27,8 +27,9 @@ type RepositoryContent interface {
 }
 
 type GroupCatalog interface {
-	ListGroups(ctx context.Context) ([]directory.Group, error)
-	GroupIDs(ctx context.Context, username string) ([]string, error)
+	SearchGroups(ctx context.Context, prefix string, limit int) ([]directory.Group, error)
+	LookupGroup(ctx context.Context, id string) (directory.Group, error)
+	LookupAccount(ctx context.Context, id string) (directory.Account, error)
 	FindUser(ctx context.Context, username string) (directory.User, error)
 	SearchUsers(ctx context.Context, query string) ([]directory.User, error)
 }
@@ -47,12 +48,15 @@ type Config struct {
 	OIDC                AuthConfig
 	ExternalURL         string
 	NativeRepositoryURL string
+	// SecureHeaders adds Strict-Transport-Security; set it when the WebUI is served over HTTPS.
+	SecureHeaders bool
 }
 
 type Server struct {
 	store  store.Store
 	auth   *Authenticator
 	config Config
+	groups groupCache
 }
 
 func NewServer(store store.Store, auth *Authenticator, config Config) http.Handler {
@@ -61,6 +65,7 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 	router.Use(middleware.RequestID)
 	router.Use(middleware.RealIP)
 	router.Use(middleware.Recoverer)
+	router.Use(securityHeaders(config.SecureHeaders))
 	router.Use(func(next http.Handler) http.Handler {
 		withTimeout := middleware.Timeout(30 * time.Second)(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -130,7 +135,7 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "not_authenticated", "Authentication is required")
 			return
 		}
-		if user.Disabled || user.Role != model.RoleAdmin {
+		if !user.Active() || user.Role != model.RoleAdmin {
 			writeError(w, http.StatusForbidden, "not_authorized", "Administrator access is required")
 			return
 		}
@@ -165,4 +170,26 @@ func (s *Server) static(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeFile(w, r, s.config.StaticDir+"/"+path)
+}
+
+// contentSecurityPolicy allows only the WebUI's own scripts, styles, images and API calls,
+// and forbids framing, which also protects the administration pages from clickjacking.
+const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
+	"font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+
+func securityHeaders(https bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			header := w.Header()
+			header.Set("Content-Security-Policy", contentSecurityPolicy)
+			header.Set("X-Content-Type-Options", "nosniff")
+			header.Set("X-Frame-Options", "DENY")
+			header.Set("Referrer-Policy", "same-origin")
+			header.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+			if https {
+				header.Set("Strict-Transport-Security", "max-age=31536000")
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }

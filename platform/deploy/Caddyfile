@@ -1,19 +1,23 @@
-{$LORE_PUBLIC_ADDRESS:http://host.docker.internal:8080}
-
-handle /auth/admin* {
-    respond "Not found" 404
+# The Keycloak administration console and the master realm are never published: Lore
+# accounts are managed in the WebUI. Every site that proxies Keycloak imports this.
+(keycloak_guard) {
+	handle /auth/admin* {
+		respond "Not found" 404
+	}
+	handle /auth/realms/master* {
+		respond "Not found" 404
+	}
 }
 
-handle /auth/realms/master* {
-    respond "Not found" 404
+{$LORE_PUBLIC_ADDRESS:http://host.docker.internal:8080} {
+	import keycloak_guard
+	handle /auth* {
+		reverse_proxy keycloak:8080
+	}
+	handle {
+		reverse_proxy control-plane:8080
+	}
 }
 
-handle /auth* {
-    reverse_proxy keycloak:8080
-}
-
-handle {
-    reverse_proxy control-plane:8080
-}
-
+# A separate authentication domain, when setup configures one (generated/caddy/auth.conf).
 import /etc/caddy/conf.d/*.conf

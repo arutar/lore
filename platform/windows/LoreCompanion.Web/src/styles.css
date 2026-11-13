@@ -1,5 +1,8 @@
 @import "../../../web/src/themes.css";
 
+/* The same themes as the WebUI; these names are what the companion's styles use. */
+:root { --panel: var(--surface); --panel-hover: var(--surface-2); --success: var(--ok); --radius-theme: var(--radius-sm); }
+
 * { box-sizing: border-box; }
 :root { font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); font-synthesis: none; }
 body { margin: 0; min-width: 420px; min-height: 100vh; overflow-x: hidden; }
@@ -49,6 +52,10 @@ textarea { min-height: 64px; resize: vertical; }
 .account-form { flex: none; }
 .accounts-link { margin-left: auto; min-height: 30px; padding: 5px 9px; font-size: 11px; }
 .account-list { display: grid; gap: 8px; max-height: 250px; margin: 14px 0; overflow-y: auto; }
+/* Accounts: the window keeps its header, server field and footer in view; only the list of
+   sign-ins scrolls, and only when there are more than fit. */
+.dialog.accounts { height: 100vh; min-height: 0; overflow-y: auto; }
+.dialog.accounts .account-list { flex: 1 1 auto; min-height: 64px; max-height: none; align-content: start; }
 .account-row { display: flex; align-items: center; gap: 8px; padding: 10px 11px; border: 1px solid var(--line); border-radius: var(--radius-theme); background: var(--panel); }
 .account-info { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
 .account-info strong { font-size: 12px; }
@@ -60,3 +67,5 @@ textarea { min-height: 64px; resize: vertical; }
 .loading img { width: 36px; height: 36px; }
 @keyframes progress { from { transform: translateX(-110%); } to { transform: translateX(400%); } }
 @media (prefers-reduced-motion: reduce) { .progress span { width: 100%; animation: none; } }
+.theme-row { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; font-weight: 550; }
+.theme-row select { min-height: 30px; padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--radius-theme); background: var(--panel-hover); color: var(--text); font: inherit; }

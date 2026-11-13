@@ -91,8 +91,9 @@ fn http_client() -> Result<&'static reqwest::Client, reqwest::Error> {
     Ok(CLIENT.get_or_init(|| client))
 }
 
-/// Whether `url` may carry requests to an identity provider: `https`, or plain `http` to a
-/// loopback host when `allow_loopback_http` is set. A URL carrying a username or password is
+/// Whether `url` may carry requests to an identity provider: `https`, or plain `http` when
+/// `allow_loopback_http` is set and the host is loopback or the connected Lore server's own
+/// host (see [`super::trust_server_host`]). A URL carrying a username or password is
 /// refused, so no credential reaches a log line or an error message through it.
 fn is_permitted_url(url: &url::Url, allow_loopback_http: bool) -> bool {
     if !url.username().is_empty() || url.password().is_some() {
@@ -100,7 +101,7 @@ fn is_permitted_url(url: &url::Url, allow_loopback_http: bool) -> bool {
     }
     match url.scheme() {
         "https" => true,
-        "http" => allow_loopback_http && super::is_loopback_http_url(url),
+        "http" => allow_loopback_http && super::is_permitted_plain_http_url(url),
         _ => false,
     }
 }

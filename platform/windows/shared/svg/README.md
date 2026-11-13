@@ -15,7 +15,10 @@ platform/windows/shared/svg/
 
 - **Main sign** is the Lore mark (`lore-glyph.svg`) drawn in `#0D1117` on a rounded blue square `#58A6FF`.
   The glyph is used unchanged in every icon.
-- **An operation adds a badge, it never replaces the sign.** The badge sits in the lower right corner on the
+- **Explorer menu commands are the badge alone, doubled to fill the canvas** (`command()` in the generator):
+  in a 16 px menu the corner badge on the sign was too small to tell the commands apart, and the menu
+  already groups them under Lore. The installer and uninstaller keep the sign with a corner badge.
+- **An operation badge on the sign never replaces the sign.** The badge sits in the lower right corner on the
   sign corner, so the mark stays readable.
 - **A state overlay sits in the lower left corner**, TortoiseSVN style, and is a separate file composited over
   the file icon by the shell. The overlay never covers the file icon body.
@@ -66,19 +69,20 @@ zero overlap.
 | File | Sign | Badge or glyph |
 |---|---|---|
 | `lore.svg` | Lore mark on blue | none |
+| `menu.svg` | white Lore mark on a blue circle, Explorer "Lore" submenu | none |
 | `app.svg` | Lore mark on blue, full bleed | none |
 | `app-installer.svg` | Lore mark on blue | green arrow into a tray |
 | `app-uninstaller.svg` | Lore mark on blue | red minus |
-| `cli.svg` | Lore mark on blue | ink terminal prompt |
-| `update.svg` | Lore mark on blue | green circular arrow |
-| `clone.svg` | Lore mark on blue | green download arrow |
-| `sync.svg` | Lore mark on blue | green circular arrows |
-| `commit.svg` | Lore mark on blue | green check |
-| `stage.svg` | Lore mark on blue | blue plus |
-| `status.svg` | Lore mark on blue | blue information sign |
-| `history.svg` | Lore mark on blue | purple clock |
-| `lock.svg` | Lore mark on blue | grey closed padlock |
-| `unlock.svg` | Lore mark on blue | green open padlock |
+| `cli.svg` | none, menu command (full circle, no white ring) | ink terminal prompt |
+| `update.svg` | none, menu command (full circle, no white ring) | green circular arrow |
+| `clone.svg` | none, menu command (full circle, no white ring) | green arrow down (pair of commit) |
+| `sync.svg` | none, menu command (full circle, no white ring) | green circular arrows |
+| `commit.svg` | none, menu command (full circle, no white ring) | green arrow up (pair of clone) |
+| `stage.svg` | none, menu command (full circle, no white ring) | blue plus |
+| `status.svg` | none, menu command (full circle, no white ring) | blue information sign |
+| `history.svg` | none, menu command (full circle, no white ring) | purple clock |
+| `lock.svg` | none, menu command (full circle, no white ring) | grey closed padlock |
+| `unlock.svg` | none, menu command (full circle, no white ring) | green open padlock |
 | `folder-open.svg` | none | folder, used for choosing a directory |
 | `overlay-modified.svg` | none | orange pencil |
 | `overlay-staged.svg` | none | blue plus |

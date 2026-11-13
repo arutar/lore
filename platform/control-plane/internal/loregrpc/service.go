@@ -19,6 +19,9 @@ import (
 
 var ErrUnauthenticated = errors.New("unauthenticated")
 
+// serviceSource marks the control plane's own service account, see httpapi.SourceService.
+const serviceSource = "service"
+
 type Authenticator interface {
 	AuthenticateBearer(ctx context.Context, token string) (model.User, error)
 }
@@ -70,7 +73,7 @@ func (s *Service) UserFind(ctx context.Context, request *userv1.UserFindRequest)
 	response := &userv1.UserFindResponse{}
 	cursor := ""
 	for {
-		page, err := s.store.ListUsers(ctx, cursor, 100)
+		page, err := s.store.ListUsers(ctx, "", cursor, 100)
 		if err != nil {
 			return nil, status.Error(codes.Internal, "user lookup failed")
 		}
@@ -102,7 +105,7 @@ func (s *Service) RepositoryList(request *userv1.RepositoryListRequest, stream g
 	}
 	cursor := ""
 	for {
-		page, err := s.store.Catalog(stream.Context(), &user, cursor, 100)
+		page, err := s.store.Catalog(stream.Context(), &user, "", cursor, 100)
 		if err != nil {
 			return status.Error(codes.Internal, "repository lookup failed")
 		}
@@ -138,8 +141,14 @@ func (s *Service) RepositoryRegister(ctx context.Context, request *userv1.Reposi
 	if err != nil {
 		return nil, err
 	}
+	// Repositories are created by administrators: in the WebUI, which reaches here
+	// through the control plane's service account, or natively by an administrator.
+	// Anyone else could squat names and learn private ones from the conflict answers.
+	if user.Role != model.RoleAdmin && user.Source != serviceSource {
+		return nil, status.Error(codes.PermissionDenied, "only administrators can create repositories")
+	}
 	id, err := formatUUID(request.Id)
-	if err != nil || request.Name == "" {
+	if err != nil || !model.ValidRepositoryName(request.Name) {
 		return nil, status.Error(codes.InvalidArgument, "valid repository ID and name are required")
 	}
 	existing, err := s.store.GetRepository(ctx, id)
@@ -208,7 +217,7 @@ func (s *Service) authenticate(ctx context.Context) (model.User, error) {
 		return model.User{}, status.Error(codes.Unauthenticated, "bearer token is required")
 	}
 	user, err := s.auth.AuthenticateBearer(ctx, token)
-	if err != nil || user.Disabled {
+	if err != nil || !user.Active() {
 		return model.User{}, status.Error(codes.Unauthenticated, "bearer token is invalid")
 	}
 	return user, nil

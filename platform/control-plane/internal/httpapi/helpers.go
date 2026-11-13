@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/arutar/lore/platform/control-plane/internal/store"
 )
@@ -47,6 +48,15 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) bool {
 		return false
 	}
 	return true
+}
+
+// searchQuery is the trimmed `q` parameter, capped so it can't become an expensive scan input.
+func searchQuery(r *http.Request) string {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if runes := []rune(query); len(runes) > 128 {
+		query = string(runes[:128])
+	}
+	return query
 }
 
 func pageLimit(r *http.Request) (int, bool) {

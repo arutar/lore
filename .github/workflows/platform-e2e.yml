@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: MIT
+
+# Installs the whole platform with Docker Compose on a clean runner and runs
+# platform/deploy/test/e2e.sh: setup, sign-in through Keycloak, repository and grant,
+# backup, changes, restore. Building the Lore server takes a while, so this runs on
+# changes to the deployment and on demand rather than on every commit.
+name: Platform End-to-End
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/platform-e2e.yml"
+      - "platform/deploy/**"
+      - "platform/control-plane/internal/httpapi/**"
+      - "platform/control-plane/internal/store/**"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: platform-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: Setup, sign-in, grants, backup and restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The default installation addresses itself as host.docker.internal, as on Docker
+      # Desktop; containers get it from compose, the runner from /etc/hosts.
+      - name: Resolve host.docker.internal on the runner
+        run: echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
+      - name: End-to-end test
+        working-directory: platform/deploy
+        env:
+          LORE_E2E: destroy-test-data
+        run: bash test/e2e.sh
+      - name: Container logs
+        if: failure()
+        working-directory: platform/deploy
+        run: docker compose logs --no-color --tail 200
+      - name: Remove the installation
+        if: always()
+        working-directory: platform/deploy
+        run: |
+          docker compose down -v --remove-orphans || true
+          sudo rm -rf data backups .env

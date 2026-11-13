@@ -31,10 +31,11 @@ type HostMessage = InitMessage
   | { type: "complete"; text: string }
   | { type: "error"; text: string; accessDenied?: boolean }
   | { type: "accounts"; items: StoredAccount[] }
-  | { type: "directory"; path: string };
+  | { type: "directory"; path: string }
+  | { type: "theme"; theme: string };
 type ClientMessage = { type: "ready" } | { type: "browse" } | { type: "cancel" } | { type: "accounts-open" }
   | { type: "accounts-add"; remoteUrl: string } | { type: "accounts-select"; userId: string }
-  | { type: "accounts-remove"; authUrl: string; userId: string }
+  | { type: "accounts-remove"; authUrl: string; userId: string } | { type: "theme-set"; theme: string }
   | { type: "run"; repositoryUrl: string; targetPath: string; message: string };
 
 interface WebViewBridge {
@@ -53,8 +54,11 @@ const info: Record<OperationValue, { title: string; subtitle: string; action: st
   [Operation.History]: { title: "Revision history", subtitle: "Recent revisions in this repository.", action: "Refresh", icon: historyIcon },
   [Operation.Lock]: { title: "Acquire locks", subtitle: "Prevent conflicting edits to selected files.", action: "Acquire locks", icon: lockIcon },
   [Operation.Unlock]: { title: "Release locks", subtitle: "Release locks held on selected files.", action: "Release locks", icon: unlockIcon },
-  [Operation.Accounts]: { title: "Saved accounts", subtitle: "Manage Lore servers and stored sign-ins.", action: "Add account", icon: statusIcon },
+  [Operation.Accounts]: { title: "Accounts", subtitle: "One sign-in per Lore server. Signing in as another user signs out the previous one.", action: "Sign in", icon: statusIcon },
 };
+// The same themes as the WebUI (platform/web/src/themes.css).
+const themes: [string, string][] = [["midnight", "Midnight"], ["sky", "Sky"], ["ember", "Ember"], ["sage", "Sage"], ["aurora", "Aurora"],
+  ["ocean", "Ocean"], ["retro", "Retro"], ["autumn", "Autumn"], ["light", "Light"], ["cyberpunk", "Cyberpunk"]];
 const post = (message: ClientMessage) => window.chrome?.webview?.postMessage(message);
 
 export default function App() {
@@ -71,6 +75,7 @@ export default function App() {
   const [statuses, setStatuses] = useState<Record<string, number>>({});
   const [revisions, setRevisions] = useState<{ number: string; id: string }[]>([]);
   const [accounts, setAccounts] = useState<StoredAccount[]>([]);
+  const [theme, setTheme] = useState("midnight");
 
   const start = (current: InitMessage) => {
     setRunning(true);
@@ -88,12 +93,16 @@ export default function App() {
       const data = event.data;
       if (data.type === "init") {
         document.documentElement.dataset.theme = data.theme;
+        setTheme(data.theme);
         operationRef.current = data.operation;
         setConfig(data);
         setRepositoryUrl(data.repositoryUrl);
         setTargetPath(data.targetPath);
         setMessage(data.message);
         if (data.operation !== Operation.Clone && data.operation !== Operation.Commit && data.operation !== Operation.Accounts) start(data);
+      } else if (data.type === "theme") {
+        document.documentElement.dataset.theme = data.theme;
+        setTheme(data.theme);
       } else if (data.type === "accounts") {
         setAccounts(data.items);
       } else if (data.type === "progress") {
@@ -138,25 +147,31 @@ export default function App() {
     setLogs([]);
     post({ type: "accounts-add", remoteUrl: repositoryUrl });
   };
-  if (config.operation === Operation.Accounts) return <main className="dialog">
+  if (config.operation === Operation.Accounts) return <main className="dialog accounts">
     <header className="header"><img className="operation-icon" src={loreIcon} alt="" /><div><h1>{current.title}</h1><p>{current.subtitle}</p></div></header>
     <form className="account-form" onSubmit={addAccount}>
       <label><span>Lore server</span><span className="directory-row"><input required disabled={running} value={repositoryUrl}
         onChange={(event) => setRepositoryUrl(event.target.value)} placeholder="lore://localhost" />
-        <button className="button primary" disabled={running}>{running ? "Signing in…" : "Add account"}</button></span></label>
+        <button className="button primary" disabled={running}>{running ? "Signing in…" : "Sign in"}</button></span></label>
     </form>
     <div className="account-list">
-      {accounts.length === 0 ? <div className="summary">No saved accounts. Enter a Lore server URL to sign in.</div> : accounts.map((account) => <div className="account-row" key={`${account.authUrl}:${account.userId}`}>
+      {accounts.length === 0 ? <div className="summary">Not signed in. Enter a Lore server URL to sign in.</div> : accounts.map((account) => <div className="account-row" key={`${account.authUrl}:${account.userId}`}>
         <div className="account-info"><strong>{account.username || "Unknown user"}</strong><span>{account.domains || account.authUrl.replace(/^oidc\+/, "")}</span></div>
         {account.selected ? <span className="selected-account">In use</span> : <button className="button secondary" disabled={running} onClick={() => { setRunning(true); setError(""); setSuccess(""); post({ type: "accounts-select", userId: account.userId }); }}>Use</button>}
-        <button className="button danger" disabled={running} title="Remove this saved login and its repository tokens" onClick={() => { setRunning(true); setError(""); setSuccess(""); post({ type: "accounts-remove", authUrl: account.authUrl, userId: account.userId }); }}>Remove</button>
+        <button className="button danger" disabled={running} title="Sign out and delete this sign-in from the computer" onClick={() => { setRunning(true); setError(""); setSuccess(""); post({ type: "accounts-remove", authUrl: account.authUrl, userId: account.userId }); }}>Sign out</button>
       </div>)}
     </div>
     {running && <div className="progress" role="progressbar" aria-label="Waiting for browser sign-in"><span /></div>}
     {error && <div className="alert error" role="alert"><img src={errorIcon} alt="" /><span>{error}</span></div>}
     {success && <div className="alert success" role="status"><img src={successIcon} alt="" /><span>{success}</span></div>}
     {logs.length > 0 && <pre className="output" aria-live="polite">{logs.join("\n")}</pre>}
-    <footer className="actions"><button className="button secondary" disabled={running} onClick={() => post({ type: "cancel" })}>Close</button></footer>
+    <footer className="actions">
+      <label className="theme-row">Window theme
+        <select value={theme} onChange={(event) => post({ type: "theme-set", theme: event.target.value })}>
+          {themes.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+        </select></label>
+      <button className="button secondary" disabled={running} onClick={() => post({ type: "cancel" })}>Close</button>
+    </footer>
   </main>;
   const submit = (event: React.FormEvent) => {
     event.preventDefault();

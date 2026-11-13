@@ -20,7 +20,7 @@ add_library(LoreShell SHARED
 target_compile_features(LoreShell PRIVATE cxx_std_20)
 target_compile_definitions(LoreShell PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(LoreShell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(LoreShell PRIVATE shell32 ole32 uuid shlwapi gdi32 gdiplus)
+target_link_libraries(LoreShell PRIVATE shell32 ole32 uuid shlwapi gdi32 user32)
 if(MSVC)
     target_compile_options(LoreShell PRIVATE /W4 /permissive- /EHsc /Zi)
     target_link_options(LoreShell PRIVATE /DEBUG:FULL /MAP)

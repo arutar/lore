@@ -63,11 +63,30 @@ func run() error {
 		SecureCookies:         settings.SecureCookies,
 		SessionTTL:            settings.SessionTTL,
 		BootstrapAdmin:        settings.BootstrapAdmin,
+		DirectoryRefresh:      settings.DirectoryRefresh,
+		DirectoryOutageGrace:  settings.DirectoryOutageGrace,
+		NativeClientID:        "lore-native",
+		ServiceClientID:       settings.LoreServiceClientID,
 	}
 	var groupCatalog httpapi.GroupCatalog
 	if groupDirectory != nil {
-		authConfig.GroupDirectory = groupDirectory
+		authConfig.Directory = groupDirectory
 		groupCatalog = groupDirectory
+	}
+	var registrationRealm httpapi.RegistrationRealm
+	var accounts httpapi.AccountManager
+	oidcAdminIssuer := settings.OIDCInternalIssuer
+	if oidcAdminIssuer == "" {
+		oidcAdminIssuer = settings.OIDCIssuer
+	}
+	if oidcAdminIssuer != "" {
+		realmAdmin, err := httpapi.NewKeycloakRealmAdmin(oidcAdminIssuer, settings.LoreServiceTokenURL, settings.LoreServiceClientID, settings.LoreServiceSecret)
+		if err != nil {
+			return err
+		}
+		registrationRealm = realmAdmin
+		accounts = realmAdmin
+		authConfig.DirectoryLinks = realmAdmin
 	}
 	auth, err := httpapi.NewAuthenticator(ctx, storage, authConfig)
 	if err != nil {
@@ -90,7 +109,7 @@ func run() error {
 	}
 	var exchange *httpapi.TokenExchange
 	if settings.TokenExchangeIssuer != "" {
-		exchange, err = httpapi.NewTokenExchange(storage, auth, settings.TokenExchangeIssuer, "lore-native", settings.TokenSigningKeyFile)
+		exchange, err = httpapi.NewTokenExchange(storage, auth.LoginTokens(), settings.TokenExchangeIssuer, "lore-native", settings.TokenSigningKeyFile)
 		if err != nil {
 			return err
 		}
@@ -98,20 +117,6 @@ func run() error {
 		if settings.TokenSigningKeyFile == "" {
 			log.Print("token exchange uses an ephemeral development signing key")
 		}
-	}
-	var registrationRealm httpapi.RegistrationRealm
-	var accounts httpapi.AccountManager
-	oidcAdminIssuer := settings.OIDCInternalIssuer
-	if oidcAdminIssuer == "" {
-		oidcAdminIssuer = settings.OIDCIssuer
-	}
-	if oidcAdminIssuer != "" {
-		realmAdmin, err := httpapi.NewKeycloakRealmAdmin(oidcAdminIssuer, settings.LoreServiceTokenURL, settings.LoreServiceClientID, settings.LoreServiceSecret)
-		if err != nil {
-			return err
-		}
-		registrationRealm = realmAdmin
-		accounts = realmAdmin
 	}
 	handler := httpapi.NewServer(storage, auth, httpapi.Config{
 		Repositories:        repositories,
@@ -126,6 +131,7 @@ func run() error {
 		OIDC:                httpapi.AuthConfig{},
 		ExternalURL:         settings.ExternalURL,
 		NativeRepositoryURL: settings.NativeRepositoryURL,
+		SecureHeaders:       settings.SecureCookies,
 	})
 
 	server := &http.Server{
