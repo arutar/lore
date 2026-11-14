@@ -88,6 +88,7 @@ pub mod traits;
 
 // Auto-discovered plugin modules
 pub mod aws;
+pub mod file_locks;
 pub mod hashicorp;
 
 // Re-export commonly used items at the module level
@@ -125,5 +126,6 @@ pub use traits::TopologyPluginFactory;
 /// ```
 pub fn register_all_plugins(registry: &mut PluginRegistry) {
     aws::register(registry);
+    file_locks::register(registry);
     hashicorp::register(registry);
 }

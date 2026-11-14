@@ -2214,6 +2214,9 @@ async fn async_main(settings: (Settings, StringHash), config: ServerConfig) -> R
         // Build hook dispatcher: register build.rs-discovered hooks then config-provided hooks
         let hook_ctx = HookRegistrationContext {
             notification_sender: notification.clone(),
+            immutable_store: Some(immutable_store.clone()),
+            mutable_store: Some(mutable_store.clone()),
+            lock_store: lock_store.clone(),
         };
         let mut hook_registry = HookRegistry::new();
         crate::hooks::register_all_hooks(&mut hook_registry, &hook_ctx);

@@ -69,6 +69,11 @@ use crate::hooks::traits::HookFactory;
 pub struct HookRegistrationContext {
     /// Notification sender for hooks that need to send notifications.
     pub notification_sender: Arc<dyn NotificationSender>,
+    /// The server's stores and lock store, for hooks that read revisions or locks (Lore
+    /// Platform: the push lock guard).
+    pub immutable_store: Option<Arc<dyn lore_storage::ImmutableStore>>,
+    pub mutable_store: Option<Arc<dyn lore_storage::MutableStore>>,
+    pub lock_store: Option<Arc<dyn lore_revision::lock::LockStore>>,
 }
 
 /// Registry for hook factories.

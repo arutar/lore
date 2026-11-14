@@ -4,8 +4,18 @@ path = "/data"
 [mutable_store.local]
 path = "/data"
 
-[lock_store.local]
-path = "/data"
+# Locks are kept in a file beside the data so they survive restarts and go into backups
+# (Lore Platform plugin; upstream's "local" store keeps them in memory only).
+[lock_store]
+mode = "file"
+
+[plugins.file]
+path = "/data/locks.json"
+
+# A push that changes a file someone else has locked is refused (Lore Platform hook; upstream
+# treats locks as advisory).
+[hooks.lock_guard]
+enabled = true
 
 [server.auth]
 jwt_issuer = ["http://host.docker.internal:8080/auth/realms/lore"]
