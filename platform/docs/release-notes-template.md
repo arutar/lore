@@ -23,10 +23,14 @@ ghcr.io/{{OWNER}}/lore-platform-server:{{VERSION}}
 ```sh
 tar -xzf lore-platform-server-{{VERSION}}.tar.gz
 cd lore-platform-server-{{VERSION}}
-sh setup.sh            # first install: generates secrets and prints the admin password
+LORE_DATA_ROOT=/srv/lore-data LORE_PUBLIC_HOST=lore.corp.local sh setup.sh
+# Windows: $env:LORE_DATA_ROOT="D:\lore-data"; .\setup.ps1 -PublicHost lore.corp.local
 ```
+
+The first run generates the secrets and prints the WebUI address and the `admin` password.
 
 Upgrading: unpack the new bundle, copy `.env` from the old directory (and `data/` if you keep data
 there), then run `setup` again. Make a backup first (`sh backup.sh`).
 
-Full guide: https://github.com/{{REPOSITORY}}/blob/main/platform/docs/install.md
+- Every script, argument, variable, port and directory: https://github.com/{{REPOSITORY}}/blob/platform-v{{VERSION}}/platform/docs/docker.md
+- Step-by-step guide (Active Directory, HTTPS, clients): https://github.com/{{REPOSITORY}}/blob/platform-v{{VERSION}}/platform/docs/install.md

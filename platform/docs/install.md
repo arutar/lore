@@ -4,6 +4,9 @@ This guide takes you from an empty machine to a running server that your team si
 their Active Directory or email accounts, and then covers HTTPS, backups, upgrades and
 troubleshooting. Everything runs in Docker Compose; the host only needs Docker.
 
+For a compact reference of every script, argument, variable, port and directory, see
+[docker.md](docker.md).
+
 - [1. What gets installed](#1-what-gets-installed)
 - [2. Requirements](#2-requirements)
 - [3. Choose how people will reach the server](#3-choose-how-people-will-reach-the-server)
@@ -115,8 +118,8 @@ Download `lore-platform-server-<version>.tar.gz` (or `.zip`) from the
 
 ```sh
 mkdir -p /opt && cd /opt
-tar -xzf ~/lore-platform-server-0.1.12.tar.gz
-cd lore-platform-server-0.1.12
+tar -xzf ~/lore-platform-server-0.2.0.tar.gz
+cd lore-platform-server-0.2.0
 ```
 
 The bundle contains only scripts and configuration; `setup` pulls the published images
@@ -300,7 +303,7 @@ From the [Releases](../../../../releases) page:
 - **Linux:** `lore-cli-<version>-<arch>.tar.gz`:
 
   ```sh
-  tar -xzf lore-cli-0.1.12-x86_64-unknown-linux-gnu.tar.gz
+  tar -xzf lore-cli-0.2.0-x86_64-unknown-linux-gnu.tar.gz
   install -m 0755 lore ~/.local/bin/lore
   ```
 
@@ -356,7 +359,7 @@ sh restore.sh backups/20261113-020000 --yes
 Schedule backups with cron or Task Scheduler, for example nightly at 02:00:
 
 ```cron
-0 2 * * * cd /opt/lore-platform-server-0.1.12 && sh backup.sh /mnt/backup >> /var/log/lore-backup.log 2>&1
+0 2 * * * cd /opt/lore-platform-server-0.2.0 && sh backup.sh /mnt/backup >> /var/log/lore-backup.log 2>&1
 ```
 
 ## 11. Upgrade
@@ -371,7 +374,8 @@ Database migrations run automatically when the control plane starts.
 
 ## 12. Settings reference
 
-All settings can be passed as environment variables to `setup`; they are saved in `.env`.
+All settings can be passed as environment variables to `setup`; they are saved in `.env`. The
+complete list, with the parameters of every script, is in [docker.md](docker.md#settings-environment-variables-and-env).
 
 | Variable | Default | Meaning |
 |---|---|---|

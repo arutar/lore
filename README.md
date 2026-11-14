@@ -8,13 +8,13 @@
 **A self-hosted version control server for teams with large binary files —<br>
 as simple as SVN, built on [Epic Games' Lore](https://github.com/EpicGames/lore).**
 
-Web interface · Active Directory sign-in · Windows Explorer integration · one-command Docker deployment
+Web interface · Active Directory sign-in · Windows Explorer integration · enforced file locks · one-command Docker deployment
 
 [![Release](https://img.shields.io/github/v/release/arutar/lore?filter=platform-v*&label=release)](../../releases)
 [![Platform Server](https://github.com/arutar/lore/actions/workflows/platform-server.yml/badge.svg)](https://github.com/arutar/lore/actions/workflows/platform-server.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[Install](platform/docs/install.md) · [Download](../../releases) · [How it works](#how-it-works) · [Differences from Lore](#how-this-differs-from-upstream-lore) · [Status](#status)
+[Install](platform/docs/install.md) · [Docker reference](platform/docs/docker.md) · [Download](../../releases) · [How it works](#how-it-works) · [Differences from Lore](#how-this-differs-from-upstream-lore) · [Status](#status)
 
 <img src="platform/docs/images/repository-files.png" alt="Repository files in the Lore Platform web interface" width="900">
 
@@ -37,9 +37,12 @@ the fork can shrink as Lore matures.
 
 ## What you get
 
-- **Web interface** — browse files, history and locks; download any file at any revision; manage
-  repositories, access, users, audit log and settings. Russian and English, nine themes, works on
-  a phone.
+- **Web interface** — browse files with who changed each one last and when, history and locks;
+  download any file at any revision; manage repositories, access, users, audit log and settings.
+  Russian and English, nine themes, works on a phone.
+- **File locks that hold** — lock a binary file before editing it, and the server refuses anyone
+  else's push that changes it. Locks survive restarts and are in backups. A repository owner can
+  release a lock left behind by someone who is away or has left; it goes to the audit log.
 - **Simple permissions** — *Read*, *Write*, *Owner* per repository, for users, Active Directory
   groups (nested groups included), all signed-in users or everyone (public). Private
   repositories are invisible to people without access.
@@ -47,8 +50,10 @@ the fork can shrink as Lore matures.
   disabling the account takes effect within minutes, also for desktop clients. Local email
   accounts for external partners, optional self-registration.
 - **Windows client** — MSI with the `lore` CLI, Explorer context menu (Clone, Sync, Commit,
-  Stage, Status, History, Lock, Unlock) and status icons. Sign in once in the browser; the
-  session is kept.
+  Stage, Unstage, Revert, Resolve conflicts, Status, History, Lock, Unlock) and status icons.
+  It never decides for you where work could be lost: when someone changed the same file, or
+  files are staged, it lists the files and asks how to go on; discarding your changes is always
+  confirmed first. Sign in once in the browser; the session is kept.
 - **Linux CLI** built from this fork.
 - **Easy server** — Docker Compose bundle: `setup` generates the secrets, starts everything,
   connects AD and mail, and prints the admin password. Backup and restore scripts included.
@@ -60,20 +65,31 @@ the fork can shrink as Lore matures.
 
 | | |
 |---|---|
-| <img src="platform/docs/images/repository-history.png" alt="Revision history" width="440"><br>**History** — every revision with its author | <img src="platform/docs/images/repository-locks.png" alt="File locks" width="440"><br>**Locks** — who is editing which binary file |
+| <img src="platform/docs/images/repository-history.png" alt="Revision history" width="440"><br>**History** — every revision with its author | <img src="platform/docs/images/repository-locks.png" alt="File locks" width="440"><br>**Locks** — who is editing which binary file; owners can release a lock someone left behind |
+| <img src="platform/docs/images/repository-lock-release.png" alt="Releasing a lock" width="440"><br>**Release a lock** — confirmed, and recorded in the audit log | <img src="platform/docs/images/audit.png" alt="Audit log" width="440"><br>**Audit log** — who changed what |
 | <img src="platform/docs/images/repository-grant.png" alt="Granting access" width="440"><br>**Access** — grant to users and AD groups as you type | <img src="platform/docs/images/users.png" alt="Users" width="440"><br>**Users** — Active Directory and local accounts |
-| <img src="platform/docs/images/audit.png" alt="Audit log" width="440"><br>**Audit log** — who changed what | <img src="platform/docs/images/settings.png" alt="Settings" width="440"><br>**Settings** — theme, language, registration |
-| <img src="platform/docs/images/theme-sky.png" alt="Sky theme" width="440"><br>**Themes** — ten built-in themes | <img src="platform/docs/images/palette.png" alt="Command palette" width="440"><br>**Ctrl K** — jump to any repository or page |
+| <img src="platform/docs/images/settings.png" alt="Settings" width="440"><br>**Settings** — theme, language, registration | <img src="platform/docs/images/theme-sky.png" alt="Sky theme" width="440"><br>**Themes** — nine built-in themes |
+| <img src="platform/docs/images/palette.png" alt="Command palette" width="440"><br>**Ctrl K** — jump to any repository or page | |
 
 ### Windows client
 
 | | |
 |---|---|
 | <img src="platform/docs/images/companion-commit.png" alt="Commit window" width="300"><br>**Lore Commit...** from the Explorer menu | <img src="platform/docs/images/companion-accounts.png" alt="Accounts window" width="300"><br>**Accounts** — one sign-in per server, window theme |
+| <img src="platform/docs/images/companion-sync-question.png" alt="Sync asks what to do" width="300"><br>**Sync asks first** — the same files changed here and on the server: keep yours or take the server's | <img src="platform/docs/images/companion-discard.png" alt="Confirm discarding changes" width="300"><br>**Nothing is lost silently** — discarding your changes is confirmed, file by file |
 
 The Explorer context menu and status icons follow the Windows light or dark mode. The Lore
 windows (Clone, Commit, Accounts...) use the same nine themes as the WebUI: pick one under
 **Window theme** in Explorer → **Lore** → **Accounts**.
+
+When Lore can't go on without a decision, the window stops before touching those files and
+offers the ways forward; **Cancel** always leaves everything as it was:
+
+| Situation | Choices |
+|---|---|
+| Sync while files are staged for commit | **Commit and sync** · **Sync without committing** (the changes stay in the files) |
+| A file changed both here and on the server, on Sync or Commit | **Keep my version** (merged when Lore can, otherwise yours wins) · **Take the server's version** (confirmed) |
+| Revert changes | confirmed; files the server never had are left in place |
 
 <sub>Screenshots show the real interface with demo data.</sub>
 
@@ -89,6 +105,7 @@ flowchart TB
         subgraph Docker["Docker Compose"]
             Web["WebUI + sign-in<br/>Caddy · control plane · Keycloak<br/>port 8080 or 443"]
             Lore["Lore server<br/>files · revisions · locks<br/>port 41337"]
+            Locks[("locks.json<br/>locks on disk")]
             DB[("PostgreSQL")]
         end
         Disk[("Storage on the host<br/>repositories · databases · keys")]
@@ -98,6 +115,8 @@ flowchart TB
     Desktop -.->|"① sign in once"| Web
     Desktop ==>|"② clone · sync · commit · lock"| Lore
     Lore <-->|"may this user do this?"| Web
+    Web -->|"files · history · last changes<br/>locks, release"| Lore
+    Lore --- Locks
     Web <-->|"LDAP, read-only"| AD
     Web --- DB
     DB --- Disk
@@ -105,8 +124,8 @@ flowchart TB
 ```
 
 **For the administrator:** one host with Docker runs five containers. All data — repository
-contents, the two databases and the signing key — lives in one directory on the host, which
-`backup.sh` archives. Users and groups come from Active Directory (read-only); access is managed in
+contents, file locks, the two databases and the signing key — lives in one directory on the host,
+which `backup.sh` archives. Users and groups come from Active Directory (read-only); access is managed in
 the WebUI.
 
 **For a user:**
@@ -116,18 +135,24 @@ the WebUI.
 2. In Explorer: right-click → **Lore Clone...**, paste the address. The first time, a browser
    window asks you to sign in; after that the client remembers you.
 3. Work as usual: **Lore Sync** to get changes, **Acquire locks** before editing a binary file,
-   **Lore Commit...** to send your work. Files, history and locks are visible in the WebUI.
+   **Lore Commit...** to send your work. Files (with who changed them last), history and locks
+   are visible in the WebUI.
 
 Under the hood: after sign-in the client asks the control plane for a short-lived token for one
 repository; the control plane checks the permissions (including current AD groups) and the Lore
 server accepts only that token. Permissions are therefore enforced in one place for the WebUI and
-the desktop clients.
+the desktop clients. Locks are enforced by the Lore server itself: a push that changes a file
+someone else holds a lock on is refused, whichever client sent it.
+
+**When someone leaves:** removing a person from Active Directory (or disabling the account) takes
+away their access at the next check; their commits and history stay as they are. Locks they still
+hold are marked *can't sign in* on the Locks tab, where a repository owner can release them.
 
 ## Quick start
 
 ```sh
 # 1. Download lore-platform-server-<version>.tar.gz from Releases and unpack it
-tar -xzf lore-platform-server-0.1.12.tar.gz && cd lore-platform-server-0.1.12
+tar -xzf lore-platform-server-0.2.0.tar.gz && cd lore-platform-server-0.2.0
 
 # 2. Run setup with the name your users will type
 LORE_PUBLIC_HOST=lore.corp.local sh setup.sh        # Windows: .\setup.ps1 -PublicHost lore.corp.local
@@ -137,8 +162,12 @@ LORE_PUBLIC_HOST=lore.corp.local sh setup.sh        # Windows: .\setup.ps1 -Publ
 ```
 
 Add Active Directory by passing `LORE_LDAP_URL`, `LORE_LDAP_BASE_DN`, `LORE_LDAP_BIND_DN` and
-`LORE_LDAP_BIND_PASSWORD` to the same command. HTTPS, mail, backups, upgrades and all settings:
-**[the installation guide](platform/docs/install.md)**.
+`LORE_LDAP_BIND_PASSWORD` to the same command.
+
+- **[Running the server with Docker](platform/docs/docker.md)** — every script and its arguments,
+  every variable, ports, the data directory, backup and restore.
+- **[Installation guide](platform/docs/install.md)** — step by step: choosing the name, Active
+  Directory, HTTPS, mail, clients, upgrades, troubleshooting.
 
 Clients: `LoreClient-<version>-x64.msi` for Windows, `lore-cli-<version>-<arch>.tar.gz` for Linux,
 both on the [Releases](../../releases) page.
@@ -152,15 +181,15 @@ both on the [Releases](../../releases) page.
 | Users and permissions | Token-based authorization (OIDC / JWT), no management UI | Read / Write / Owner for users, AD groups, all signed-in users, public |
 | Active Directory | — | Sign-in, nested groups, account status followed within minutes |
 | Local accounts, registration, password reset | — | Through Keycloak |
-| Windows Explorer integration | — | Context menu, status icons, MSI installer |
+| Windows Explorer integration | — | Context menu, status icons, MSI installer; asks before anything that could lose work |
 | Server deployment | Server binary / container, you assemble the rest | Docker Compose bundle with setup, backup and restore |
 | Plain HTTP inside an internal network | Sign-in requires HTTPS (except localhost) | Allowed to the same host as the Lore server, no client configuration |
 | Anonymous clone of public repositories | — | Supported |
-| File locks | Advisory: nothing stops a push that changes a locked file; the bundled store keeps them in memory only | Enforced: the server refuses a push that changes a file someone else has locked; locks are kept on disk, survive restarts and are in backups |
+| File locks | Advisory: nothing stops a push that changes a locked file; the bundled store keeps them in memory only | Enforced: the server refuses a push that changes a file someone else has locked; locks are kept on disk, survive restarts and are in backups; owners release locks left behind from the WebUI |
 
 **Why a fork and not a plugin.** Almost everything lives in [`platform/`](platform) and talks to
 Lore through its public gRPC services. A few things can only be done inside Lore itself — about
-fifteen files in `lore-server` and `lore-transport`:
+300 changed lines in some fifteen files of `lore-server`, `lore-transport` and `lore-revision`:
 
 - the server accepts repository-scoped tokens issued by the control plane, with the key endpoint
   reachable inside Docker;
@@ -186,6 +215,12 @@ Verified: clean install and re-install, AD sign-in with nested groups, group rem
 disabling reaching desktop clients, AD outage handling, clone / commit / push from Windows,
 backup and restore, the WebUI. An end-to-end test (setup → sign-in → permissions → backup →
 restore) passes on that installation and is wired into CI.
+
+The Windows client has its own checks against a live installation
+([platform/windows/tests](platform/windows/tests/README.md)): 22 Companion scenarios with a second
+person working on the same repository at the same time (conflicts, locks, staged files, Revert,
+a server restart), and 21 steps through the real Explorer menu with the status icons checked
+after each. All pass on the test installation.
 
 Not yet verified: public DNS with Let's Encrypt on an internet-facing host; signed release
 binaries. See [platform/docs/current-status.md](platform/docs/current-status.md) (Russian) for
@@ -222,8 +257,9 @@ Expired sign-in sessions are removed as new ones are created, so the session tab
 | [`platform/deploy`](platform/deploy) | Docker Compose, setup, backup, restore, end-to-end test |
 | [`platform/control-plane`](platform/control-plane) | Go: WebUI API, permissions, AD, token exchange |
 | [`platform/web`](platform/web) | React + TypeScript WebUI |
-| [`platform/windows`](platform/windows) | Explorer extension (C++), sign-in companion (C#/WebView2), MSI (WiX) |
-| [`platform/docs`](platform/docs) | Installation guide, architecture, status |
+| [`platform/windows`](platform/windows) | Explorer extension (C++), Companion windows (C#/WebView2), MSI (WiX) |
+| [`platform/windows/tests`](platform/windows/tests) | Client checks against a live installation: Companion scenarios, Explorer menu |
+| [`platform/docs`](platform/docs) | Installation guide, Docker reference, architecture, status |
 | everything else | Upstream Lore (Rust) with the small changes listed above |
 
 ## Building and testing
@@ -233,6 +269,8 @@ cd platform/control-plane && go test ./...       # with TEST_DATABASE_URL also a
 cd platform/web && npm ci && npm run build
 cargo build --release -p lore-client --bin lore  # the CLI
 pwsh platform/windows/Build-Client.ps1           # Windows client; Build-Msi.ps1 for the installer
+cargo test -p lore-server --test unit lock       # the lock store
+pwsh platform/windows/tests/Run-ClientTests.ps1 -Web http://lore.corp.local:8080 -EnvFile .env -Explorer
 ```
 
 Releases are built by GitHub Actions when a `platform-vX.Y.Z` tag is pushed: Windows MSI and ZIP,
