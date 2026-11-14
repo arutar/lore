@@ -40,7 +40,11 @@ docker compose stop caddy lore control-plane keycloak
 for database in lore keycloak; do
     docker compose exec -T postgres pg_dump -U lore --format=custom "$database" > "$BACKUP/$database.dump"
 done
-tar -C "$DATA_ROOT" -cf "$BACKUP/storage.tar" lore control-plane
+# The files belong to the services' users (the signing key is readable by its owner only), so
+# the archive is made in a container as root, which also keeps their owners for the restore.
+DATA_ABSOLUTE=$(cd "$DATA_ROOT" && pwd)
+docker compose run --rm --no-deps -T -v "$DATA_ABSOLUTE:/lore-data:ro" --entrypoint tar postgres \
+    -C /lore-data -cf - lore control-plane > "$BACKUP/storage.tar"
 # The Keycloak database stores the service client secret and the database password must
 # match the restored cluster, so a restore on a new host needs these exact values.
 [ -f .env ] || { echo ".env is missing; run setup first" >&2; exit 1; }

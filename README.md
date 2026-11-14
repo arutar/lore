@@ -150,19 +150,55 @@ hold are marked *can't sign in* on the Locks tab, where a repository owner can r
 
 ## Quick start
 
+You need a host with Docker (Docker Engine with Compose v2 on Linux, Docker Desktop on Windows),
+2 CPU cores and 4 GB of RAM. Download the server bundle from [Releases](../../releases).
+
+<details open>
+<summary><b>Linux</b></summary>
+
 ```sh
-# 1. Download lore-platform-server-<version>.tar.gz from Releases and unpack it
+# 1. Unpack the bundle
 tar -xzf lore-platform-server-0.2.0.tar.gz && cd lore-platform-server-0.2.0
 
-# 2. Run setup with the name your users will type
-LORE_PUBLIC_HOST=lore.corp.local sh setup.sh        # Windows: .\setup.ps1 -PublicHost lore.corp.local
+# 2. Run setup with the name your users will type; keep the data outside the bundle
+LORE_DATA_ROOT=/srv/lore-data LORE_PUBLIC_HOST=lore.corp.local sh setup.sh
 
 # 3. Open http://lore.corp.local:8080 and sign in as "admin"
 #    with the password setup printed (also stored in .env)
 ```
 
+Run it as a user in the `docker` group (or as root). Port 8080 taken? Add `LORE_HTTP_PORT=18080`.
+Behind a proxy or without internet access: see
+[the Docker reference](platform/docs/docker.md#behind-a-proxy-or-without-internet-access).
+
+</details>
+
+<details>
+<summary><b>Windows</b></summary>
+
+In PowerShell, as the user that runs Docker Desktop:
+
+```powershell
+# 1. Unpack the bundle
+Expand-Archive lore-platform-server-0.2.0.zip -DestinationPath C:\lore
+cd C:\lore\lore-platform-server-0.2.0
+
+# 2. Run setup with the name your users will type; keep the data outside the bundle
+$env:LORE_DATA_ROOT = "D:\lore-data"
+.\setup.ps1 -PublicHost lore.corp.local
+
+# 3. Open http://lore.corp.local:8080 and sign in as "admin"
+#    with the password setup printed (also stored in .env)
+```
+
+Port 8080 taken? Add `-HttpPort 18080`. If PowerShell refuses to run the script, allow it for
+this window first: `Set-ExecutionPolicy -Scope Process Bypass`.
+
+</details>
+
 Add Active Directory by passing `LORE_LDAP_URL`, `LORE_LDAP_BASE_DN`, `LORE_LDAP_BIND_DN` and
-`LORE_LDAP_BIND_PASSWORD` to the same command.
+`LORE_LDAP_BIND_PASSWORD` to the same command (on Windows as `$env:` variables before
+`setup.ps1`).
 
 - **[Running the server with Docker](platform/docs/docker.md)** — every script and its arguments,
   every variable, ports, the data directory, backup and restore.

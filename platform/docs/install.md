@@ -72,7 +72,7 @@ Ports opened on the host:
 
 | Port | Used by | When |
 |---|---|---|
-| `8080/tcp` | WebUI, API, sign-in | HTTP mode and "behind your own reverse proxy" mode |
+| `8080/tcp` | WebUI, API, sign-in | HTTP mode and "behind your own reverse proxy" mode; another port with `LORE_HTTP_PORT` if 8080 is taken |
 | `80/tcp`, `443/tcp`, `443/udp` | WebUI, API, sign-in over HTTPS | built-in HTTPS mode (`LORE_DIRECT_CADDY=true`) |
 | `41337/tcp`, `41337/udp` | Lore clients (clone, sync, push, locks) | always |
 | `41339/tcp` | Lore server health check | always; may be firewalled from users |
@@ -381,6 +381,7 @@ complete list, with the parameters of every script, is in [docker.md](docker.md#
 |---|---|---|
 | `LORE_PUBLIC_HOST` | this computer's DNS name (its IP if the name isn't a valid host name) | Name (or IP) clients use to reach the server: letters, digits, `-` and `.` only, **no `_`**. Saved in `.env`; run setup with a new value to change it |
 | `LORE_PUBLIC_SCHEME` | `http` | `http` or `https` |
+| `LORE_HTTP_PORT` | `8080` | WebUI port in `http` mode, when 8080 is taken on the host |
 | `LORE_PUBLIC_URL` | `http://HOST:8080` or `https://HOST` | Full WebUI address, if it differs from the default |
 | `LORE_AUTH_PUBLIC_URL` | `<public URL>/auth` | Sign-in (Keycloak) address |
 | `LORE_DIRECT_CADDY` | `false` | `true`: Caddy listens on 80/443 and manages certificates |

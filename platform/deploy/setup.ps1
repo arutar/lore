@@ -5,6 +5,8 @@ param(
     [string]$Scheme = $env:LORE_PUBLIC_SCHEME,
     [string]$PublicUrl = $env:LORE_PUBLIC_URL,
     [string]$AuthUrl = $env:LORE_AUTH_PUBLIC_URL,
+    # Port of the WebUI in HTTP mode, when 8080 is taken on this computer.
+    [string]$HttpPort = $env:LORE_HTTP_PORT,
     [switch]$DirectCaddy,
     [switch]$SkipBuild
 )
@@ -56,13 +58,16 @@ function Get-DefaultHost {
 $explicitUrl = [bool]$PublicUrl
 if (-not $PublicHost) { $PublicHost = if ($settings.LORE_PUBLIC_HOST) { $settings.LORE_PUBLIC_HOST } else { Get-DefaultHost } }
 if (-not $Scheme) { $Scheme = if ($settings.LORE_PUBLIC_SCHEME) { $settings.LORE_PUBLIC_SCHEME } else { "http" } }
+$savedPort = if ($settings.LORE_HTTP_PORT) { $settings.LORE_HTTP_PORT } else { "8080" }
+if (-not $HttpPort) { $HttpPort = $savedPort }
+if ($HttpPort -notmatch '^\d+$') { throw "-HttpPort must be a port number" }
 # Saved addresses are reused only while the host name and scheme stay the same: a new
 # -PublicHost must not keep the old URL (sign-in would then point at the previous name).
-$sameAddress = $settings.LORE_PUBLIC_HOST -eq $PublicHost -and $settings.LORE_PUBLIC_SCHEME -eq $Scheme
+$sameAddress = $settings.LORE_PUBLIC_HOST -eq $PublicHost -and $settings.LORE_PUBLIC_SCHEME -eq $Scheme -and $savedPort -eq $HttpPort
 if (-not $PublicUrl) {
     if ($sameAddress -and $settings.LORE_PUBLIC_URL) { $PublicUrl = $settings.LORE_PUBLIC_URL }
     elseif ($Scheme -eq "https") { $PublicUrl = "https://$PublicHost" }
-    else { $PublicUrl = "http://${PublicHost}:8080" }
+    else { $PublicUrl = "http://${PublicHost}:$HttpPort" }
 }
 if (-not $AuthUrl) {
     $AuthUrl = if ($sameAddress -and -not $explicitUrl -and $settings.LORE_AUTH_PUBLIC_URL) { $settings.LORE_AUTH_PUBLIC_URL } else { "$PublicUrl/auth" }
@@ -111,6 +116,7 @@ Set-EnvSetting "LORE_PUBLIC_SCHEME" $Scheme
 Set-EnvSetting "LORE_AUTH_PUBLIC_URL" $AuthUrl
 Set-EnvSetting "LORE_PUBLIC_ADDRESS" $(if ($Scheme -eq "https") { ([Uri]$PublicUrl).Authority } else { $PublicUrl })
 Set-EnvSetting "SECURE_COOKIES" $(if ($Scheme -eq "https") { "true" } else { "false" })
+Set-EnvSetting "LORE_HTTP_PORT" $HttpPort
 foreach ($name in @(
     "LORE_LDAP_URL", "LORE_LDAP_BASE_DN", "LORE_LDAP_BIND_DN", "LORE_LDAP_BIND_PASSWORD",
     "LORE_LDAP_USERNAME_ATTRIBUTE", "LORE_LDAP_STARTTLS", "LORE_LDAP_INSECURE_SKIP_VERIFY", "LORE_LDAP_TIMEOUT",
@@ -208,8 +214,9 @@ if ($localCa) { $composeFiles += @("-f", "compose.caddy-local.yaml") }
 $arguments = @("up", "-d", "--wait", "--wait-timeout", "240")
 # Published images (LORE_CONTROL_PLANE_IMAGE and LORE_SERVER_IMAGE) are pulled; otherwise
 # both are built from this checkout, which compiles the Rust server and takes much longer.
-if ($env:LORE_CONTROL_PLANE_IMAGE -and $env:LORE_SERVER_IMAGE) { $arguments += "--pull=always" }
-elseif (-not $SkipBuild) { $arguments += "--build" }
+if ($SkipBuild -or $env:LORE_SKIP_BUILD -eq "true") { $arguments += "--pull=never" }
+elseif ($env:LORE_CONTROL_PLANE_IMAGE -and $env:LORE_SERVER_IMAGE) { $arguments += "--pull=always" }
+else { $arguments += "--build" }
 if ($localCa) {
     & docker @composeFiles @arguments caddy
     if ($LASTEXITCODE -ne 0) { throw "Caddy startup failed" }

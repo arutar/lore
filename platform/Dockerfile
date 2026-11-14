@@ -19,5 +19,6 @@ COPY --from=web-build /build/dist/ /web/
 ENV STATIC_DIR=/web
 EXPOSE 8080 9090
 USER lore
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+# -Y off: busybox wget uses http_proxy but ignores no_proxy, and a proxy can't reach 127.0.0.1.
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s CMD wget -Y off -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
 ENTRYPOINT ["/usr/local/bin/control-plane"]

@@ -43,17 +43,21 @@ EXPLICIT_AUTH_URL=${LORE_AUTH_PUBLIC_URL:-}
 EXPLICIT_ADDRESS=${LORE_PUBLIC_ADDRESS:-}
 SAVED_HOST=$(saved LORE_PUBLIC_HOST)
 SAVED_SCHEME=$(saved LORE_PUBLIC_SCHEME)
+SAVED_PORT=$(saved LORE_HTTP_PORT)
 load_env
 PUBLIC_HOST=${LORE_PUBLIC_HOST:-$(default_host)}
 SCHEME=${LORE_PUBLIC_SCHEME:-http}
+# Port of the WebUI in HTTP mode, when 8080 is taken on this host.
+HTTP_PORT=${LORE_HTTP_PORT:-8080}
+case "$HTTP_PORT" in ''|*[!0-9]*) echo "LORE_HTTP_PORT must be a port number" >&2; exit 1 ;; esac
 if [ "$SCHEME" = "https" ]; then
     DEFAULT_WEB_URL="https://$PUBLIC_HOST"
 else
-    DEFAULT_WEB_URL="http://$PUBLIC_HOST:8080"
+    DEFAULT_WEB_URL="http://$PUBLIC_HOST:$HTTP_PORT"
 fi
 # Saved addresses are reused only while the host name and scheme stay the same: a new
 # LORE_PUBLIC_HOST must not keep the old URL (sign-in would then point at the previous name).
-if [ "$PUBLIC_HOST" = "$SAVED_HOST" ] && [ "$SCHEME" = "$SAVED_SCHEME" ] && [ -z "$EXPLICIT_URL" ]; then
+if [ "$PUBLIC_HOST" = "$SAVED_HOST" ] && [ "$SCHEME" = "$SAVED_SCHEME" ] && [ "$HTTP_PORT" = "${SAVED_PORT:-8080}" ] && [ -z "$EXPLICIT_URL" ]; then
     WEB_URL=${LORE_PUBLIC_URL:-$DEFAULT_WEB_URL}
     KEYCLOAK_URL=${EXPLICIT_AUTH_URL:-${LORE_AUTH_PUBLIC_URL:-$WEB_URL/auth}}
     PUBLIC_ADDRESS=${EXPLICIT_ADDRESS:-${LORE_PUBLIC_ADDRESS:-}}
@@ -68,8 +72,9 @@ fi
 
 random_hex() { od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; }
 if [ ! -f .env ]; then
-    umask 077
-    {
+    # Only .env is private to its owner; the umask mustn't leak into the data directories below,
+    # whose files the containers (other users) have to read.
+    (umask 077 && {
         echo "POSTGRES_PASSWORD=$(random_hex)"
         echo "KEYCLOAK_ADMIN_PASSWORD=$(random_hex)"
         echo "LORE_ADMIN_PASSWORD=$(random_hex)"
@@ -77,7 +82,7 @@ if [ ! -f .env ]; then
         echo "LORE_PUBLIC_URL=$WEB_URL"
         echo "LORE_PUBLIC_HOST=$PUBLIC_HOST"
         echo "LORE_PUBLIC_SCHEME=$SCHEME"
-    } > .env
+    } > .env)
 fi
 chmod 600 .env 2>/dev/null || true
 load_env
@@ -88,6 +93,13 @@ load_env
 DATA_ROOT=${LORE_DATA_ROOT:-./data}
 GENERATED=$DATA_ROOT/generated
 mkdir -p "$GENERATED/caddy" "$DATA_ROOT/postgres" "$DATA_ROOT/lore" "$DATA_ROOT/control-plane" "$DATA_ROOT/caddy"
+# On Linux each service writes its directory as its own user (postgres, lore, root), not as the
+# user running setup. The data root itself is closed to other users of the host; the service
+# directories inside are open to the containers, and what the services keep in them carries
+# their own permissions (PostgreSQL 700, the signing key 600). Docker Desktop ignores both.
+chmod 700 "$DATA_ROOT" 2>/dev/null || true
+chmod 777 "$DATA_ROOT/postgres" "$DATA_ROOT/lore" "$DATA_ROOT/control-plane" "$DATA_ROOT/caddy" 2>/dev/null || true
+chmod 755 "$GENERATED" "$GENERATED/caddy" 2>/dev/null || true
 escape_sed() { printf '%s' "$1" | sed 's/[&|\\]/\\&/g'; }
 escape_json() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 set_env() {
@@ -104,6 +116,7 @@ set_env() {
 set_env LORE_PUBLIC_URL "$WEB_URL"
 set_env LORE_PUBLIC_HOST "$PUBLIC_HOST"
 set_env LORE_PUBLIC_SCHEME "$SCHEME"
+set_env LORE_HTTP_PORT "$HTTP_PORT"
 set_env LORE_AUTH_PUBLIC_URL "$KEYCLOAK_URL"
 set_env LORE_PUBLIC_ADDRESS "$PUBLIC_ADDRESS"
 if [ "$SCHEME" = "https" ]; then set_env SECURE_COOKIES true; else set_env SECURE_COOKIES false; fi
@@ -187,7 +200,11 @@ if [ "$SCHEME" = "https" ]; then export SECURE_COOKIES=true; else export SECURE_
 # Published images (LORE_CONTROL_PLANE_IMAGE and LORE_SERVER_IMAGE, for example
 # ghcr.io/arutar/lore-platform-control-plane:0.1.12) are pulled; otherwise both are built
 # from this checkout, which compiles the Rust server and takes much longer.
-if [ -n "${LORE_CONTROL_PLANE_IMAGE:-}" ] && [ -n "${LORE_SERVER_IMAGE:-}" ]; then
+# LORE_SKIP_BUILD=true uses the images already on this host as they are: networks without
+# internet access, where the images arrive with `docker load`.
+if [ "${LORE_SKIP_BUILD:-false}" = "true" ]; then
+    BUILD=--pull=never
+elif [ -n "${LORE_CONTROL_PLANE_IMAGE:-}" ] && [ -n "${LORE_SERVER_IMAGE:-}" ]; then
     BUILD=--pull=always
 else
     BUILD=--build

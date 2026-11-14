@@ -52,7 +52,10 @@ jobs:
       - name: Container logs
         if: failure()
         working-directory: platform/deploy
-        run: docker compose logs --no-color --tail 200
+        run: |
+          docker compose logs --no-color --tail 200
+          docker compose ps -a
+          ls -lan data data/* || true
       - name: Remove the installation
         if: always()
         working-directory: platform/deploy

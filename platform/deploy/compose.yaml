@@ -1,3 +1,11 @@
+# Hosts the services reach directly, never through a proxy. Docker passes the proxy of the
+# user's ~/.docker/config.json (common on corporate networks) into every container; without
+# this, calls between the containers and to the server's own public address would go to that
+# proxy and be refused. Outside traffic (Let's Encrypt, for example) still uses the proxy.
+x-no-proxy: &no-proxy
+  NO_PROXY: keycloak,control-plane,lore,postgres,caddy,localhost,127.0.0.1,host.docker.internal,${LORE_PUBLIC_HOST:-host.docker.internal}
+  no_proxy: keycloak,control-plane,lore,postgres,caddy,localhost,127.0.0.1,host.docker.internal,${LORE_PUBLIC_HOST:-host.docker.internal}
+
 services:
   postgres:
     image: postgres:18-alpine
@@ -16,11 +24,14 @@ services:
       retries: 20
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26.4
+    # The official image, also published on Docker Hub (quay.io is blocked on many corporate
+    # networks). LORE_KEYCLOAK_IMAGE points elsewhere, e.g. at a mirror.
+    image: ${LORE_KEYCLOAK_IMAGE:-keycloak/keycloak:26.4}
     restart: unless-stopped
     # Production mode behind the proxy: Caddy or an external reverse proxy terminates TLS.
     command: ["start", "--import-realm", "--health-enabled=true"]
     environment:
+      <<: *no-proxy
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Run setup.sh or setup.ps1 first}
       KC_DB: postgres
@@ -66,6 +77,7 @@ services:
       context: ../..
       dockerfile: platform/Dockerfile
     environment:
+      <<: *no-proxy
       DATABASE_URL: postgres://lore:${POSTGRES_PASSWORD:?Run setup.sh or setup.ps1 first}@postgres:5432/lore?sslmode=disable
       OIDC_ISSUER: ${KEYCLOAK_PUBLIC_URL:-${LORE_AUTH_PUBLIC_URL:-${LORE_PUBLIC_URL:-http://host.docker.internal:8080}/auth}}/realms/lore
       OIDC_INTERNAL_ISSUER: http://keycloak:8080/auth/realms/lore
@@ -104,6 +116,12 @@ services:
       - "${LORE_AD_HOST:-localhost}:${LORE_AD_IP:-127.0.0.1}"
     volumes:
       - ${LORE_DATA_ROOT:-./data}/control-plane:/data
+    # The image has the same check; repeated here so it holds for images built before -Y off.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -Y off -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
     depends_on:
       postgres:
         condition: service_healthy
@@ -116,6 +134,7 @@ services:
     build:
       context: ../..
       dockerfile: lore-server/Dockerfile
+    environment: *no-proxy
     volumes:
       - ${LORE_DATA_ROOT:-./data}/lore:/data
       - ${LORE_CONFIG_FILE:-${LORE_DATA_ROOT:-./data}/generated/lore.toml}:/etc/lore/config/docker.toml:ro
@@ -144,16 +163,20 @@ services:
   caddy:
     image: caddy:2-alpine
     environment:
+      <<: *no-proxy
       LORE_PUBLIC_ADDRESS: ${LORE_PUBLIC_ADDRESS:-${LORE_PUBLIC_URL:-http://host.docker.internal:8080}}
       LORE_PUBLIC_URL: ${LORE_PUBLIC_URL:-http://host.docker.internal:8080}
+      LORE_HTTP_PORT: ${LORE_HTTP_PORT:-8080}
     ports:
-      - "${LORE_PROXY_BIND:-0.0.0.0}:8080:8080"
+      # The same number inside: Caddy listens on the port of the public address.
+      - "${LORE_PROXY_BIND:-0.0.0.0}:${LORE_HTTP_PORT:-8080}:${LORE_HTTP_PORT:-8080}"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ${LORE_DATA_ROOT:-./data}/generated/caddy:/etc/caddy/conf.d:ro
       - ${LORE_DATA_ROOT:-./data}/caddy:/data
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2019/config/ || exit 1"]
+      # -Y off: busybox wget uses http_proxy but ignores no_proxy (see x-no-proxy).
+      test: ["CMD-SHELL", "wget -Y off -q -O /dev/null http://127.0.0.1:2019/config/ || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 20
