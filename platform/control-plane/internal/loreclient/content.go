@@ -30,6 +30,7 @@ const maxLeafFragmentSize = 256 * 1024
 
 type TreeNode struct {
 	Path       string           `json:"path"`
+	LastChange *LastChange      `json:"lastChange,omitempty"`
 	Type       string           `json:"type"`
 	Size       uint64           `json:"size"`
 	Mode       uint64           `json:"mode"`
@@ -65,6 +66,9 @@ type RepositoryLock struct {
 	Hash     string    `json:"hash"`
 	Owner    string    `json:"owner"`
 	LockedAt time.Time `json:"lockedAt"`
+	// OwnerDisabled: the owner can't sign in any more (removed or disabled); set by the control
+	// plane, which knows the accounts.
+	OwnerDisabled bool `json:"ownerDisabled,omitempty"`
 }
 
 type Download struct {
@@ -227,6 +231,44 @@ func (c *Client) Locks(ctx context.Context, repositoryID string) ([]RepositoryLo
 	sort.Slice(result, func(i, j int) bool { return result[i].Path < result[j].Path })
 	return result, nil
 }
+
+// ReleaseLock releases the lock on hash (a lock's resource hash, as Locks reports it) in the
+// repository's branch, whoever holds it, and returns the lock as it was. Lore lets the service
+// account release another user's lock because it administers every repository; who may ask is
+// the control plane's decision.
+func (c *Client) ReleaseLock(ctx context.Context, repositoryID, branchID, hash string) (RepositoryLock, error) {
+	locks, err := c.Locks(ctx, repositoryID)
+	if err != nil {
+		return RepositoryLock{}, err
+	}
+	for _, lock := range locks {
+		if lock.BranchID != branchID || lock.Hash != hash {
+			continue
+		}
+		id, err := decodeUUID(repositoryID)
+		if err != nil {
+			return RepositoryLock{}, err
+		}
+		branch, err := decodeUUID(branchID)
+		if err != nil {
+			return RepositoryLock{}, err
+		}
+		hashBytes, err := hex.DecodeString(hash)
+		if err != nil {
+			return RepositoryLock{}, err
+		}
+		ctx, err = c.repositoryContext(ctx, id)
+		if err != nil {
+			return RepositoryLock{}, err
+		}
+		_, err = lockv1.NewLockServiceClient(c.connection).Unlock(ctx, &lockv1.UnlockRequest{Resources: []*lockv1.Resource{{Branch: branch, Hash: hashBytes, Description: lock.Path}}})
+		return lock, err
+	}
+	return RepositoryLock{}, ErrLockNotFound
+}
+
+// ErrLockNotFound means the lock to release isn't held (any more).
+var ErrLockNotFound = errors.New("lock not found")
 
 func (c *Client) Download(ctx context.Context, repositoryID, revision, filePath string) (*Download, error) {
 	if filePath == "" || !validRepositoryPath(filePath) {

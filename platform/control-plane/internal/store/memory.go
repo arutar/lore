@@ -20,6 +20,7 @@ type Memory struct {
 	sessions     map[string]model.Session
 	settings     model.Settings
 	audit        []model.AuditEvent
+	access       map[string]model.AccessEntry
 }
 
 func NewMemory() *Memory {
@@ -28,6 +29,7 @@ func NewMemory() *Memory {
 		repositories: make(map[string]model.Repository),
 		grants:       make(map[string]map[string]model.Grant),
 		sessions:     make(map[string]model.Session),
+		access:       make(map[string]model.AccessEntry),
 	}
 }
 
@@ -237,7 +239,7 @@ func (m *Memory) ListUsers(_ context.Context, query, after string, limit int) (m
 	items := make([]model.User, 0, limit+1)
 	for _, id := range ids {
 		user := m.users[id]
-		if id <= after || !containsFold(query, user.Username, user.DisplayName, user.Email) {
+		if id <= after || user.Deleted || !containsFold(query, user.Username, user.DisplayName, user.Email) {
 			continue
 		}
 		items = append(items, cloneUser(user))
@@ -339,6 +341,130 @@ func (m *Memory) HasActiveAdmin(context.Context) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func (m *Memory) ApplyDirectoryAccess(_ context.Context, id string, denied bool, role model.Role) (model.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	user, ok := m.users[id]
+	if !ok {
+		return model.User{}, ErrNotFound
+	}
+	if user.AccessDenied != denied {
+		action := "user.access_allow"
+		if denied {
+			action = "user.access_deny"
+		}
+		m.appendAuditLocked("", action, "user", id, "", "")
+	}
+	if user.Role != role {
+		m.appendAuditLocked("", "user.role_from_directory", "user", id, string(user.Role), string(role))
+	}
+	user.AccessDenied = denied
+	user.Role = role
+	m.users[id] = user
+	return cloneUser(user), nil
+}
+
+func accessKey(subjectType model.SubjectType, subject string) string {
+	return string(subjectType) + "\x00" + strings.ToLower(subject)
+}
+
+func (m *Memory) ListAccess(context.Context) ([]model.AccessEntry, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	entries := make([]model.AccessEntry, 0, len(m.access))
+	for _, entry := range m.access {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].SubjectType != entries[j].SubjectType {
+			return entries[i].SubjectType == model.SubjectGroup
+		}
+		if a, b := strings.ToLower(entries[i].Name), strings.ToLower(entries[j].Name); a != b {
+			return a < b
+		}
+		return entries[i].Subject < entries[j].Subject
+	})
+	return entries, nil
+}
+
+func (m *Memory) AddAccess(_ context.Context, actorID string, entry model.AccessEntry) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := accessKey(entry.SubjectType, entry.Subject)
+	existing, ok := m.access[key]
+	if ok && existing.Name == entry.Name && existing.Detail == entry.Detail {
+		return nil
+	}
+	if ok {
+		entry.CreatedAt, entry.Role, entry.Disabled = existing.CreatedAt, existing.Role, existing.Disabled
+	} else {
+		entry.CreatedAt = time.Now().UTC()
+		if entry.Role == "" {
+			entry.Role = model.RoleUser
+		}
+	}
+	m.access[key] = entry
+	m.appendAccessAuditLocked(actorID, "access.add", entry.SubjectType, entry.Subject, "", entry.Name)
+	return nil
+}
+
+func (m *Memory) UpdateAccess(_ context.Context, actorID string, subjectType model.SubjectType, subject string, role model.Role, disabled bool) (model.AccessEntry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := accessKey(subjectType, subject)
+	entry, ok := m.access[key]
+	if !ok {
+		return model.AccessEntry{}, ErrNotFound
+	}
+	if entry.Role == role && entry.Disabled == disabled {
+		return entry, nil
+	}
+	before := entry.Role + model.Role(":"+strconv.FormatBool(!entry.Disabled))
+	entry.Role, entry.Disabled = role, disabled
+	m.access[key] = entry
+	m.appendAccessAuditLocked(actorID, "access.update", subjectType, entry.Subject, string(before), string(role)+":"+strconv.FormatBool(!disabled))
+	return entry, nil
+}
+
+func (m *Memory) RemoveAccess(_ context.Context, actorID string, subjectType model.SubjectType, subject string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := accessKey(subjectType, subject)
+	entry, ok := m.access[key]
+	if !ok {
+		return ErrNotFound
+	}
+	delete(m.access, key)
+	m.appendAccessAuditLocked(actorID, "access.remove", subjectType, entry.Subject, entry.Name, "")
+	return nil
+}
+
+func (m *Memory) DeleteUser(_ context.Context, actorID, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	user, ok := m.users[id]
+	if !ok || user.Deleted {
+		return ErrNotFound
+	}
+	name := user.Username
+	user.Username, user.Deleted, user.Disabled, user.UpdatedAt = name+"~"+id, true, true, time.Now().UTC()
+	m.users[id] = user
+	for _, grants := range m.grants {
+		for key, grant := range grants {
+			if grant.SubjectType == model.SubjectUser && grant.Subject == id {
+				delete(grants, key)
+			}
+		}
+	}
+	for key, session := range m.sessions {
+		if session.UserID == id {
+			delete(m.sessions, key)
+		}
+	}
+	m.appendAuditLocked(actorID, "user.delete", "user", id, name, "")
+	return nil
 }
 
 func (m *Memory) UpdateUser(_ context.Context, actorID, id string, role model.Role, disabled bool) (model.User, error) {
@@ -520,6 +646,12 @@ func (m *Memory) appendAuditLocked(actorID, action, targetType, targetID, before
 		After:      after,
 		CreatedAt:  time.Now().UTC(),
 	})
+}
+
+func (m *Memory) appendAccessAuditLocked(actorID, action string, subjectType model.SubjectType, subject, before, after string) {
+	m.appendAuditLocked(actorID, action, "access", subject, before, after)
+	m.audit[len(m.audit)-1].SubjectType = subjectType
+	m.audit[len(m.audit)-1].Subject = subject
 }
 
 func (m *Memory) appendGrantAuditLocked(actorID, action string, grant model.Grant, before, after string) {

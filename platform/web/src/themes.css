@@ -1,22 +1,34 @@
 /* Colour themes, shared by the WebUI and the Windows companion windows
-   (platform/windows/LoreCompanion.Web imports this file). Midnight is the default. */
+   (platform/windows/LoreCompanion.Web imports this file). Midnight is the default.
+
+   Built in OKLCH so every dark theme has the same structure: background, surface (+0.05 L),
+   raised surface (+0.105 L) and lines (+0.19 L) step up evenly, text and secondary text keep a
+   comfortable contrast (12–16:1 and 5:1+, never pure white on black) and accents stay moderately
+   saturated. Backgrounds stay close to neutral with only a slight tint; what sets the themes apart is
+   that tint and, mostly, the two accents.
+   Checked: text/bg 12–16.5, muted/surface ≥ 5, accent text/surface ≥ 6, text on accent ≥ 4.6,
+   status colours ≥ 4.5, lines/surface ≥ 1.55. */
 :root {
-  --bg:#0d1117; --surface:#151b23; --surface-2:#1e2630; --line:#2b3440; --text:#e6edf3; --muted:#9aa5b1;
-  --accent:#58a6ff; --on-accent:#08111d; --accent-2:#f778ba; --ok:#56d39b; --warn:#e3b341; --danger:#ff8a8a;
+  --bg:#0c131c; --surface:#171f28; --surface-2:#242c36; --line:#38424f; --text:#e6eaef; --muted:#acb3bd; --accent:#61a9f6; --accent-ink:#92c5ff; --on-accent:#0c1723; --accent-2:#e791c2; --ok:#78d694; --warn:#eec066; --danger:#f28885;
   --radius:10px; --radius-sm:7px; --shadow:0 18px 50px -20px rgb(0 0 0 / 60%);
   --font:"Segoe UI Variable Text","Segoe UI",Inter,system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
   --mono:"Cascadia Code","JetBrains Mono",ui-monospace,Consolas,"DejaVu Sans Mono",monospace;
-  --accent-ink:var(--accent); --pad:28px; --row:44px;
+  --pad:28px; --row:44px;
   color-scheme:dark;
 }
-/* Три палитры из /shara/good (emonitor): цвета взяты пипеткой со скриншотов, контролы — из этой дизайн-системы. */
-[data-theme="sky"]   { --bg:#2b2825; --surface:#332f2c; --surface-2:#403b36; --line:#514a43; --text:#f4e3c8; --muted:#bcab94; --accent:#4f9fe3; --accent-ink:#7cc6f5; --on-accent:#07131f; --accent-2:#f2be5c; --ok:#8fd0a4; --warn:#f2be5c; --danger:#f29b8c; }
-[data-theme="sage"]  { --bg:#292c27; --surface:#353931; --surface-2:#43483e; --line:#5f6656; --text:#fcf7ed; --muted:#d0c9ba; --accent:#f1926f; --accent-ink:#fcc0a7; --on-accent:#1d0f08; --accent-2:#accd7f; --ok:#b5dc88; --warn:#e8c27a; --danger:#f5afa2; }
-[data-theme="ember"] { --bg:#1c1a1a; --surface:#2b2626; --surface-2:#3b3333; --line:#5d4e4e; --text:#f5e4c4; --muted:#c1b4a4; --accent:#d32b2b; --accent-ink:#fba29b; --on-accent:#fff4ea; --accent-2:#f2d399; --ok:#a1da89; --warn:#f3a25c; --danger:#f59191; }
-[data-theme="aurora"]   { --bg:#100e1c; --surface:#201c3c; --surface-2:#2f2954; --line:#4e427e; --text:#f1eefc; --muted:#b0a8cd; --accent:#b7a0ff; --on-accent:#171125; --accent-2:#7dd3e8; --ok:#56d39b; --warn:#e3b341; --danger:#ff8a8a; }
-[data-theme="ocean"]    { --bg:#0b1d2f; --surface:#102b46; --surface-2:#17395a; --line:#285679; --text:#edf5fc; --muted:#a6bfd3; --accent:#8fc9ff; --on-accent:#0b1d2f; --accent-2:#f0cf9a; --ok:#56d39b; --warn:#e3b341; --danger:#ff8e8e; }
-[data-theme="retro"]    { --bg:#181714; --surface:#272520; --surface-2:#36332a; --line:#574e3e; --text:#f7f0e5; --muted:#c3b9a8; --accent:#f4ce81; --on-accent:#211b10; --accent-2:#a1ca91; --ok:#b9d98e; --danger:#f0a09a; --warn:#e3b341; }
-[data-theme="autumn"]   { --bg:#1b1816; --surface:#2c2622; --surface-2:#3b332d; --line:#5f4d41; --text:#f4ede6; --muted:#bfb2a7; --accent:#f7946a; --on-accent:#2b170f; --accent-2:#b9d58b; --ok:#8fd6a0; --warn:#e3b341; --danger:#ff8a8a; }
-[data-theme="cyberpunk"]{ --bg:#0b0915; --surface:#1e183a; --surface-2:#2d2654; --line:#503e7a; --text:#f1ebfa; --muted:#b0a5ca; --accent:#68e7f6; --on-accent:#10101b; --accent-2:#e995c5; --ok:#8addb0; --danger:#f1a0b8; --warn:#e3b341; }
-[data-theme="light"]    { color-scheme:light; --bg:#ece7da; --surface:#fffdf8; --surface-2:#e3dccb; --line:#c9bfa8; --text:#17211c; --muted:#4d544e; --accent:#b8460f; --on-accent:#fffdf8; --accent-2:#245b49; --ok:#1f6a4c; --warn:#8a5a00; --danger:#b3261e; --shadow:0 18px 44px -22px rgb(60 45 20 / 35%); }
-
+/* Sky — warm grey with sky blue and gold */
+[data-theme="sky"] { --bg:#292623; --surface:#36322f; --surface-2:#44403d; --line:#5c5753; --text:#eee8e4; --muted:#bab1a9; --accent:#53a7df; --accent-ink:#80c8ee; --on-accent:#081822; --accent-2:#f0c36f; --ok:#78d694; --warn:#eec066; --danger:#f28885; }
+/* Sage — graphite with a hint of green, soft coral and sage */
+[data-theme="sage"] { --bg:#1f231f; --surface:#2b2f2b; --surface-2:#393d39; --line:#4f544e; --text:#e7ebe6; --muted:#adb5ac; --accent:#e89270; --accent-ink:#f7b69a; --on-accent:#22110b; --accent-2:#accf81; --ok:#78d694; --warn:#eec066; --danger:#f28885; }
+/* Ember — warm charcoal with a deep red */
+[data-theme="ember"] { --bg:#191514; --surface:#252020; --surface-2:#322e2d; --line:#494342; --text:#efe8e6; --muted:#bdafad; --accent:#c6413d; --accent-ink:#fb9890; --on-accent:#fef9f5; --accent-2:#edc889; --ok:#78d694; --warn:#eec066; --danger:#f28885; }
+/* Ocean — graphite with a hint of sea, teal and sand */
+[data-theme="ocean"] { --bg:#0f181a; --surface:#182427; --surface-2:#253235; --line:#38484c; --text:#e4ebed; --muted:#a8b5b9; --accent:#54c9c5; --accent-ink:#8ce3df; --on-accent:#031a19; --accent-2:#edc28d; --ok:#78d694; --warn:#eec066; --danger:#f28885; }
+/* Retro — graphite with an olive hint, mustard and terracotta */
+[data-theme="retro"] { --bg:#171612; --surface:#23221d; --surface-2:#302f2a; --line:#46453f; --text:#ebeae4; --muted:#b5b3a8; --accent:#e6bf5d; --accent-ink:#edce79; --on-accent:#1c1505; --accent-2:#e79277; --ok:#78d694; --warn:#eec066; --danger:#f28885; }
+/* Autumn — graphite with a wine hint, burnt orange and olive */
+[data-theme="autumn"] { --bg:#1b1413; --surface:#27201f; --surface-2:#342d2c; --line:#4c4241; --text:#efe8e7; --muted:#bdafad; --accent:#ea8d52; --accent-ink:#f4b082; --on-accent:#211209; --accent-2:#abca84; --ok:#78d694; --warn:#eec066; --danger:#f28885; }
+/* Cyberpunk — graphite with a hint of indigo, magenta and cyan */
+[data-theme="cyberpunk"] { --bg:#14161c; --surface:#1f212a; --surface-2:#2c2e38; --line:#414451; --text:#e8e9ef; --muted:#afb2bd; --accent:#e96cad; --accent-ink:#fa96c3; --on-accent:#190610; --accent-2:#65d9df; --ok:#78d694; --warn:#eec066; --danger:#f28885; }
+/* Light — warm paper with rust */
+[data-theme="light"] { color-scheme:light; --shadow:0 18px 44px -22px rgb(60 45 20 / 35%); --bg:#eee9de; --surface:#fefcf7; --surface-2:#e4ddcf; --line:#c5bdab; --text:#19251e; --muted:#565a4d; --accent:#b04613; --accent-ink:#9b3b08; --on-accent:#fefcf7; --accent-2:#21624d; --ok:#106c3e; --warn:#8d5e00; --danger:#b02b27; }

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT
 
 # Installs the whole platform with Docker Compose on a clean runner and runs
-# platform/deploy/test/e2e.sh: setup, sign-in through Keycloak, repository and grant,
-# backup, changes, restore. Building the Lore server takes a while, so this runs on
+# platform/deploy/test/e2e.sh: setup, sign-in through Keycloak, repository, grants on the
+# WebUI's Access tab in headless Chrome, backup, changes, restore. Building the Lore server takes a while, so this runs on
 # changes to the deployment and on demand rather than on every commit.
 name: Platform End-to-End
 
@@ -13,6 +13,7 @@ on:
       - "platform/deploy/**"
       - "platform/control-plane/internal/httpapi/**"
       - "platform/control-plane/internal/store/**"
+      - "platform/web/src/**"
   workflow_dispatch:
 
 permissions: {}
@@ -32,14 +33,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The default installation addresses itself as host.docker.internal, as on Docker
-      # Desktop; containers get it from compose, the runner from /etc/hosts.
+      # The test installation addresses itself as host.docker.internal: containers get the name
+      # from compose, the runner from /etc/hosts. (Setup's default, the runner's own host name,
+      # isn't always resolvable on hosted runners.)
       - name: Resolve host.docker.internal on the runner
         run: echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
+      # The Access tab check drives the runner's Chrome from Node 22 (built-in WebSocket).
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
       - name: End-to-end test
         working-directory: platform/deploy
         env:
           LORE_E2E: destroy-test-data
+          LORE_PUBLIC_HOST: host.docker.internal
+          LORE_E2E_REQUIRE_BROWSER: "true"
         run: bash test/e2e.sh
       - name: Container logs
         if: failure()

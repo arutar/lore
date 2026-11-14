@@ -15,7 +15,7 @@
 | Keycloak 26.4 | вход OIDC, device flow, федерация AD, регистрация и письма; запускается в production-режиме |
 | Сервер Lore | форк EpicGames/lore: хранилище, ревизии, блокировки |
 | Caddy | единый вход HTTP/HTTPS; админка Keycloak и realm `master` закрыты |
-| WebUI | React + TypeScript, вариант «Studio», русский и английский, 10 тем |
+| WebUI | React + TypeScript, вариант «Studio», русский и английский, 9 тем |
 | Windows | C++ COM-расширение Проводника, C# Companion (WebView2), MSI на WiX |
 
 ## Реализовано и проверено

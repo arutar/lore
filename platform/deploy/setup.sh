@@ -22,17 +22,46 @@ load_env() {
         if eval "[ -z \"\${$key+set}\" ]"; then export "$key=$value"; fi
     done < .env
 }
+saved() { [ -f .env ] && sed -n "s/^$1=//p" .env | tr -d '\r' | tail -n 1 || true; }
+# This computer's DNS name (FQDN when it has one): it resolves for browsers and clients on the
+# network and for this machine itself. Containers reach it through the proxy's network alias.
+default_host() {
+    name=$(hostname -f 2>/dev/null || hostname 2>/dev/null || true)
+    name=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
+    # A name with "_" or other characters DNS doesn't allow breaks URL parsing in Keycloak (Java);
+    # use this computer's network address instead.
+    case "$name" in
+        ''|localhost*|*[!a-z0-9.-]*)
+            address=$(hostname -I 2>/dev/null | awk '{print $1}')
+            if [ -n "$address" ]; then echo "$address"; else echo host.docker.internal; fi ;;
+        *) echo "$name" ;;
+    esac
+}
+# What the caller passed explicitly, before .env fills in the saved values.
+EXPLICIT_URL=${LORE_PUBLIC_URL:-}
+EXPLICIT_AUTH_URL=${LORE_AUTH_PUBLIC_URL:-}
+EXPLICIT_ADDRESS=${LORE_PUBLIC_ADDRESS:-}
+SAVED_HOST=$(saved LORE_PUBLIC_HOST)
+SAVED_SCHEME=$(saved LORE_PUBLIC_SCHEME)
 load_env
-PUBLIC_HOST=${LORE_PUBLIC_HOST:-host.docker.internal}
+PUBLIC_HOST=${LORE_PUBLIC_HOST:-$(default_host)}
 SCHEME=${LORE_PUBLIC_SCHEME:-http}
 if [ "$SCHEME" = "https" ]; then
     DEFAULT_WEB_URL="https://$PUBLIC_HOST"
 else
     DEFAULT_WEB_URL="http://$PUBLIC_HOST:8080"
 fi
-WEB_URL=${LORE_PUBLIC_URL:-$DEFAULT_WEB_URL}
-KEYCLOAK_URL=${LORE_AUTH_PUBLIC_URL:-$WEB_URL/auth}
-PUBLIC_ADDRESS=${LORE_PUBLIC_ADDRESS:-}
+# Saved addresses are reused only while the host name and scheme stay the same: a new
+# LORE_PUBLIC_HOST must not keep the old URL (sign-in would then point at the previous name).
+if [ "$PUBLIC_HOST" = "$SAVED_HOST" ] && [ "$SCHEME" = "$SAVED_SCHEME" ] && [ -z "$EXPLICIT_URL" ]; then
+    WEB_URL=${LORE_PUBLIC_URL:-$DEFAULT_WEB_URL}
+    KEYCLOAK_URL=${EXPLICIT_AUTH_URL:-${LORE_AUTH_PUBLIC_URL:-$WEB_URL/auth}}
+    PUBLIC_ADDRESS=${EXPLICIT_ADDRESS:-${LORE_PUBLIC_ADDRESS:-}}
+else
+    WEB_URL=${EXPLICIT_URL:-$DEFAULT_WEB_URL}
+    KEYCLOAK_URL=${EXPLICIT_AUTH_URL:-$WEB_URL/auth}
+    PUBLIC_ADDRESS=$EXPLICIT_ADDRESS
+fi
 if [ -z "$PUBLIC_ADDRESS" ]; then
     if [ "$SCHEME" = "https" ]; then PUBLIC_ADDRESS=$PUBLIC_HOST; else PUBLIC_ADDRESS=$WEB_URL; fi
 fi

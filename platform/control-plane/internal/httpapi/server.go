@@ -24,6 +24,8 @@ type RepositoryContent interface {
 	History(ctx context.Context, repositoryID, cursor string) (loreclient.HistoryPage, error)
 	Locks(ctx context.Context, repositoryID string) ([]loreclient.RepositoryLock, error)
 	Download(ctx context.Context, repositoryID, revision, path string) (*loreclient.Download, error)
+	LastChanges(ctx context.Context, repositoryID, head string, paths []string) (map[string]loreclient.LastChange, error)
+	ReleaseLock(ctx context.Context, repositoryID, branchID, hash string) (loreclient.RepositoryLock, error)
 }
 
 type GroupCatalog interface {
@@ -98,6 +100,7 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 		router.Get("/repositories/{id}/tree", server.repositoryTree)
 		router.Get("/repositories/{id}/history", server.repositoryHistory)
 		router.Get("/repositories/{id}/locks", server.repositoryLocks)
+		router.With(requireCSRF).Post("/repositories/{id}/locks/release", server.releaseLock)
 		router.Get("/repositories/{id}/download", server.repositoryDownload)
 		router.Route("/repositories/{id}/grants", func(router chi.Router) {
 			router.Get("/", server.grants)
@@ -116,12 +119,19 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 			router.Get("/users/export", server.exportUsers)
 			router.With(requireCSRF).Post("/users/import", server.importUsers)
 			router.With(requireCSRF).Patch("/users/{id}", server.updateUser)
+			router.With(requireCSRF).Delete("/users/{id}", server.deleteUser)
 			router.Get("/repositories", server.repositories)
 			router.With(requireCSRF).Post("/repositories", server.createRepository)
 			router.With(requireCSRF).Patch("/repositories/{id}", server.updateRepository)
 			router.Get("/settings", server.settings)
 			router.With(requireCSRF).Patch("/settings", server.updateSettings)
 			router.Get("/audit", server.audit)
+			router.Get("/access", server.accessList)
+			router.Get("/access/subjects", server.accessSubjects)
+			router.With(requireCSRF).Post("/access", server.addAccess)
+			router.With(requireCSRF).Delete("/access/{type}/{subject}", server.removeAccess)
+			router.With(requireCSRF).Patch("/access/{type}/{subject}", server.updateAccess)
+			router.Get("/members", server.members)
 		})
 	})
 	router.NotFound(server.static)

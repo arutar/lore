@@ -31,7 +31,7 @@ func forEachStore(t *testing.T, run func(t *testing.T, storage Store)) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = storage.Close() })
-		if _, err := storage.pool.Exec(t.Context(), "TRUNCATE users, repositories, grants, settings, audit_events, sessions RESTART IDENTITY CASCADE"); err != nil {
+		if _, err := storage.pool.Exec(t.Context(), "TRUNCATE users, repositories, grants, settings, audit_events, sessions, directory_access RESTART IDENTITY CASCADE"); err != nil {
 			t.Fatal(err)
 		}
 		run(t, storage)
@@ -347,11 +347,11 @@ func TestSearchAndLookups(t *testing.T) {
 		if settings.Language != model.DefaultLanguage {
 			t.Fatalf("default language = %q", settings.Language)
 		}
-		settings.Language = "en"
+		settings.Language = "ru"
 		if err := storage.UpdateSettings(t.Context(), "admin", settings); err != nil {
 			t.Fatal(err)
 		}
-		if settings, _ = storage.GetSettings(t.Context()); settings.Language != "en" {
+		if settings, _ = storage.GetSettings(t.Context()); settings.Language != "ru" {
 			t.Fatalf("language = %q", settings.Language)
 		}
 	})
@@ -437,3 +437,110 @@ func TestPostgresPlansEachQueryForItsValues(t *testing.T) {
 		t.Fatalf("plan_cache_mode = %q, %v; search indexes would be skipped by generic plans", mode, err)
 	}
 }
+
+func TestAccessListAndDeniedAccounts(t *testing.T) {
+	forEachStore(t, func(t *testing.T, storage Store) {
+		const group = "aaaaaaaa-0000-4000-8000-000000000001"
+		const account = "bbbbbbbb-0000-4000-8000-000000000002"
+		ctx := t.Context()
+		if err := storage.AddAccess(ctx, "admin", model.AccessEntry{SubjectType: model.SubjectUser, Subject: account, Name: "Zed"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.AddAccess(ctx, "admin", model.AccessEntry{SubjectType: model.SubjectGroup, Subject: group, Name: "Artists", Detail: "CN=Artists,DC=example,DC=org"}); err != nil {
+			t.Fatal(err)
+		}
+		// Adding it again with the same name changes nothing and isn't audited twice.
+		if err := storage.AddAccess(ctx, "admin", model.AccessEntry{SubjectType: model.SubjectGroup, Subject: group, Name: "Artists", Detail: "CN=Artists,DC=example,DC=org"}); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := storage.ListAccess(ctx)
+		if err != nil || len(entries) != 2 || entries[0].Subject != group || entries[1].Name != "Zed" || entries[0].CreatedAt.IsZero() {
+			t.Fatalf("access list = %+v %v", entries, err)
+		}
+		if entries[0].Role != model.RoleUser || entries[0].Disabled {
+			t.Fatalf("a new entry should be an enabled user entry: %+v", entries[0])
+		}
+		updated, err := storage.UpdateAccess(ctx, "admin", model.SubjectGroup, group, model.RoleAdmin, true)
+		if err != nil || updated.Role != model.RoleAdmin || !updated.Disabled {
+			t.Fatalf("UpdateAccess = %+v %v", updated, err)
+		}
+		if _, err := storage.UpdateAccess(ctx, "admin", model.SubjectGroup, group, model.RoleAdmin, false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := storage.UpdateAccess(ctx, "admin", model.SubjectUser, "missing", model.RoleUser, false); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("updating a missing entry = %v", err)
+		}
+		// Adding an existing entry again keeps its role.
+		if err := storage.AddAccess(ctx, "admin", model.AccessEntry{SubjectType: model.SubjectGroup, Subject: group, Name: "Artists", Detail: "CN=Artists,DC=example,DC=org"}); err != nil {
+			t.Fatal(err)
+		}
+		if entries, _ = storage.ListAccess(ctx); entries[0].Role != model.RoleAdmin || entries[0].Disabled {
+			t.Fatalf("re-adding changed the entry: %+v", entries[0])
+		}
+		if err := storage.RemoveAccess(ctx, "admin", model.SubjectUser, account); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.RemoveAccess(ctx, "admin", model.SubjectUser, account); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("removing a missing entry = %v", err)
+		}
+		audit, _ := storage.ListAudit(ctx, 0, 10)
+		if len(audit.Items) != 5 || audit.Items[0].Action != "access.remove" || audit.Items[0].Before != "Zed" || audit.Items[0].Subject != account {
+			t.Fatalf("access audit = %+v", audit.Items)
+		}
+
+		// A denied administrator doesn't count as an active one.
+		mustUser(t, storage, model.User{ID: "ad-admin", Username: "ad-admin", Source: "ad", DirectoryID: account, AccessDenied: true})
+		if _, err := storage.UpdateUser(ctx, "", "ad-admin", model.RoleAdmin, false); err != nil {
+			t.Fatal(err)
+		}
+		if active, _ := storage.HasActiveAdmin(ctx); active {
+			t.Fatal("a denied administrator counted as active")
+		}
+		user, err := storage.ApplyDirectoryAccess(ctx, "ad-admin", false, model.RoleAdmin)
+		if err != nil || user.AccessDenied || user.Role != model.RoleAdmin {
+			t.Fatalf("ApplyDirectoryAccess = %+v %v", user, err)
+		}
+		if active, _ := storage.HasActiveAdmin(ctx); !active {
+			t.Fatal("an admitted administrator didn't count as active")
+		}
+		if stored, _ := storage.GetUser(ctx, "ad-admin"); stored.AccessDenied {
+			t.Fatal("the flag wasn't stored")
+		}
+	})
+}
+
+func TestDeletedAccountsAreHiddenAndLoseTheirGrants(t *testing.T) {
+	forEachStore(t, func(t *testing.T, storage Store) {
+		ctx := t.Context()
+		mustUser(t, storage, model.User{ID: "tom", Username: "tom@example.com", Source: "local"})
+		mustRepository(t, storage, model.Repository{ID: repoA, Name: "assets", OwnerID: "owner"})
+		if err := storage.SetGrant(ctx, "owner", model.Grant{RepositoryID: repoA, SubjectType: model.SubjectUser, Subject: "tom", Permission: model.PermissionRead}); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.DeleteUser(ctx, "admin", "tom"); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.DeleteUser(ctx, "admin", "tom"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("second delete = %v", err)
+		}
+		page, _ := storage.ListUsers(ctx, "", "", 10)
+		for _, user := range page.Items {
+			if user.ID == "tom" {
+				t.Fatal("deleted account is listed")
+			}
+		}
+		user, err := storage.GetUser(ctx, "tom")
+		if err != nil || !user.Deleted || user.Username != "tom@example.com~tom" {
+			t.Fatalf("deleted record = %+v %v", user, err)
+		}
+		grants, _ := storage.ListGrants(ctx, repoA)
+		for _, grant := range grants {
+			if grant.Subject == "tom" {
+				t.Fatal("grant survived the deletion")
+			}
+		}
+		// The name is free for a new account.
+		mustUser(t, storage, model.User{ID: "tom-2", Username: "tom@example.com", Source: "local"})
+	})
+}
+

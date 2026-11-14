@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,28 @@ import (
 )
 
 type fakeRepositoryContent struct {
-	calls int
+	calls    int
+	released []string
+}
+
+func (f *fakeRepositoryContent) LastChanges(_ context.Context, _ string, head string, paths []string) (map[string]loreclient.LastChange, error) {
+	f.calls++
+	result := map[string]loreclient.LastChange{}
+	for _, path := range paths {
+		if path == "README.md" && head == "revision" {
+			result[path] = loreclient.LastChange{Revision: "revision", Number: 3, Author: "author-id", Message: "Edit readme", CommittedAt: time.Unix(1700000000, 0).UTC()}
+		}
+	}
+	return result, nil
+}
+
+func (f *fakeRepositoryContent) ReleaseLock(_ context.Context, _ string, branchID, hash string) (loreclient.RepositoryLock, error) {
+	f.calls++
+	if hash != "art-hash" {
+		return loreclient.RepositoryLock{}, loreclient.ErrLockNotFound
+	}
+	f.released = append(f.released, branchID+"/"+hash)
+	return loreclient.RepositoryLock{BranchID: branchID, Path: "art.psd", Hash: hash, Owner: "unknown-owner"}, nil
 }
 
 func (f *fakeRepositoryContent) Tree(context.Context, string, string, string) (loreclient.RepositoryTree, error) {
@@ -78,12 +100,43 @@ func TestRepositoryContentUsesWebPermissions(t *testing.T) {
 			if owner := locks[1].(map[string]any)["owner"]; owner != "unknown-owner" {
 				t.Fatalf("unknown lock owner = %v, want it unchanged", owner)
 			}
+			if locks[0].(map[string]any)["ownerDisabled"] != nil || locks[1].(map[string]any)["ownerDisabled"] != true {
+				t.Fatalf("owner states = %v, want only the unknown owner marked as gone", locks)
+			}
+			if body["canRelease"] != false {
+				t.Fatalf("an anonymous visitor may release locks: %v", body["canRelease"])
+			}
+		}
+		if endpoint == "tree" {
+			change, _ := body["items"].([]any)[0].(map[string]any)["lastChange"].(map[string]any)
+			if change == nil || change["author"] != "alice" || change["message"] != "Edit readme" || change["number"] != float64(3) {
+				t.Fatalf("tree last change = %v, want alice's revision 3 by name", change)
+			}
 		}
 	}
 	calls := content.calls
 	status, _ = anonymous.request(http.MethodGet, "/web/v1/repositories/"+private["id"].(string)+"/tree", nil, false)
 	if status != http.StatusNotFound || content.calls != calls {
 		t.Fatalf("private tree status = %d, content calls changed = %v", status, content.calls != calls)
+	}
+
+	// Releasing someone else's lock: owners and administrators only, recorded in the audit log.
+	release := "/web/v1/repositories/" + public["id"].(string) + "/locks/release"
+	if status, _ := anonymous.request(http.MethodPost, release, map[string]any{"branchId": "branch", "hash": "art-hash"}, true); status == http.StatusNoContent || len(content.released) != 0 {
+		t.Fatalf("anonymous release status = %d, released = %v", status, content.released)
+	}
+	if status, _ := client.request(http.MethodPost, release, map[string]any{"branchId": "branch", "hash": "gone-hash"}, true); status != http.StatusNotFound {
+		t.Fatalf("release of a lock that isn't held: status = %d", status)
+	}
+	if status, _ := client.request(http.MethodPost, release, map[string]any{"branchId": "branch"}, true); status != http.StatusBadRequest {
+		t.Fatalf("release without a hash: status = %d", status)
+	}
+	if status, _ := client.request(http.MethodPost, release, map[string]any{"branchId": "branch", "hash": "art-hash"}, true); status != http.StatusNoContent || len(content.released) != 1 {
+		t.Fatalf("admin release status = %d, released = %v", status, content.released)
+	}
+	status, audit := client.request(http.MethodGet, "/web/v1/admin/audit", nil, false)
+	if status != http.StatusOK || !strings.Contains(fmtJSON(audit), `"lock.release"`) || !strings.Contains(fmtJSON(audit), "art.psd") {
+		t.Fatalf("the release isn't in the audit log: %v", audit)
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "/web/v1/repositories/"+public["id"].(string)+"/download?path=README.md", nil)
@@ -104,4 +157,9 @@ func TestAccountNameUsesHumanIdentity(t *testing.T) {
 	if name := accountName(user); name != "admin@example.com" {
 		t.Fatalf("account email = %q", name)
 	}
+}
+
+func fmtJSON(value any) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
 }

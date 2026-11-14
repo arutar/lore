@@ -19,5 +19,12 @@
 	}
 }
 
+# Any other name or address on port 8080 (localhost, the server's IP, a short host name) goes to
+# the public address. Sign-in only works there: Keycloak issues tokens and cookies for that one
+# URL. Without this block Caddy answered such requests with an empty page.
+http://:8080 {
+	redir {$LORE_PUBLIC_URL}{uri} 302
+}
+
 # A separate authentication domain, when setup configures one (generated/caddy/auth.conf).
 import /etc/caddy/conf.d/*.conf

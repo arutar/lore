@@ -1,24 +1,34 @@
 package httpapi
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log"
 	"mime"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/arutar/lore/platform/control-plane/internal/loreclient"
 	"github.com/arutar/lore/platform/control-plane/internal/model"
+	"github.com/arutar/lore/platform/control-plane/internal/policy"
+	"github.com/arutar/lore/platform/control-plane/internal/store"
 )
 
 func (s *Server) repositoryContent(w http.ResponseWriter, r *http.Request) RepositoryContent {
 	if _, _, ok := s.readableRepository(w, r); !ok {
 		return nil
 	}
+	return s.configuredContent(w)
+}
+
+func (s *Server) configuredContent(w http.ResponseWriter) RepositoryContent {
 	if s.config.Content == nil {
 		writeError(w, http.StatusServiceUnavailable, "content_unavailable", "Repository content isn't configured")
 		return nil
@@ -31,12 +41,55 @@ func (s *Server) repositoryTree(w http.ResponseWriter, r *http.Request) {
 	if content == nil {
 		return
 	}
-	result, err := content.Tree(r.Context(), chi.URLParam(r, "id"), r.URL.Query().Get("revision"), r.URL.Query().Get("path"))
+	id, revision := chi.URLParam(r, "id"), r.URL.Query().Get("revision")
+	result, err := content.Tree(r.Context(), id, revision, r.URL.Query().Get("path"))
 	if err != nil {
 		writeRepositoryContentError(w, err)
 		return
 	}
+	// Who changed each entry last and when, for the branch's current revision. Without it the
+	// listing still works: the column stays empty and the reason is logged.
+	if revision == "" && result.Revision != "" && len(result.Items) > 0 {
+		paths := make([]string, len(result.Items))
+		for index, item := range result.Items {
+			paths[index] = item.Path
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		changes, err := content.LastChanges(ctx, id, result.Revision, paths)
+		cancel()
+		if err != nil {
+			log.Printf("Last changes of repository %s weren't read: %v", id, err)
+		}
+		names := s.accountNames(r.Context())
+		for index := range result.Items {
+			if change, ok := changes[strings.Trim(result.Items[index].Path, "/")]; ok {
+				change.Author = names(change.Author)
+				result.Items[index].LastChange = &change
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// accountNames returns a lookup from the account IDs Lore records to the names people know,
+// remembering each answer for the request.
+func (s *Server) accountNames(ctx context.Context) func(string) string {
+	names := make(map[string]string)
+	return func(id string) string {
+		if id == "" {
+			return ""
+		}
+		if name, ok := names[id]; ok {
+			return name
+		}
+		user, err := s.store.GetUser(ctx, id)
+		if err != nil {
+			names[id] = "Former user"
+		} else {
+			names[id] = accountName(user)
+		}
+		return names[id]
+	}
 }
 
 func (s *Server) repositoryHistory(w http.ResponseWriter, r *http.Request) {
@@ -49,21 +102,7 @@ func (s *Server) repositoryHistory(w http.ResponseWriter, r *http.Request) {
 		writeRepositoryContentError(w, err)
 		return
 	}
-	usernames := make(map[string]string)
-	username := func(id string) string {
-		if id == "" {
-			return ""
-		}
-		if name, ok := usernames[id]; ok {
-			return name
-		}
-		user, err := s.store.GetUser(r.Context(), id)
-		if err != nil {
-			return "Former user"
-		}
-		usernames[id] = accountName(user)
-		return usernames[id]
-	}
+	username := s.accountNames(r.Context())
 	for index := range result.Items {
 		result.Items[index].Author = username(result.Items[index].Author)
 		result.Items[index].Committer = username(result.Items[index].Committer)
@@ -85,7 +124,11 @@ func accountName(user model.User) string {
 }
 
 func (s *Server) repositoryLocks(w http.ResponseWriter, r *http.Request) {
-	content := s.repositoryContent(w, r)
+	_, grants, ok := s.readableRepository(w, r)
+	if !ok {
+		return
+	}
+	content := s.configuredContent(w)
 	if content == nil {
 		return
 	}
@@ -94,21 +137,73 @@ func (s *Server) repositoryLocks(w http.ResponseWriter, r *http.Request) {
 		writeRepositoryContentError(w, err)
 		return
 	}
-	// Lore records the owner's account ID, like a revision's author; show the name. An
-	// owner the control plane doesn't know is shown as Lore reported it.
-	names := make(map[string]string)
+	// Lore records the owner's account ID, like a revision's author; show the name, and mark
+	// locks whose owner can no longer sign in (removed or disabled here or in the directory):
+	// only someone who manages the repository can release those now.
+	type ownerState struct {
+		name     string
+		disabled bool
+	}
+	owners := make(map[string]ownerState)
 	for index := range result {
 		owner := result[index].Owner
-		if name, ok := names[owner]; ok {
-			result[index].Owner = name
-			continue
+		state, ok := owners[owner]
+		if !ok {
+			user, err := s.store.GetUser(r.Context(), owner)
+			switch {
+			case err == nil:
+				state = ownerState{name: accountName(user), disabled: !user.Active()}
+			case errors.Is(err, store.ErrNotFound):
+				state = ownerState{name: owner, disabled: true}
+			default:
+				state = ownerState{name: owner}
+			}
+			owners[owner] = state
 		}
-		if user, err := s.store.GetUser(r.Context(), owner); err == nil {
-			names[owner] = accountName(user)
-			result[index].Owner = names[owner]
-		}
+		result[index].Owner = state.name
+		result[index].OwnerDisabled = state.disabled
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": result})
+	user, _ := currentUser(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{"items": result, "canRelease": policy.CanManage(user, grants)})
+}
+
+// releaseLock releases a lock whoever holds it: for the repository's owners and administrators,
+// when the holder is away or has left. Recorded in the audit log.
+func (s *Server) releaseLock(w http.ResponseWriter, r *http.Request) {
+	repository, _, ok := s.manageableRepository(w, r)
+	if !ok {
+		return
+	}
+	content := s.configuredContent(w)
+	if content == nil {
+		return
+	}
+	var body struct {
+		BranchID string `json:"branchId"`
+		Hash     string `json:"hash"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.BranchID == "" || body.Hash == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "branchId and hash are required")
+		return
+	}
+	lock, err := content.ReleaseLock(r.Context(), repository.ID, body.BranchID, body.Hash)
+	if errors.Is(err, loreclient.ErrLockNotFound) {
+		writeError(w, http.StatusNotFound, "lock_not_found", "The lock isn't held any more")
+		return
+	}
+	if err != nil {
+		log.Printf("Releasing a lock in repository %s failed: %v", repository.ID, err)
+		writeError(w, http.StatusBadGateway, "lock_release_failed", "The Lore server didn't release the lock")
+		return
+	}
+	actor, _ := currentUser(r.Context())
+	ownerName := s.accountNames(r.Context())(lock.Owner)
+	s.recordAudit(r, model.AuditEvent{ActorID: actor.ID, Action: "lock.release", TargetType: "repository", TargetID: repository.ID,
+		SubjectType: model.SubjectUser, Subject: lock.Owner, SubjectName: ownerName, Before: lock.Path})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) repositoryDownload(w http.ResponseWriter, r *http.Request) {

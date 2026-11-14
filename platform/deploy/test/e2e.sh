@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # End-to-end check of an installation, the way an administrator uses it:
 #   setup -> administrator signs in through Keycloak -> creates a repository and a local
-#   user -> the user signs in (changing the temporary password) and sees the repository only
-#   after a grant -> backup -> changes after the backup -> restore -> the state at backup
-#   time is back, including the Lore storage and both databases.
+#   user -> the user signs in (changing the temporary password) -> the owner grants, changes
+#   and revokes access on the WebUI's Access tab in a headless browser -> the user sees the
+#   repository only after a grant -> backup -> changes after the backup -> restore -> the
+#   state at backup time is back, including the Lore storage and both databases.
 #
 # It drives the real WebUI sign-in (Keycloak login form, OIDC callback, session cookie) with
-# curl, so no browser is needed. Needs bash, curl, docker and the deploy directory.
+# curl. The Access tab step also drives a headless browser when Node 22+ and Chrome,
+# Chromium or Edge are installed. Needs bash, curl, docker and the deploy directory.
 #
 # DESTRUCTIVE: it runs setup, backup and RESTORE in the deploy directory, which replaces the
 # data. Use it only on a test installation, and confirm with LORE_E2E=destroy-test-data.
@@ -126,6 +128,22 @@ login "$USER_EMAIL" "$TEMPORARY" "$PERMANENT"
 sees "$USER_EMAIL" "$REPO" && fail "the user sees a private repository without a grant"
 api "$USER_EMAIL" GET "/repositories/$REPO_ID" "" 404 > /dev/null || fail "the private repository's page isn't hidden from the user"
 ok "private repository is hidden"
+
+step "the owner grants, changes and revokes access on the WebUI's Access tab"
+# A real browser: the API calls below can't catch a WebUI that sends requests the server
+# refuses. Needs Node 22+ and Chrome, Chromium or Edge (LORE_E2E_BROWSER); without them the
+# step is skipped unless LORE_E2E_REQUIRE_BROWSER=true.
+NODE=$(command -v node || true)
+if [ -n "$NODE" ] && "$NODE" -e 'process.exit(typeof WebSocket === "function" ? 0 : 1)' 2>/dev/null; then
+    LORE_URL="$WEB" LORE_ADMIN_USER=admin LORE_ADMIN_PASSWORD="$ADMIN_PASSWORD" REPO_ID="$REPO_ID" SUBJECT_ID="$USER_ID" \
+        SUBJECT_EMAIL="$USER_EMAIL" "$NODE" "$DEPLOY/test/webui-grants.mjs" || fail "the Access tab check failed"
+    sees "$USER_EMAIL" "$REPO" && fail "the repository is still visible after the WebUI revoked the grant"
+    ok "the user doesn't see the repository after the WebUI revoked the grant"
+elif [ "${LORE_E2E_REQUIRE_BROWSER:-false}" = "true" ]; then
+    fail "Node 22 or later isn't installed"
+else
+    ok "skipped: Node 22 or later isn't installed"
+fi
 
 step "a read grant shows it to the user, who still can't manage it"
 api admin PUT "/repositories/$REPO_ID/grants/" "{\"subjectType\":\"user\",\"subject\":\"$USER_ID\",\"permission\":\"read\"}" > /dev/null

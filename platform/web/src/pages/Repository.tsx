@@ -3,8 +3,8 @@ import { Link, NavLink, useParams } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { useApp } from "../App";
 import { useLocale } from "../i18n";
-import type { Repository, RepositoryLock, RepositoryTree, Revision } from "../types";
-import { Avatar, Badge, CopyButton, Empty, ErrorNote, Icon, Loading, RepoTile, formatSize, useCopy, useToast, useTopBar } from "../ui";
+import type { LastChange, Repository, RepositoryLock, RepositoryTree, Revision } from "../types";
+import { Avatar, Badge, CopyButton, Dialog, Empty, ErrorNote, Icon, Loading, RepoTile, formatSize, useCopy, useToast, useTopBar } from "../ui";
 import { AccessTab } from "./Access";
 
 type Tab = "files" | "history" | "locks" | "access" | "settings";
@@ -56,10 +56,11 @@ export function RepositoryPage() {
           {canManage && <Badge kind="accent">{t("permission.owner")}</Badge>}
         </div>
         <p className="muted">{repository.description || t("repo.noDescription")}</p>
-        <div className="facts">
-          {repository.ownerName && <span><Icon name="user" />{t("repo.owner", { name: repository.ownerName })}</span>}
-          {repository.updatedAt && <span><Icon name="clock" />{t("repo.updated", { time: ago(repository.updatedAt) })}</span>}
-        </div>
+      </div>
+      {/* Owner and last update sit at the right of the header, so the tabs follow the title. */}
+      <div className="facts">
+        {repository.ownerName && <span><Icon name="user" />{t("repo.owner", { name: repository.ownerName })}</span>}
+        {repository.updatedAt && <span><Icon name="clock" />{t("repo.updated", { time: ago(repository.updatedAt) })}</span>}
       </div>
     </div>
     <nav className="tabs">{tabs.map(([key, label, icon]) => <NavLink key={key} to={`/repositories/${id}/${key}`} className={() => (tab === key ? "on" : "")}><Icon name={icon} />{label}</NavLink>)}</nav>
@@ -69,6 +70,15 @@ export function RepositoryPage() {
     {tab === "access" && canManage && <AccessTab repository={repository} onChanged={() => void load()} />}
     {tab === "settings" && isAdmin && <SettingsTab repository={repository} onSaved={setRepository} />}
   </>;
+}
+
+// Who changed an entry last and when, in one line: the full message and date on hover.
+function LastChangeCell({ change }: { change?: LastChange }) {
+  const { t, ago, dateTime } = useLocale();
+  if (!change) return <td className="change" />;
+  const author = change.author || "?";
+  const title = `${change.message || t("history.noMessage")}\n${t("files.revision", { number: String(change.number) })} · ${author} · ${dateTime(change.committedAt)}`;
+  return <td className="change"><span className="change-cell" title={title}><Avatar small name={author} /><span className="who truncate">{author}</span><span className="when">{ago(change.committedAt)}</span></span></td>;
 }
 
 function FilesTab({ id }: { id: string }) {
@@ -93,13 +103,14 @@ function FilesTab({ id }: { id: string }) {
       : !tree ? <Loading />
       : !tree.revision && items.length === 0 ? <Empty icon="folder" title={t("files.noRevisions")} text={t("files.noRevisionsText")} />
       : items.length === 0 ? <Empty icon="folder" title={t("files.empty")} text={t("files.emptyText")} />
-      : <div className="table-wrap"><table className="table"><thead><tr><th>{t("files.name")}</th><th className="num">{t("files.size")}</th><th /></tr></thead><tbody>
+      : <div className="table-wrap"><table className="table"><thead><tr><th>{t("files.name")}</th><th className="change">{t("files.lastChange")}</th><th className="num">{t("files.size")}</th><th /></tr></thead><tbody>
         {items.map((item) => {
           const name = item.path.slice(path ? path.length + 1 : 0);
           return item.type === "directory"
             ? <tr key={item.path} className="link" tabIndex={0} onClick={() => setPath(item.path)} onKeyDown={(event) => { if (event.key === "Enter") setPath(item.path); }}>
-                <td><div className="cell-main"><Icon name="folder" className="file-ico dir" /><b>{name}</b></div></td><td className="num">—</td><td className="act"><Icon name="chevron" className="file-ico" /></td></tr>
+                <td><div className="cell-main"><Icon name="folder" className="file-ico dir" /><b>{name}</b></div></td><LastChangeCell change={item.lastChange} /><td className="num">—</td><td className="act"><Icon name="chevron" className="file-ico" /></td></tr>
             : <tr key={item.path}><td><div className="cell-main"><Icon name="file" className="file-ico" /><span>{name}</span></div></td>
+                <LastChangeCell change={item.lastChange} />
                 <td className="num">{formatSize(item.size, language)}</td>
                 <td className="act"><a className="btn quiet sm" href={api.downloadUrl(id, item.path, tree.revision)}><Icon name="download" />{t("files.download")}</a></td></tr>;
         })}
@@ -139,17 +150,51 @@ function HistoryTab({ id }: { id: string }) {
 }
 
 function LocksTab({ id }: { id: string }) {
-  const { t, ago, error } = useLocale();
+  const { t, ago, dateTime, error } = useLocale();
+  const toast = useToast();
   const [locks, setLocks] = useState<RepositoryLock[] | null>(null);
+  const [canRelease, setCanRelease] = useState(false);
   const [problem, setProblem] = useState("");
-  useEffect(() => { api.locks(id).then((result) => setLocks(result.items)).catch((cause) => setProblem(error(cause))); }, [id, error]);
+  const [releasing, setReleasing] = useState<RepositoryLock | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [releaseProblem, setReleaseProblem] = useState("");
+  const load = useCallback(() => {
+    api.locks(id).then((result) => { setLocks(result.items); setCanRelease(result.canRelease); }).catch((cause) => setProblem(error(cause)));
+  }, [id, error]);
+  useEffect(load, [load]);
+  const release = async () => {
+    if (!releasing) return;
+    setBusy(true);
+    try {
+      await api.releaseLock(id, releasing);
+      toast(t("locks.released", { path: releasing.path }));
+      setReleasing(null);
+      setReleaseProblem("");
+      load();
+    } catch (cause) {
+      setReleaseProblem(error(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
   if (problem) return <ErrorNote message={problem} />;
   if (!locks) return <Loading />;
   return <div className="card">{locks.length === 0 ? <Empty icon="lock" title={t("locks.empty")} text={t("locks.emptyText")} />
-    : <div className="table-wrap"><table className="table"><thead><tr><th>{t("locks.path")}</th><th>{t("locks.owner")}</th><th className="num">{t("locks.when")}</th></tr></thead><tbody>
+    : <div className="table-wrap"><table className="table"><thead><tr><th>{t("locks.path")}</th><th>{t("locks.owner")}</th><th className="num">{t("locks.when")}</th>{canRelease && <th />}</tr></thead><tbody>
       {locks.map((lock) => <tr key={`${lock.branchId}:${lock.path}`}><td><div className="cell-main"><Icon name="lock" className="file-ico" /><span className="mono">{lock.path}</span></div></td>
-        <td><div className="row"><Avatar name={lock.owner} />{lock.owner}</div></td><td className="num">{ago(lock.lockedAt)}</td></tr>)}
-    </tbody></table></div>}</div>;
+        <td><div className="row"><Avatar name={lock.owner} />{lock.owner}{lock.ownerDisabled && <Badge kind="warn" title={t("locks.ownerGoneHint")}>{t("locks.ownerGone")}</Badge>}</div></td>
+        <td className="num" title={dateTime(lock.lockedAt)}>{ago(lock.lockedAt)}</td>
+        {canRelease && <td className="act"><button className="btn danger sm" onClick={() => { setReleaseProblem(""); setReleasing(lock); }}><Icon name="unlock" />{t("locks.release")}</button></td>}</tr>)}
+    </tbody></table></div>}
+    {releasing && <Dialog title={t("locks.releaseTitle")} onClose={() => setReleasing(null)} footer={<>
+      <button type="button" className="btn" autoFocus onClick={() => setReleasing(null)}>{t("common.cancel")}</button>
+      <button type="button" className="btn danger solid" disabled={busy} onClick={() => void release()}>{t("locks.releaseConfirm")}</button>
+    </>}>
+      <ErrorNote message={releaseProblem} />
+      <p>{t("locks.releaseText", { path: releasing.path, owner: releasing.owner })}</p>
+      <p className="muted">{t("locks.releaseWarning", { owner: releasing.owner })}</p>
+    </Dialog>}
+  </div>;
 }
 
 function SettingsTab({ repository, onSaved }: { repository: Repository; onSaved: (repository: Repository) => void }) {

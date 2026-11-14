@@ -352,6 +352,15 @@ func (s *Server) provisionADUser(w http.ResponseWriter, r *http.Request) {
 	user.Groups = account.Groups
 	user.DirectoryDisabled = account.Disabled
 	user.GroupsSyncedAt = &now
+	// Adding someone from the directory by hand means letting them in: give the account its
+	// own access entry (Active Directory accounts sign in only through the access list).
+	actor, _ := currentUser(r.Context())
+	subject := directoryUserSubject(account.User)
+	if err := s.store.AddAccess(r.Context(), actor.ID, model.AccessEntry{SubjectType: model.SubjectUser, Subject: profile.ID, Name: subject.Label, Detail: subject.Detail}); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	user.AccessDenied = false
 	_, existsErr := s.store.GetUser(r.Context(), user.ID)
 	user, err = s.store.UpsertUser(r.Context(), user)
 	if err != nil {
@@ -359,7 +368,6 @@ func (s *Server) provisionADUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if errors.Is(existsErr, store.ErrNotFound) {
-		actor, _ := currentUser(r.Context())
 		s.recordAudit(r, model.AuditEvent{ActorID: actor.ID, Action: "user.provision", TargetType: "user", TargetID: user.ID})
 	}
 	writeJSON(w, http.StatusCreated, user)
@@ -399,6 +407,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	// A directory account's role and access come from its entry and its groups on the list.
+	if existing.Federated() {
+		writeError(w, http.StatusConflict, "managed_by_access_list", "Change Active Directory accounts in the list of users and groups")
+		return
+	}
 	enabledChanged := existing.Disabled != input.Disabled
 	if enabledChanged && s.config.Accounts != nil {
 		if err := s.config.Accounts.SetLocalUserEnabled(r.Context(), id, !input.Disabled); err != nil {
@@ -415,6 +428,44 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, user)
+}
+
+// deleteUser removes a local account: from the identity provider, and from Lore as a hidden
+// record so the audit log keeps the name. Directory accounts are removed from the list of users
+// and groups instead; you can't delete yourself (so an administrator always remains: the one
+// deleting) nor the built-in administrator, which setup would recreate.
+func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
+	actor, _ := currentUser(r.Context())
+	id := chi.URLParam(r, "id")
+	if actor.ID == id {
+		writeError(w, http.StatusConflict, "self_lockout", "You can't delete your own account")
+		return
+	}
+	user, err := s.store.GetUser(r.Context(), id)
+	if err != nil || user.Deleted {
+		writeStoreError(w, store.ErrNotFound)
+		return
+	}
+	if user.Federated() || user.Source != SourceLocal {
+		writeError(w, http.StatusConflict, "managed_by_access_list", "Only local accounts are deleted here; remove Active Directory accounts from the list of users and groups")
+		return
+	}
+	if s.auth != nil && s.auth.config.BootstrapAdmin != "" && user.Username == s.auth.config.BootstrapAdmin {
+		writeError(w, http.StatusConflict, "builtin_admin", "The built-in administrator can't be deleted; setup recreates it")
+		return
+	}
+	if s.config.Accounts != nil {
+		if err := s.config.Accounts.DeleteLocalUser(r.Context(), id); err != nil {
+			log.Printf("Deleting local account %s failed: %v", id, err)
+			writeError(w, http.StatusBadGateway, "account_update_failed", "Couldn't delete the identity provider account")
+			return
+		}
+	}
+	if err := s.store.DeleteUser(r.Context(), actor.ID, id); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) repositories(w http.ResponseWriter, r *http.Request) {
@@ -656,6 +707,13 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 			}
 		case "settings":
 			event.TargetName = "Global settings"
+		case "access":
+			// Access entries name directory accounts by objectGUID, which aren't Lore user IDs;
+			// the event keeps the name the entry had.
+			event.TargetName = "Active Directory access"
+			if event.SubjectName == "" {
+				event.SubjectName = event.After + event.Before
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, page)

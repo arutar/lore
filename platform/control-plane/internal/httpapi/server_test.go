@@ -244,6 +244,8 @@ func TestGrantSubjectsAndReadableAudit(t *testing.T) {
 	if status != http.StatusOK || len(subjects["items"].([]any)) != 0 {
 		t.Fatalf("subjects without a search = %d, %v", status, subjects)
 	}
+	// Groups are offered for grants only once they're on the list of users and groups.
+	storage.AddAccess(t.Context(), "admin", model.AccessEntry{SubjectType: model.SubjectGroup, Subject: "ad-group-guid", Name: "Artists"})
 	storage.UpsertUser(t.Context(), model.User{ID: "u-arthur", Username: "arthur", DisplayName: "Arthur Dent", Email: "arthur@example.com", Source: "local"})
 	storage.UpsertUser(t.Context(), model.User{ID: "svc", Username: "service-account-lore-control-plane", Source: SourceService})
 	status, subjects = client.request(http.MethodGet, "/web/v1/repositories/"+id+"/grants/subjects?q=ar", nil, false)
@@ -335,6 +337,7 @@ func TestCatalogPagination(t *testing.T) {
 }
 
 type fakeAccountManager struct {
+	deletedID        string
 	enabled          *bool
 	logoutID         string
 	federatedMissing bool
@@ -353,6 +356,11 @@ func (f *fakeAccountManager) CreateLocalUser(_ context.Context, email, displayNa
 
 func (f *fakeAccountManager) SetLocalUserEnabled(_ context.Context, _ string, enabled bool) error {
 	f.enabled = &enabled
+	return nil
+}
+
+func (f *fakeAccountManager) DeleteLocalUser(_ context.Context, id string) error {
+	f.deletedID = id
 	return nil
 }
 
@@ -397,6 +405,11 @@ func TestProvisionADUser(t *testing.T) {
 	stored, err := storage.GetUser(t.Context(), "ad-user-id")
 	if err != nil || stored.Source != "ad" || stored.DirectoryID != elessarGUID || stored.GroupsSyncedAt == nil {
 		t.Fatalf("stored AD user = %+v, %v", stored, err)
+	}
+	// Adding an account from the directory by hand admits it.
+	entries, _ := storage.ListAccess(t.Context())
+	if stored.AccessDenied || len(entries) != 1 || entries[0].Subject != elessarGUID || entries[0].Name != "elessar" {
+		t.Fatalf("provisioned account wasn't admitted: %+v %+v", stored, entries)
 	}
 }
 

@@ -259,7 +259,15 @@ func (a *Authenticator) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !user.Active() {
-		writeError(w, http.StatusForbidden, "account_disabled", "Account is disabled")
+		// Back to the WebUI, which explains it, rather than a bare JSON error in the browser.
+		reason := "disabled"
+		if user.AccessDenied && !user.Disabled && !user.DirectoryDisabled {
+			reason = "no_access"
+		}
+		clearCookie(w, stateCookie, a.config.SecureCookies)
+		clearCookie(w, nonceCookie, a.config.SecureCookies)
+		clearCookie(w, verifierCookie, a.config.SecureCookies)
+		http.Redirect(w, r, a.refusedSignInURL(rawIDToken, reason), http.StatusFound)
 		return
 	}
 	if err := a.createSession(r.Context(), w, user.ID, rawIDToken); err != nil {
@@ -410,6 +418,28 @@ func (a *Authenticator) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	logoutURL.RawQuery = query.Encode()
 	writeJSON(w, http.StatusOK, map[string]string{"logoutUrl": logoutURL.String()})
+}
+
+// refusedSignInURL is where an account that may not use Lore goes after the identity provider
+// accepted its password. It ends the identity provider's session too: otherwise the next "Sign
+// in" would silently reuse the same account and nobody could sign in as someone else. The
+// identity provider sends the browser back to the WebUI with state, which names the reason.
+func (a *Authenticator) refusedSignInURL(idToken, reason string) string {
+	local := "/?signin=" + reason
+	if a.endSessionEndpoint == "" || a.config.PostLogoutRedirectURL == "" || idToken == "" {
+		return local
+	}
+	logoutURL, err := url.Parse(a.endSessionEndpoint)
+	if err != nil {
+		return local
+	}
+	query := logoutURL.Query()
+	query.Set("client_id", a.config.ClientID)
+	query.Set("id_token_hint", idToken)
+	query.Set("post_logout_redirect_uri", strings.TrimSuffix(a.config.PostLogoutRedirectURL, "/")+"/")
+	query.Set("state", "signin:"+reason)
+	logoutURL.RawQuery = query.Encode()
+	return logoutURL.String()
 }
 
 func requireCSRF(next http.Handler) http.Handler {

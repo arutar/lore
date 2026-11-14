@@ -176,12 +176,51 @@ while IFS=, read -r component provider; do
         break
     fi
 done <<< "$("$KC" get components -r "$REALM" -q type=org.keycloak.storage.UserStorageProvider --fields id,providerId --format csv --noquotes)"
+# The LDAP mappers (username, email, names, AD account state) come with the realm import
+# (ldap-provider.json). Installations made before they were added there have none — not even
+# "username", so no AD account can be found and every sign-in fails with user_not_found — and an
+# administrator may have deleted one. Create whichever is missing; existing ones are left alone.
+ensure_ldap_mappers() {
+    local provider="" id name existing=","
+    while IFS=, read -r id name; do
+        if [ "$name" = "ldap" ]; then provider=$id; break; fi
+    done <<< "$("$KC" get components -r "$REALM" -q type=org.keycloak.storage.UserStorageProvider --fields id,providerId --format csv --noquotes)"
+    [ -n "$provider" ] || return 0
+    while IFS= read -r name; do
+        [ -n "$name" ] && existing="$existing$name,"
+    done <<< "$("$KC" get components -r "$REALM" -q parent="$provider" --fields name --format csv --noquotes)"
+    attribute_mapper() { # name, LDAP attribute, Keycloak attribute, mandatory, always read from LDAP
+        case "$existing" in *",$1,"*) return 0 ;; esac
+        "$KC" create components -i -r "$REALM" -s "name=$(json_string "$1")" -s providerId=user-attribute-ldap-mapper \
+            -s providerType=org.keycloak.storage.ldap.mappers.LDAPStorageMapper -s "parentId=$(json_string "$provider")" \
+            -s "config.\"ldap.attribute\"=[$(json_string "$2")]" -s "config.\"user.model.attribute\"=[$(json_string "$3")]" \
+            -s 'config."read.only"=["true"]' -s "config.\"is.mandatory.in.ldap\"=[\"$4\"]" \
+            -s "config.\"always.read.value.from.ldap\"=[\"$5\"]" >/dev/null
+        echo "LDAP mapper created: $1"
+    }
+    attribute_mapper username "${LORE_LDAP_USERNAME_ATTRIBUTE:-sAMAccountName}" username true false
+    attribute_mapper email mail email false true
+    attribute_mapper "first name" givenName firstName false true
+    attribute_mapper "last name" sn lastName false true
+    case "$existing" in *",MSAD account controls,"*) ;; *)
+        # Reads userAccountControl: accounts disabled in AD are disabled in Keycloak too.
+        "$KC" create components -i -r "$REALM" -s 'name="MSAD account controls"' -s providerId=msad-user-account-control-mapper \
+            -s providerType=org.keycloak.storage.ldap.mappers.LDAPStorageMapper -s "parentId=$(json_string "$provider")" \
+            -s 'config."password.policy.hints.enabled"=["false"]' >/dev/null
+        echo "LDAP mapper created: MSAD account controls" ;;
+    esac
+}
+
 if [ -n "${LORE_LDAP_URL:-}" ]; then
     truststore=always
     if [ "${LORE_LDAP_INSECURE_SKIP_VERIFY:-false}" = "true" ]; then truststore=never; fi
     ldap_settings=(
         -s "config.connectionUrl=[$(json_string "$LORE_LDAP_URL")]"
         -s "config.usersDn=[$(json_string "${LORE_LDAP_BASE_DN:?LORE_LDAP_BASE_DN is required}")]"
+        # Subtree, not Keycloak's default "one level": accounts usually sit in OUs below the base DN
+        # (for example OU=Users\OU=Test and OU=Users\OU=Staff). The control plane searches the
+        # whole subtree too, so both see the same accounts.
+        -s 'config.searchScope=["2"]'
         -s "config.bindDn=[$(json_string "${LORE_LDAP_BIND_DN:?LORE_LDAP_BIND_DN is required}")]"
         -s "config.bindCredential=[$(json_string "${LORE_LDAP_BIND_PASSWORD:?LORE_LDAP_BIND_PASSWORD is required}")]"
         -s "config.startTls=[$(json_string "${LORE_LDAP_STARTTLS:-false}")]"
@@ -208,6 +247,7 @@ if [ -n "${LORE_LDAP_URL:-}" ]; then
             "${ldap_settings[@]}"
         echo "LDAP federation created: $LORE_LDAP_URL"
     fi
+    ensure_ldap_mappers
 elif [ -n "$ldap" ]; then
     echo "LDAP federation exists in Keycloak but LORE_LDAP_URL is empty; left unchanged. Remove it in the Keycloak admin console if it's no longer used."
 fi

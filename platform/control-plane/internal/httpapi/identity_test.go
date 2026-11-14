@@ -96,6 +96,10 @@ func newIdentityFixture(t *testing.T, config AuthConfig) *identityFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Alice is admitted personally; the access tests below start from an empty list instead.
+	if err := fixture.storage.AddAccess(t.Context(), "", model.AccessEntry{SubjectType: model.SubjectUser, Subject: aliceGUID, Name: "alice"}); err != nil {
+		t.Fatal(err)
+	}
 	keys := &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{&key.PublicKey}}
 	fixture.auth.serviceVerifier = oidc.NewVerifier(testIssuer, keys, &oidc.Config{ClientID: defaultAudience})
 	fixture.auth.logoutVerifier = oidc.NewVerifier(testIssuer, keys, &oidc.Config{ClientID: defaultAudience, SkipExpiryCheck: true})
@@ -395,5 +399,18 @@ func TestObjectGUIDNormalization(t *testing.T) {
 	}
 	if got := directory.NormalizeGUID(" 1A2B3C4D5E6F4A1B8C2D3E4F5A6B7C8D "); got != aliceGUID {
 		t.Fatalf("normalized = %q", got)
+	}
+}
+
+func TestLocalAccountNameDropsThePlaceholderLastName(t *testing.T) {
+	claims := identityClaims{Subject: "id", Email: "maria@example.com", Name: "Maria Lopez -"}
+	claims.normalize()
+	if claims.Name != "Maria Lopez" {
+		t.Fatalf("name = %q, want the display name without Keycloak's placeholder last name", claims.Name)
+	}
+	claims = identityClaims{Subject: "id", Email: "x@example.com", Name: "-"}
+	claims.normalize()
+	if claims.Name != "-" && claims.Name != "x@example.com" {
+		t.Fatalf("name = %q", claims.Name)
 	}
 }

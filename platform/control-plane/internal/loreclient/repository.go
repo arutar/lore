@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"sync"
 
 	"golang.org/x/oauth2"
 	"google.golang.org/grpc"
@@ -28,6 +29,8 @@ type Client struct {
 	connection   *grpc.ClientConn
 	repositories repositoryv1.RepositoryServiceClient
 	tokens       oauth2.TokenSource
+	// lastChanges holds a *changeIndex per repository (see lastchange.go).
+	lastChanges sync.Map
 }
 
 func New(config Config) (*Client, error) {

@@ -340,10 +340,7 @@ func (p *Postgres) DeleteRepository(ctx context.Context, actorID, id string) err
 
 func (p *Postgres) ListUsers(ctx context.Context, search, after string, limit int) (model.Page[model.User], error) {
 	conditions, args := pageConditions(after, search, []string{"id", "username", "display_name", "email"}, nil)
-	where := ""
-	if len(conditions) > 0 {
-		where = " WHERE " + strings.Join(conditions, " AND ")
-	}
+	where := " WHERE " + strings.Join(append([]string{"NOT deleted"}, conditions...), " AND ")
 	args = append(args, limit+1)
 	rows, err := p.pool.Query(ctx, "SELECT "+userColumns+" FROM users"+where+fmt.Sprintf(" ORDER BY id LIMIT $%d", len(args)), args...)
 	if err != nil {
@@ -369,12 +366,12 @@ func (p *Postgres) ListUsers(ctx context.Context, search, after string, limit in
 	return model.Page[model.User]{Items: items, NextCursor: next}, nil
 }
 
-const userColumns = "id, username, email, display_name, role, groups, source, disabled, created_at, updated_at, directory_id, directory_disabled, groups_synced_at"
+const userColumns = "id, username, email, display_name, role, groups, source, disabled, created_at, updated_at, directory_id, directory_disabled, groups_synced_at, access_denied, deleted"
 
 func scanUser(row pgx.Row) (model.User, error) {
 	var user model.User
 	err := row.Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.Role, &user.Groups, &user.Source, &user.Disabled,
-		&user.CreatedAt, &user.UpdatedAt, &user.DirectoryID, &user.DirectoryDisabled, &user.GroupsSyncedAt)
+		&user.CreatedAt, &user.UpdatedAt, &user.DirectoryID, &user.DirectoryDisabled, &user.GroupsSyncedAt, &user.AccessDenied, &user.Deleted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.User{}, ErrNotFound
 	}
@@ -412,8 +409,8 @@ func (p *Postgres) UpsertUser(ctx context.Context, user model.User) (model.User,
 		return model.User{}, fmt.Errorf("check username: %w", err)
 	}
 	stored, err := scanUser(tx.QueryRow(ctx, `
-		INSERT INTO users(id, username, email, display_name, role, groups, source, disabled, created_at, updated_at, directory_id, directory_disabled, groups_synced_at)
-		VALUES ($1, $2, $3, $4, COALESCE(NULLIF($5, ''), 'user'), COALESCE($6, '{}'::text[]), $7, FALSE, $8, $8, $9, $10, $11)
+		INSERT INTO users(id, username, email, display_name, role, groups, source, disabled, created_at, updated_at, directory_id, directory_disabled, groups_synced_at, access_denied)
+		VALUES ($1, $2, $3, $4, COALESCE(NULLIF($5, ''), 'user'), COALESCE($6, '{}'::text[]), $7, FALSE, $8, $8, $9, $10, $11, $12)
 		ON CONFLICT (id) DO UPDATE SET
 			username = EXCLUDED.username,
 			email = EXCLUDED.email,
@@ -423,10 +420,11 @@ func (p *Postgres) UpsertUser(ctx context.Context, user model.User) (model.User,
 			directory_id = EXCLUDED.directory_id,
 			directory_disabled = EXCLUDED.directory_disabled,
 			groups_synced_at = EXCLUDED.groups_synced_at,
+			access_denied = EXCLUDED.access_denied,
 			updated_at = EXCLUDED.updated_at
 		RETURNING `+userColumns,
 		user.ID, user.Username, user.Email, user.DisplayName, user.Role, user.Groups, user.Source, now,
-		user.DirectoryID, user.DirectoryDisabled, user.GroupsSyncedAt))
+		user.DirectoryID, user.DirectoryDisabled, user.GroupsSyncedAt, user.AccessDenied))
 	if err != nil {
 		return model.User{}, fmt.Errorf("upsert user: %w", err)
 	}
@@ -485,11 +483,185 @@ func (p *Postgres) GroupHasMembers(ctx context.Context, group string) (bool, err
 
 func (p *Postgres) HasActiveAdmin(ctx context.Context) (bool, error) {
 	var exists bool
-	err := p.pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM users WHERE role = 'admin' AND NOT disabled AND NOT directory_disabled)").Scan(&exists)
+	err := p.pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM users WHERE role = 'admin' AND NOT disabled AND NOT directory_disabled AND NOT access_denied AND NOT deleted)").Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("check administrators: %w", err)
 	}
 	return exists, nil
+}
+
+func (p *Postgres) ApplyDirectoryAccess(ctx context.Context, id string, denied bool, role model.Role) (model.User, error) {
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return model.User{}, fmt.Errorf("begin access update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var wasDenied bool
+	var wasRole model.Role
+	err = tx.QueryRow(ctx, "SELECT access_denied, role FROM users WHERE id = $1 FOR UPDATE", id).Scan(&wasDenied, &wasRole)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.User{}, ErrNotFound
+	}
+	if err != nil {
+		return model.User{}, fmt.Errorf("lock user: %w", err)
+	}
+	user, err := scanUser(tx.QueryRow(ctx, "UPDATE users SET access_denied = $2, role = $3, updated_at = updated_at WHERE id = $1 RETURNING "+userColumns, id, denied, role))
+	if err != nil {
+		return model.User{}, err
+	}
+	if wasDenied != denied {
+		action := "user.access_allow"
+		if denied {
+			action = "user.access_deny"
+		}
+		if err := insertAudit(ctx, tx, "", action, "user", id, "", ""); err != nil {
+			return model.User{}, err
+		}
+	}
+	if wasRole != role {
+		if err := insertAudit(ctx, tx, "", "user.role_from_directory", "user", id, string(wasRole), string(role)); err != nil {
+			return model.User{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return model.User{}, fmt.Errorf("commit access update: %w", err)
+	}
+	return user, nil
+}
+
+func (p *Postgres) ListAccess(ctx context.Context) ([]model.AccessEntry, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT subject_type, subject, name, detail, role, disabled, created_at FROM directory_access
+		ORDER BY subject_type = 'user', lower(name), subject`)
+	if err != nil {
+		return nil, fmt.Errorf("read access list: %w", err)
+	}
+	defer rows.Close()
+	entries := []model.AccessEntry{}
+	for rows.Next() {
+		var entry model.AccessEntry
+		if err := rows.Scan(&entry.SubjectType, &entry.Subject, &entry.Name, &entry.Detail, &entry.Role, &entry.Disabled, &entry.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan access entry: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+func (p *Postgres) AddAccess(ctx context.Context, actorID string, entry model.AccessEntry) error {
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin access add: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO directory_access(subject_type, subject, name, detail, role, disabled, created_at) VALUES ($1, $2, $3, $4, COALESCE(NULLIF($5, ''), 'user'), $6, $7)
+		ON CONFLICT (subject_type, subject) DO UPDATE SET name = EXCLUDED.name, detail = EXCLUDED.detail
+		WHERE directory_access.name <> EXCLUDED.name OR directory_access.detail <> EXCLUDED.detail`,
+		entry.SubjectType, entry.Subject, entry.Name, entry.Detail, entry.Role, entry.Disabled, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("add access: %w", err)
+	}
+	if tag.RowsAffected() > 0 {
+		if err := insertAccessAudit(ctx, tx, actorID, "access.add", entry.SubjectType, entry.Subject, "", entry.Name); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit access add: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) UpdateAccess(ctx context.Context, actorID string, subjectType model.SubjectType, subject string, role model.Role, disabled bool) (model.AccessEntry, error) {
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return model.AccessEntry{}, fmt.Errorf("begin access update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var entry model.AccessEntry
+	err = tx.QueryRow(ctx, `
+		SELECT subject_type, subject, name, detail, role, disabled, created_at FROM directory_access
+		WHERE subject_type = $1 AND subject = $2 FOR UPDATE`, subjectType, subject).
+		Scan(&entry.SubjectType, &entry.Subject, &entry.Name, &entry.Detail, &entry.Role, &entry.Disabled, &entry.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.AccessEntry{}, ErrNotFound
+	}
+	if err != nil {
+		return model.AccessEntry{}, fmt.Errorf("read access entry: %w", err)
+	}
+	if entry.Role == role && entry.Disabled == disabled {
+		return entry, nil
+	}
+	if _, err := tx.Exec(ctx, "UPDATE directory_access SET role = $3, disabled = $4 WHERE subject_type = $1 AND subject = $2", subjectType, subject, role, disabled); err != nil {
+		return model.AccessEntry{}, fmt.Errorf("update access entry: %w", err)
+	}
+	before := fmt.Sprintf("%s:%t", entry.Role, !entry.Disabled)
+	after := fmt.Sprintf("%s:%t", role, !disabled)
+	if err := insertAccessAudit(ctx, tx, actorID, "access.update", subjectType, subject, before, after); err != nil {
+		return model.AccessEntry{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return model.AccessEntry{}, fmt.Errorf("commit access update: %w", err)
+	}
+	entry.Role, entry.Disabled = role, disabled
+	return entry, nil
+}
+
+func (p *Postgres) RemoveAccess(ctx context.Context, actorID string, subjectType model.SubjectType, subject string) error {
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin access remove: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var name string
+	err = tx.QueryRow(ctx, "DELETE FROM directory_access WHERE subject_type = $1 AND subject = $2 RETURNING name", subjectType, subject).Scan(&name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("remove access: %w", err)
+	}
+	if err := insertAccessAudit(ctx, tx, actorID, "access.remove", subjectType, subject, name, ""); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit access remove: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) DeleteUser(ctx context.Context, actorID, id string) error {
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin user delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var username string
+	err = tx.QueryRow(ctx, "SELECT username FROM users WHERE id = $1 AND NOT deleted FOR UPDATE", id).Scan(&username)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lock user: %w", err)
+	}
+	// The name is freed so a new account may take it; the record keeps it after "~".
+	if _, err := tx.Exec(ctx, "UPDATE users SET deleted = TRUE, disabled = TRUE, username = $2, updated_at = $3 WHERE id = $1", id, username+"~"+id, time.Now().UTC()); err != nil {
+		return fmt.Errorf("delete user: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM grants WHERE subject_type = 'user' AND subject = $1", id); err != nil {
+		return fmt.Errorf("delete user grants: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM sessions WHERE user_id = $1", id); err != nil {
+		return fmt.Errorf("delete user sessions: %w", err)
+	}
+	if err := insertAudit(ctx, tx, actorID, "user.delete", "user", id, username, ""); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit user delete: %w", err)
+	}
+	return nil
 }
 
 func (p *Postgres) UpdateUser(ctx context.Context, actorID, id string, role model.Role, disabled bool) (model.User, error) {
@@ -747,6 +919,16 @@ const auditInsert = `
 
 func insertAudit(ctx context.Context, tx pgx.Tx, actorID, action, targetType, targetID, before, after string) error {
 	_, err := tx.Exec(ctx, auditInsert, actorID, action, targetType, targetID, before, after, "", "", time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("insert audit: %w", err)
+	}
+	return nil
+}
+
+// insertAccessAudit records a change to the Active Directory access list; the subject columns
+// let the audit log show the account's or group's name.
+func insertAccessAudit(ctx context.Context, tx pgx.Tx, actorID, action string, subjectType model.SubjectType, subject, before, after string) error {
+	_, err := tx.Exec(ctx, auditInsert, actorID, action, "access", subject, before, after, subjectType, subject, time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("insert audit: %w", err)
 	}

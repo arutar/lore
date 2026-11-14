@@ -91,6 +91,21 @@ function Shell({ session, config, setConfig }: { session: Session; config: Publi
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Set by the sign-in callback when the account may not use Lore (no access, disabled).
+  // After a refused sign-in the identity provider's logout returns the reason as state=signin:<reason>.
+  const [signinProblem, setSigninProblem] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    const state = params.get("state") ?? "";
+    return params.get("signin") ?? (state.startsWith("signin:") ? state.slice("signin:".length) : null);
+  });
+  useEffect(() => {
+    if (!signinProblem) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("signin");
+    url.searchParams.delete("state");
+    window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+  }, [signinProblem]);
+
   const wide = isAdmin && /^\/admin\//.test(location.pathname);
   const home = location.pathname === "/";
   const nav = [{ to: "/", label: t("nav.repositories"), icon: "repo" as const, end: false },
@@ -117,6 +132,9 @@ function Shell({ session, config, setConfig }: { session: Session; config: Publi
             <Account session={session} config={config} />
           </div>
           <main className="content">
+            {signinProblem && (signinProblem === "no_access" || signinProblem === "disabled") && <div className="note warn signin-note" role="alert">
+              <Icon name="lock" /><span className="grow">{t(`signin.${signinProblem}` as "signin.no_access")}</span>
+              <button className="btn quiet icon sm" onClick={() => setSigninProblem(null)} aria-label={t("common.close")}><Icon name="x" /></button></div>}
             <Routes>
               <Route path="/" element={<Home />} />
               <Route path="/repositories/:id" element={<RepositoryPage />} />

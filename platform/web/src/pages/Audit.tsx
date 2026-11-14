@@ -49,6 +49,8 @@ export function AuditPage() {
         return t("audit.superseded", { name: event.before ?? "" });
       case "settings.update":
         return settingsChange(event.before, event.after);
+      case "lock.release":
+        return t("audit.lockReleased", { path: event.before ?? "", owner: subject(event) });
       default:
         return "—";
     }

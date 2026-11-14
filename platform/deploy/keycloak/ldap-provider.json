@@ -1,27 +1,174 @@
 {
-  "name": "burut-ad",
+  "name": "active-directory",
   "providerId": "ldap",
   "config": {
-    "enabled": ["true"],
-    "priority": ["0"],
-    "editMode": ["READ_ONLY"],
-    "syncRegistrations": ["false"],
-    "trustEmail": ["true"],
-    "vendor": ["ad"],
-    "usernameLDAPAttribute": ["sAMAccountName"],
-    "rdnLDAPAttribute": ["cn"],
-    "uuidLDAPAttribute": ["objectGUID"],
-    "userObjectClasses": ["person,organizationalPerson,user"],
-    "connectionUrl": ["__LORE_LDAP_URL__"],
-    "usersDn": ["__LORE_LDAP_BASE_DN__"],
-    "bindDn": ["__LORE_LDAP_BIND_DN__"],
-    "bindCredential": ["${LORE_LDAP_BIND_PASSWORD}"],
-    "connectionTimeout": ["60000"],
-    "readTimeout": ["60000"],
-    "startTls": ["__LORE_LDAP_STARTTLS__"],
-    "useTruststoreSpi": ["__LORE_LDAP_USE_TRUSTSTORE__"],
-    "authType": ["simple"],
-    "pagination": ["true"],
-    "changedSyncPeriod": ["300"]
+    "enabled": [
+      "true"
+    ],
+    "priority": [
+      "0"
+    ],
+    "editMode": [
+      "READ_ONLY"
+    ],
+    "syncRegistrations": [
+      "false"
+    ],
+    "trustEmail": [
+      "true"
+    ],
+    "vendor": [
+      "ad"
+    ],
+    "usernameLDAPAttribute": [
+      "sAMAccountName"
+    ],
+    "rdnLDAPAttribute": [
+      "cn"
+    ],
+    "uuidLDAPAttribute": [
+      "objectGUID"
+    ],
+    "userObjectClasses": [
+      "person,organizationalPerson,user"
+    ],
+    "connectionUrl": [
+      "__LORE_LDAP_URL__"
+    ],
+    "usersDn": [
+      "__LORE_LDAP_BASE_DN__"
+    ],
+    "searchScope": [
+      "2"
+    ],
+    "bindDn": [
+      "__LORE_LDAP_BIND_DN__"
+    ],
+    "bindCredential": [
+      "${LORE_LDAP_BIND_PASSWORD}"
+    ],
+    "connectionTimeout": [
+      "60000"
+    ],
+    "readTimeout": [
+      "60000"
+    ],
+    "startTls": [
+      "__LORE_LDAP_STARTTLS__"
+    ],
+    "useTruststoreSpi": [
+      "__LORE_LDAP_USE_TRUSTSTORE__"
+    ],
+    "authType": [
+      "simple"
+    ],
+    "pagination": [
+      "true"
+    ],
+    "changedSyncPeriod": [
+      "300"
+    ]
+  },
+  "subComponents": {
+    "org.keycloak.storage.ldap.mappers.LDAPStorageMapper": [
+      {
+        "name": "username",
+        "providerId": "user-attribute-ldap-mapper",
+        "subComponents": {},
+        "config": {
+          "ldap.attribute": [
+            "sAMAccountName"
+          ],
+          "user.model.attribute": [
+            "username"
+          ],
+          "read.only": [
+            "true"
+          ],
+          "is.mandatory.in.ldap": [
+            "true"
+          ],
+          "always.read.value.from.ldap": [
+            "false"
+          ]
+        }
+      },
+      {
+        "name": "email",
+        "providerId": "user-attribute-ldap-mapper",
+        "subComponents": {},
+        "config": {
+          "ldap.attribute": [
+            "mail"
+          ],
+          "user.model.attribute": [
+            "email"
+          ],
+          "read.only": [
+            "true"
+          ],
+          "is.mandatory.in.ldap": [
+            "false"
+          ],
+          "always.read.value.from.ldap": [
+            "true"
+          ]
+        }
+      },
+      {
+        "name": "first name",
+        "providerId": "user-attribute-ldap-mapper",
+        "subComponents": {},
+        "config": {
+          "ldap.attribute": [
+            "givenName"
+          ],
+          "user.model.attribute": [
+            "firstName"
+          ],
+          "read.only": [
+            "true"
+          ],
+          "is.mandatory.in.ldap": [
+            "false"
+          ],
+          "always.read.value.from.ldap": [
+            "true"
+          ]
+        }
+      },
+      {
+        "name": "last name",
+        "providerId": "user-attribute-ldap-mapper",
+        "subComponents": {},
+        "config": {
+          "ldap.attribute": [
+            "sn"
+          ],
+          "user.model.attribute": [
+            "lastName"
+          ],
+          "read.only": [
+            "true"
+          ],
+          "is.mandatory.in.ldap": [
+            "false"
+          ],
+          "always.read.value.from.ldap": [
+            "true"
+          ]
+        }
+      },
+      {
+        "name": "MSAD account controls",
+        "providerId": "msad-user-account-control-mapper",
+        "subComponents": {},
+        "config": {
+          "password.policy.hints.enabled": [
+            "false"
+          ]
+        }
+      }
+    ]
   }
 }

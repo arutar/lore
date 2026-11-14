@@ -48,10 +48,24 @@ type Store interface {
 	// the name and keeps its grants, so a new identity never inherits access by name alone.
 	UpsertUser(ctx context.Context, user model.User) (model.User, error)
 	UpdateUser(ctx context.Context, actorID, id string, role model.Role, disabled bool) (model.User, error)
+	// DeleteUser removes an account: its grants and sessions go, the record is renamed and
+	// hidden (model.User.Deleted) so the audit log keeps its name.
+	DeleteUser(ctx context.Context, actorID, id string) error
 	// UpdateDirectoryState stores the result of a directory synchronization.
 	UpdateDirectoryState(ctx context.Context, id string, state DirectoryState) (model.User, error)
 	// HasActiveAdmin reports whether any enabled administrator exists.
 	HasActiveAdmin(ctx context.Context) (bool, error)
+	// ApplyDirectoryAccess stores what the access list gives a directory account: whether it's
+	// admitted (model.User.AccessDenied) and its role.
+	ApplyDirectoryAccess(ctx context.Context, id string, denied bool, role model.Role) (model.User, error)
+
+	// ListAccess returns the Active Directory access list, groups first, then by name.
+	ListAccess(ctx context.Context) ([]model.AccessEntry, error)
+	// AddAccess adds an entry; adding one that exists only updates its name and detail.
+	AddAccess(ctx context.Context, actorID string, entry model.AccessEntry) error
+	// UpdateAccess changes an entry's role and whether it's switched off.
+	UpdateAccess(ctx context.Context, actorID string, subjectType model.SubjectType, subject string, role model.Role, disabled bool) (model.AccessEntry, error)
+	RemoveAccess(ctx context.Context, actorID string, subjectType model.SubjectType, subject string) error
 
 	ListGrants(ctx context.Context, repositoryID string) ([]model.Grant, error)
 	SetGrant(ctx context.Context, actorID string, grant model.Grant) error

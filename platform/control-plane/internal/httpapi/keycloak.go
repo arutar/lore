@@ -29,6 +29,9 @@ type RegistrationRealm interface {
 type AccountManager interface {
 	CreateLocalUser(ctx context.Context, email, displayName, password string) (model.User, error)
 	SetLocalUserEnabled(ctx context.Context, id string, enabled bool) error
+	// DeleteLocalUser removes a local account from the identity provider; an account federated
+	// with the directory is refused (it's removed from the list of users and groups instead).
+	DeleteLocalUser(ctx context.Context, id string) error
 	// GetFederatedUser finds the identity provider account of a directory user by exact
 	// username or email; DirectoryID carries its LDAP_ID (objectGUID).
 	GetFederatedUser(ctx context.Context, username string) (model.User, error)
@@ -158,6 +161,49 @@ func (a *KeycloakRealmAdmin) SetLocalUserEnabled(ctx context.Context, id string,
 		return fmt.Errorf("Keycloak user update returned %s", response.Status)
 	}
 	return nil
+}
+
+func (a *KeycloakRealmAdmin) DeleteLocalUser(ctx context.Context, id string) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, a.realmURL+"/users/"+id, nil)
+	if err != nil {
+		return err
+	}
+	response, err := a.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return nil // already gone
+	}
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return fmt.Errorf("Keycloak user lookup returned %s", response.Status)
+	}
+	var account struct {
+		FederationLink string `json:"federationLink"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64*1024)).Decode(&account); err != nil {
+		return err
+	}
+	if account.FederationLink != "" {
+		return ErrNotFederated
+	}
+	request, err = http.NewRequestWithContext(ctx, http.MethodDelete, a.realmURL+"/users/"+id, nil)
+	if err != nil {
+		return err
+	}
+	response, err = a.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode == http.StatusNotFound || (response.StatusCode >= 200 && response.StatusCode < 300) {
+		return nil
+	}
+	return fmt.Errorf("Keycloak user delete returned %s", response.Status)
 }
 
 type keycloakAccount struct {

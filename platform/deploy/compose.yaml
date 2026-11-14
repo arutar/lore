@@ -145,6 +145,7 @@ services:
     image: caddy:2-alpine
     environment:
       LORE_PUBLIC_ADDRESS: ${LORE_PUBLIC_ADDRESS:-${LORE_PUBLIC_URL:-http://host.docker.internal:8080}}
+      LORE_PUBLIC_URL: ${LORE_PUBLIC_URL:-http://host.docker.internal:8080}
     ports:
       - "${LORE_PROXY_BIND:-0.0.0.0}:8080:8080"
     volumes:

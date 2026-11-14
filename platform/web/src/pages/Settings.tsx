@@ -7,12 +7,12 @@ import { Badge, ErrorNote, Icon, Loading, Switch, useToast, useTopBar } from "..
 
 /** Preview colours of each theme: background, surface, accent, text. */
 const themes: [string, string, string, string, string][] = [
-  ["midnight", "Midnight", "#0d1117", "#1e2630", "#58a6ff"], ["sky", "Sky", "#2b2825", "#403b36", "#4f9fe3"], ["ember", "Ember", "#1c1a1a", "#3b3333", "#d32b2b"],
-  ["sage", "Sage", "#292c27", "#43483e", "#f1926f"], ["aurora", "Aurora", "#100e1c", "#2f2954", "#b7a0ff"], ["ocean", "Ocean", "#0b1d2f", "#17395a", "#8fc9ff"],
-  ["retro", "Retro", "#181714", "#36332a", "#f4ce81"], ["autumn", "Autumn", "#1b1816", "#3b332d", "#f7946a"], ["light", "Light", "#ece7da", "#e3dccb", "#b8460f"],
-  ["cyberpunk", "Cyberpunk", "#0b0915", "#2d2654", "#68e7f6"],
+  ["midnight", "Midnight", "#0c131c", "#242c36", "#61a9f6"], ["sky", "Sky", "#292623", "#44403d", "#53a7df"], ["ember", "Ember", "#191514", "#322e2d", "#c6413d"],
+  ["sage", "Sage", "#1f231f", "#393d39", "#e89270"], ["ocean", "Ocean", "#0f181a", "#253235", "#54c9c5"],
+  ["retro", "Retro", "#171612", "#302f2a", "#e6bf5d"], ["autumn", "Autumn", "#1b1413", "#342d2c", "#ea8d52"], ["light", "Light", "#eee9de", "#e4ddcf", "#b04613"],
+  ["cyberpunk", "Cyberpunk", "#14161c", "#2c2e38", "#e96cad"],
 ];
-const languages: [Language, string, string][] = [["ru", "Русский", "Репозитории · Пользователи · Настройки"], ["en", "English", "Repositories · Users · Settings"]];
+const languages: [Language, string, string][] = [["en", "English", "Repositories · Users · Settings"], ["ru", "Русский", "Репозитории · Пользователи · Настройки"]];
 
 export function SettingsPage() {
   const { t, error } = useLocale();

@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$PublicHost = $(if ($env:LORE_PUBLIC_HOST) { $env:LORE_PUBLIC_HOST } else { "host.docker.internal" }),
-    [string]$Scheme = $(if ($env:LORE_PUBLIC_SCHEME) { $env:LORE_PUBLIC_SCHEME } else { "http" }),
+    # The name clients use to reach this server. Default: the saved one, else this computer's DNS name.
+    [string]$PublicHost = $env:LORE_PUBLIC_HOST,
+    [string]$Scheme = $env:LORE_PUBLIC_SCHEME,
     [string]$PublicUrl = $env:LORE_PUBLIC_URL,
     [string]$AuthUrl = $env:LORE_AUTH_PUBLIC_URL,
     [switch]$DirectCaddy,
@@ -36,12 +37,36 @@ if (Test-Path .env) {
         if ($key -and $value) { $settings[$key] = $value }
     }
 }
+function Get-DefaultHost {
+    # This computer's DNS name (FQDN in a domain): it resolves for browsers and clients on the
+    # network and for this machine itself. Containers reach it through the proxy's network alias.
+    $name = try { [Net.Dns]::GetHostEntry("").HostName } catch { $env:COMPUTERNAME }
+    if ($name) { $name = $name.ToLowerInvariant() }
+    # A name with "_" or other characters DNS doesn't allow breaks URL parsing in Keycloak (Java);
+    # use this computer's network address instead.
+    if (-not $name -or $name -like "localhost*" -or $name -notmatch '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$') {
+        $address = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" -and $_.InterfaceAlias -notmatch "vEthernet|WSL|Docker|Loopback" } |
+            Sort-Object InterfaceMetric | Select-Object -First 1 -ExpandProperty IPAddress
+        if ($address) { return $address }
+        return "host.docker.internal"
+    }
+    $name
+}
+$explicitUrl = [bool]$PublicUrl
+if (-not $PublicHost) { $PublicHost = if ($settings.LORE_PUBLIC_HOST) { $settings.LORE_PUBLIC_HOST } else { Get-DefaultHost } }
+if (-not $Scheme) { $Scheme = if ($settings.LORE_PUBLIC_SCHEME) { $settings.LORE_PUBLIC_SCHEME } else { "http" } }
+# Saved addresses are reused only while the host name and scheme stay the same: a new
+# -PublicHost must not keep the old URL (sign-in would then point at the previous name).
+$sameAddress = $settings.LORE_PUBLIC_HOST -eq $PublicHost -and $settings.LORE_PUBLIC_SCHEME -eq $Scheme
 if (-not $PublicUrl) {
-    if ($settings.LORE_PUBLIC_URL) { $PublicUrl = $settings.LORE_PUBLIC_URL }
+    if ($sameAddress -and $settings.LORE_PUBLIC_URL) { $PublicUrl = $settings.LORE_PUBLIC_URL }
     elseif ($Scheme -eq "https") { $PublicUrl = "https://$PublicHost" }
     else { $PublicUrl = "http://${PublicHost}:8080" }
 }
-if (-not $AuthUrl) { $AuthUrl = "$PublicUrl/auth" }
+if (-not $AuthUrl) {
+    $AuthUrl = if ($sameAddress -and -not $explicitUrl -and $settings.LORE_AUTH_PUBLIC_URL) { $settings.LORE_AUTH_PUBLIC_URL } else { "$PublicUrl/auth" }
+}
 if (-not (Test-Path .env)) {
     @(
         "POSTGRES_PASSWORD=$(New-HexSecret)"

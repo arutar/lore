@@ -15,6 +15,7 @@ const paths = {
   copy: <><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3" /></>,
   globe: <><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></>,
   lock: <><rect x="5" y="10.5" width="14" height="10" rx="2" /><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" /></>,
+  unlock: <><rect x="5" y="10.5" width="14" height="10" rx="2" /><path d="M8 10.5V7.5a4 4 0 0 1 7.7-1.5" /></>,
   folder: <path d="M3 7a2 2 0 0 1 2-2h4.5l2 2.5H19a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />,
   file: <><path d="M7 3h7l5 5v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" /><path d="M14 3v5h5" /></>,
   download: <path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14" />,
@@ -39,8 +40,8 @@ const tones = ["var(--accent)", "var(--accent-2)", "var(--ok)", "var(--warn)"];
 export const tone = (text: string) => tones[[...text].reduce((hash, character) => (hash * 31 + character.charCodeAt(0)) >>> 0, 7) % tones.length];
 const initials = (text: string) => text.split(/[\s._@-]+/).filter(Boolean).slice(0, 2).map((word) => word[0]!.toUpperCase()).join("") || "?";
 
-export function Avatar({ name, square }: { name: string; square?: boolean }) {
-  return <span className={`avatar ${square ? "sq" : ""}`} style={{ "--tone": tone(name) } as React.CSSProperties}>{initials(name)}</span>;
+export function Avatar({ name, square, small }: { name: string; square?: boolean; small?: boolean }) {
+  return <span className={`avatar ${square ? "sq" : ""} ${small ? "sm" : ""}`} style={{ "--tone": tone(name) } as React.CSSProperties}>{initials(name)}</span>;
 }
 
 export function RepoTile({ name, large }: { name: string; large?: boolean }) {

@@ -14,6 +14,9 @@ export interface User {
   groups: string[];
   source: string;
   disabled: boolean;
+  accessDenied?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface ADUser {
@@ -71,6 +74,26 @@ export interface LabeledGrant extends Grant {
   detail?: string;
 }
 
+/** An Active Directory account or group that may sign in to Lore (nested groups included). */
+export interface AccessEntry {
+  subjectType: "user" | "group";
+  subject: string;
+  name: string;
+  detail?: string;
+  role: Role;
+  disabled: boolean;
+  createdAt: string;
+}
+
+/** Everyone who may use Lore: local accounts, directory accounts added personally and
+ *  directory groups with the members who have signed in. */
+export interface Members {
+  local: User[];
+  accounts: (AccessEntry & { user?: User })[];
+  groups: (AccessEntry & { members: User[] })[];
+  directory: boolean;
+}
+
 export interface GrantSubject {
   type: "user" | "group";
   id: string;
@@ -105,8 +128,18 @@ export interface Page<T> {
   nextCursor?: string;
 }
 
+// The newest revision that changed a path (a folder: anything under it).
+export interface LastChange {
+  revision: string;
+  number: number;
+  author: string;
+  message: string;
+  committedAt: string;
+}
+
 export interface TreeNode {
   path: string;
+  lastChange?: LastChange;
   type: "directory" | "file" | "link";
   size: number;
   mode: number;
@@ -134,4 +167,6 @@ export interface RepositoryLock {
   hash: string;
   owner: string;
   lockedAt: string;
+  /** The owner can't sign in any more (removed or disabled). */
+  ownerDisabled?: boolean;
 }

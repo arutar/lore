@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/arutar/lore/platform/control-plane/internal/directory"
@@ -67,6 +68,9 @@ func (c *identityClaims) normalize() {
 	if c.Username == "" {
 		c.Username = c.Subject
 	}
+	// Local accounts are created in Keycloak with the last name "-" (Keycloak requires one,
+	// see CreateLocalUser), which Keycloak appends to the name claim.
+	c.Name = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(c.Name), " -"))
 	if c.Name == "" {
 		c.Name = c.Username
 	}
@@ -126,12 +130,19 @@ func (a *Authenticator) signIn(ctx context.Context, claims identityClaims) (mode
 		user.Groups = claims.Groups
 		user.GroupsSyncedAt = &now
 	}
+	if user.AccessDenied, user.Role, err = a.directoryAccess(ctx, user); err != nil {
+		return model.User{}, err
+	}
 	inherits, err := a.takesOverAdministrator(ctx, user, existing, known)
 	if err != nil {
 		return model.User{}, err
 	}
 	stored, err := a.store.UpsertUser(ctx, user)
 	if err != nil {
+		return model.User{}, err
+	}
+	// The upsert keeps a known account's role; a directory account's comes from the list.
+	if stored, err = a.applyAccess(ctx, stored); err != nil {
 		return model.User{}, err
 	}
 	return a.bootstrap(ctx, stored, inherits)
@@ -225,7 +236,62 @@ func (a *Authenticator) refresh(ctx context.Context, user model.User) (model.Use
 	if user.GroupsSyncedAt != nil && state.SyncedAt.Equal(*user.GroupsSyncedAt) {
 		return user, nil // kept the last known state through a directory outage
 	}
-	return a.store.UpdateDirectoryState(ctx, user.ID, state)
+	updated, err := a.store.UpdateDirectoryState(ctx, user.ID, state)
+	if err != nil {
+		return model.User{}, err
+	}
+	// Groups may have changed, and with them whether the account is admitted.
+	return a.applyAccess(ctx, updated)
+}
+
+// directoryAccess decides what the access list gives a directory account: whether it's kept
+// out (neither it nor any of its groups, nested ones included, is admitted) and its role, the
+// highest of its own entry and its groups' entries. Local and service accounts aren't on the
+// list: they're always admitted and keep the role an administrator gave them.
+func (a *Authenticator) directoryAccess(ctx context.Context, user model.User) (denied bool, role model.Role, err error) {
+	if !user.Federated() || user.Source == SourceService {
+		return false, user.Role, nil
+	}
+	entries, err := a.store.ListAccess(ctx)
+	if err != nil {
+		return false, user.Role, err
+	}
+	admitted, role := model.ResolveAccess(entries, user.DirectoryID, user.Groups)
+	return !admitted, role, nil
+}
+
+// applyAccess brings a directory account's stored access and role in line with the list.
+func (a *Authenticator) applyAccess(ctx context.Context, user model.User) (model.User, error) {
+	if !user.Federated() || user.Source == SourceService {
+		return user, nil
+	}
+	denied, role, err := a.directoryAccess(ctx, user)
+	if err != nil || (denied == user.AccessDenied && role == user.Role) {
+		return user, err
+	}
+	return a.store.ApplyDirectoryAccess(ctx, user.ID, denied, role)
+}
+
+// RecheckAccess applies the access list to every stored directory account, right after an
+// administrator changes it: a removed entry closes its members' sessions at their next
+// request instead of at the next directory refresh.
+func (a *Authenticator) RecheckAccess(ctx context.Context) error {
+	cursor := ""
+	for {
+		page, err := a.store.ListUsers(ctx, "", cursor, 500)
+		if err != nil {
+			return err
+		}
+		for _, user := range page.Items {
+			if _, err := a.applyAccess(ctx, user); err != nil {
+				return err
+			}
+		}
+		if page.NextCursor == "" {
+			return nil
+		}
+		cursor = page.NextCursor
+	}
 }
 
 // directoryState reads the account from the directory. During an outage it keeps the

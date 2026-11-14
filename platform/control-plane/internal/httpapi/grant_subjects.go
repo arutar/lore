@@ -67,12 +67,21 @@ func (s *Server) searchSubjects(ctx context.Context, query string) ([]grantSubje
 		}
 	}
 	if s.config.Directory != nil {
-		groups, err := s.config.Directory.SearchGroups(ctx, query, subjectSearchLimit)
+		// Only groups on the list of users and groups: whoever isn't on it doesn't exist for Lore.
+		entries, err := s.store.ListAccess(ctx)
 		if err != nil {
 			return nil, err
 		}
-		for _, group := range groups {
-			subjects = append(subjects, groupSubject(group))
+		lowered := strings.ToLower(query)
+		count := 0
+		for _, entry := range entries {
+			if entry.SubjectType != model.SubjectGroup || entry.Disabled || !strings.Contains(strings.ToLower(entry.Name), lowered) {
+				continue
+			}
+			subjects = append(subjects, groupSubject(directory.Group{ID: entry.Subject, Name: entry.Name}))
+			if count++; count == subjectSearchLimit {
+				break
+			}
 		}
 	}
 	return subjects, nil
@@ -204,13 +213,13 @@ func (s *Server) resolveSubject(ctx context.Context, grant model.Grant) (string,
 		if s.config.Directory == nil {
 			return subject, nil
 		}
-		groups, err := s.config.Directory.SearchGroups(ctx, subject, subjectSearchLimit)
+		entries, err := s.store.ListAccess(ctx)
 		if err != nil {
 			return "", err
 		}
-		for _, group := range groups {
-			if strings.EqualFold(group.Name, subject) {
-				return group.ID, nil
+		for _, entry := range entries {
+			if entry.SubjectType == model.SubjectGroup && strings.EqualFold(entry.Name, subject) {
+				return entry.Subject, nil
 			}
 		}
 	}
@@ -222,23 +231,27 @@ func (s *Server) validGrantSubject(ctx context.Context, grant model.Grant) (bool
 	case model.SubjectAnonymous, model.SubjectAuthenticated:
 		return true, nil
 	case model.SubjectUser:
-		_, err := s.store.GetUser(ctx, grant.Subject)
+		// Only someone who may use Lore: a local account or an admitted directory account.
+		user, err := s.store.GetUser(ctx, grant.Subject)
 		if errors.Is(err, store.ErrNotFound) {
 			return false, nil
 		}
-		return err == nil, err
+		return err == nil && user.Active(), err
 	case model.SubjectGroup:
-		// One lookup by objectGUID instead of listing every group in the directory.
 		if s.config.Directory != nil {
-			_, err := s.config.Directory.LookupGroup(ctx, grant.Subject)
-			if err == nil {
-				return true, nil
-			}
-			if !errors.Is(err, directory.ErrGroupNotFound) {
+			// Active Directory groups only from the list of users and groups.
+			entries, err := s.store.ListAccess(ctx)
+			if err != nil {
 				return false, err
 			}
+			for _, entry := range entries {
+				if entry.SubjectType == model.SubjectGroup && strings.EqualFold(entry.Subject, grant.Subject) {
+					return true, nil
+				}
+			}
+			return false, nil
 		}
-		// Not an Active Directory group: an identity provider group some account is in.
+		// Without a directory connection: an identity provider group some account is in.
 		return s.store.GroupHasMembers(ctx, grant.Subject)
 	}
 	return false, nil

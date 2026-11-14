@@ -1,4 +1,4 @@
-import type { ADUser, AuditEvent, BulkResult, GlobalSettings, Grant, GrantSubject, LabeledGrant, Page, PublicConfig, Repository, RepositoryLock, RepositoryTree, Revision, Role, Session, User } from "./types";
+import type { AccessEntry, ADUser, Members, AuditEvent, BulkResult, GlobalSettings, Grant, GrantSubject, LabeledGrant, Page, PublicConfig, Repository, RepositoryLock, RepositoryTree, Revision, Role, Session, User } from "./types";
 
 let csrfToken = "";
 
@@ -34,6 +34,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+const grantBody = ({ repositoryId, subjectType, subject, permission }: Grant): Grant => ({ repositoryId, subjectType, subject, permission });
+
 const query = (values: Record<string, string | number | undefined>) =>
   Object.entries(values).filter(([, value]) => value !== undefined && value !== "").map(([key, value]) => `${key}=${encodeURIComponent(String(value))}`).join("&");
 
@@ -46,18 +48,29 @@ export const api = {
   repository: (id: string) => request<Repository>(`/repositories/${id}`),
   tree: (id: string, path = "", revision = "") => request<RepositoryTree>(`/repositories/${id}/tree?${query({ path, revision })}`),
   history: (id: string, cursor = "") => request<Page<Revision>>(`/repositories/${id}/history?${query({ cursor })}`),
-  locks: (id: string) => request<{ items: RepositoryLock[] }>(`/repositories/${id}/locks`),
+  locks: (id: string) => request<{ items: RepositoryLock[]; canRelease: boolean }>(`/repositories/${id}/locks`),
+  releaseLock: (id: string, lock: RepositoryLock) => request<void>(`/repositories/${id}/locks/release`, { method: "POST", body: JSON.stringify({ branchId: lock.branchId, hash: lock.hash }) }),
   downloadUrl: (id: string, path: string, revision: string) => `/web/v1/repositories/${id}/download?${query({ path, revision })}`,
   grants: (id: string) => request<{ items: LabeledGrant[] }>(`/repositories/${id}/grants/`),
   grantSubjects: (id: string, q: string, signal?: AbortSignal) => request<{ items: GrantSubject[] }>(`/repositories/${id}/grants/subjects?${query({ q })}`, { signal }),
-  setGrant: (grant: Grant) => request<Grant>(`/repositories/${grant.repositoryId}/grants/`, { method: "PUT", body: JSON.stringify(grant) }),
-  removeGrant: (grant: Grant) => request<void>(`/repositories/${grant.repositoryId}/grants/`, { method: "DELETE", body: JSON.stringify(grant) }),
+  // Only the grant's own fields: the access tab passes labelled grants (label, detail), and the
+  // server rejects fields it doesn't know.
+  setGrant: (grant: Grant) => request<Grant>(`/repositories/${grant.repositoryId}/grants/`, { method: "PUT", body: JSON.stringify(grantBody(grant)) }),
+  removeGrant: (grant: Grant) => request<void>(`/repositories/${grant.repositoryId}/grants/`, { method: "DELETE", body: JSON.stringify(grantBody(grant)) }),
   importGrants: (id: string, body: string, csv: boolean) => request<BulkResult>(`/repositories/${id}/grants/import`, { method: "POST", headers: { "Content-Type": csv ? "text/csv" : "application/json" }, body }),
   grantsExportUrl: (id: string, csv: boolean) => `/web/v1/repositories/${id}/grants/export${csv ? "?format=csv" : ""}`,
   users: (q = "", cursor = "") => request<Page<User>>(`/admin/users?${query({ pageSize: 50, q, cursor })}`),
   searchADUsers: (q: string, signal?: AbortSignal) => request<{ items: ADUser[] }>(`/admin/users/search?${query({ q })}`, { signal }),
   createUser: (input: { email: string; displayName: string; password: string; role: Role }) => request<User>("/admin/users", { method: "POST", body: JSON.stringify(input) }),
+  accessList: () => request<{ items: AccessEntry[]; directory: boolean }>("/admin/access"),
+  accessSubjects: (q: string, signal?: AbortSignal) => request<{ items: GrantSubject[] }>(`/admin/access/subjects?${query({ q })}`, { signal }),
+  addAccess: (subjectType: "user" | "group", subject: string) => request<{ items: AccessEntry[]; directory: boolean }>("/admin/access", { method: "POST", body: JSON.stringify({ subjectType, subject }) }),
+  members: () => request<Members>("/admin/members"),
+  addPersonalAccess: (subject: string, role: Role, disabled: boolean) => request<{ items: AccessEntry[] }>("/admin/access", { method: "POST", body: JSON.stringify({ subjectType: "user", subject, role, disabled }) }),
+  updateAccess: (subjectType: "user" | "group", subject: string, role: Role, disabled: boolean) => request<AccessEntry>(`/admin/access/${subjectType}/${encodeURIComponent(subject)}`, { method: "PATCH", body: JSON.stringify({ role, disabled }) }),
+  removeAccess: (subjectType: "user" | "group", subject: string) => request<void>(`/admin/access/${subjectType}/${encodeURIComponent(subject)}`, { method: "DELETE" }),
   provisionADUser: (username: string) => request<User>("/admin/users/provision", { method: "POST", body: JSON.stringify({ username }) }),
+  deleteUser: (id: string) => request<void>(`/admin/users/${encodeURIComponent(id)}`, { method: "DELETE" }),
   updateUser: (user: Pick<User, "id" | "role" | "disabled">) => request<User>(`/admin/users/${user.id}`, { method: "PATCH", body: JSON.stringify({ role: user.role, disabled: user.disabled }) }),
   importUsers: (body: string, csv: boolean) => request<BulkResult>("/admin/users/import", { method: "POST", headers: { "Content-Type": csv ? "text/csv" : "application/json" }, body }),
   usersExportUrl: (csv: boolean) => `/web/v1/admin/users/export${csv ? "?format=csv" : ""}`,
