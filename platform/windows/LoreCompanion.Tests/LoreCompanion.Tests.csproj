@@ -20,4 +20,14 @@
     <ProjectReference Include="../LoreCompanion/LoreCompanion.csproj" />
   </ItemGroup>
 
+  <!-- The live tests must run on this fork's Lore library (as the installed client does), not the
+       upstream one from the LoreVcs package: only the fork signs in over plain HTTP to its own
+       server and falls back to anonymous access. Build-Client.ps1 builds it into target/release. -->
+  <PropertyGroup>
+    <ForkLoreLibrary>$(MSBuildThisFileDirectory)../../../target/release/lore.dll</ForkLoreLibrary>
+  </PropertyGroup>
+  <Target Name="UseForkLoreLibrary" AfterTargets="Build" Condition="Exists('$(ForkLoreLibrary)')">
+    <Copy SourceFiles="$(ForkLoreLibrary)" DestinationFiles="$(OutDir)lorelib.dll" />
+  </Target>
+
 </Project>

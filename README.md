@@ -38,7 +38,7 @@ the fork can shrink as Lore matures.
 ## What you get
 
 - **Web interface** — browse files, history and locks; download any file at any revision; manage
-  repositories, access, users, audit log and settings. Russian and English, ten themes, works on
+  repositories, access, users, audit log and settings. Russian and English, nine themes, works on
   a phone.
 - **Simple permissions** — *Read*, *Write*, *Owner* per repository, for users, Active Directory
   groups (nested groups included), all signed-in users or everyone (public). Private
@@ -72,7 +72,7 @@ the fork can shrink as Lore matures.
 | <img src="platform/docs/images/companion-commit.png" alt="Commit window" width="300"><br>**Lore Commit...** from the Explorer menu | <img src="platform/docs/images/companion-accounts.png" alt="Accounts window" width="300"><br>**Accounts** — one sign-in per server, window theme |
 
 The Explorer context menu and status icons follow the Windows light or dark mode. The Lore
-windows (Clone, Commit, Accounts...) use the same ten themes as the WebUI: pick one under
+windows (Clone, Commit, Accounts...) use the same nine themes as the WebUI: pick one under
 **Window theme** in Explorer → **Lore** → **Accounts**.
 
 <sub>Screenshots show the real interface with demo data.</sub>
@@ -156,6 +156,7 @@ both on the [Releases](../../releases) page.
 | Server deployment | Server binary / container, you assemble the rest | Docker Compose bundle with setup, backup and restore |
 | Plain HTTP inside an internal network | Sign-in requires HTTPS (except localhost) | Allowed to the same host as the Lore server, no client configuration |
 | Anonymous clone of public repositories | — | Supported |
+| File locks | Advisory: nothing stops a push that changes a locked file; the bundled store keeps them in memory only | Enforced: the server refuses a push that changes a file someone else has locked; locks are kept on disk, survive restarts and are in backups |
 
 **Why a fork and not a plugin.** Almost everything lives in [`platform/`](platform) and talks to
 Lore through its public gRPC services. A few things can only be done inside Lore itself — about
@@ -166,6 +167,12 @@ fifteen files in `lore-server` and `lore-transport`:
 - clients fall back to an anonymous token for public repositories;
 - clients allow plain-HTTP sign-in when the sign-in server is the same host as the Lore server
   they connect to (internal networks without certificates).
+- a lock store kept in a file and a push hook that enforces locks — both added through Lore's own
+  plugin and hook extension points (`lore-server/src/plugins/file_locks.rs`,
+  `lore-server/src/hooks/lock_guard.rs`), so upstream code is barely touched.
+
+After merging upstream changes, run the checks in
+[platform/windows/tests](platform/windows/tests/README.md#after-merging-upstream-lore).
 
 These changes are offered upstream ([EpicGames/lore#278](https://github.com/EpicGames/lore/issues/278)).
 The rest of the tree is upstream Lore, merged as it evolves; its original README is
