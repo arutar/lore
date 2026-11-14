@@ -543,4 +543,3 @@ func TestDeletedAccountsAreHiddenAndLoseTheirGrants(t *testing.T) {
 		mustUser(t, storage, model.User{ID: "tom-2", Username: "tom@example.com", Source: "local"})
 	})
 }
-

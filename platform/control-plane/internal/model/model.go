@@ -77,7 +77,9 @@ type User struct {
 func (u User) Federated() bool { return u.DirectoryID != "" }
 
 // Active reports whether the account may be used at all.
-func (u User) Active() bool { return !u.Disabled && !u.DirectoryDisabled && !u.AccessDenied && !u.Deleted }
+func (u User) Active() bool {
+	return !u.Disabled && !u.DirectoryDisabled && !u.AccessDenied && !u.Deleted
+}
 
 // AccessEntry is one Active Directory account or group on the list of who may use Lore. A
 // group admits every member, directly or through nested groups, with the group's role.

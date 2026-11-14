@@ -70,7 +70,8 @@ jobs:
 
       - name: Test the companion
         shell: pwsh
-        run: dotnet test platform/windows/LoreCompanion.Tests/LoreCompanion.Tests.csproj -v minimal
+        # The Live tests need a running installation (platform/windows/tests/Run-ClientTests.ps1).
+        run: dotnet test platform/windows/LoreCompanion.Tests/LoreCompanion.Tests.csproj -v minimal --filter "TestCategory!=Live"
 
       - name: Test the shell extension
         shell: pwsh

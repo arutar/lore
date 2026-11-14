@@ -42,6 +42,9 @@ env:
 jobs:
   meta:
     name: resolve tags
+    # Epic's image, from Epic's repository only: a fork's releases (platform-v*) aren't Lore
+    # server releases, and every later job needs this one.
+    if: github.repository == 'EpicGames/lore'
     runs-on: ubuntu-latest
     permissions:
       contents: read # metadata-action reads repository metadata for OCI labels

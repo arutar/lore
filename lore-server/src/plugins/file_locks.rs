@@ -118,7 +118,12 @@ impl FileLockStore {
                 )
             })?,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Locks::new(),
-            Err(err) => return Err(format!("Can't open the lock file {}: {err}", path.display())),
+            Err(err) => {
+                return Err(format!(
+                    "Can't open the lock file {}: {err}",
+                    path.display()
+                ));
+            }
         };
         info!(path = %path.display(), locks = locks.len(), "Opened the lock file");
         Ok(Self {
@@ -142,7 +147,8 @@ impl FileLockStore {
             .collect();
         // A stable order keeps the file readable and its backups comparable.
         stored.sort_by(|a, b| {
-            (a.repository.to_string(), &a.description).cmp(&(b.repository.to_string(), &b.description))
+            (a.repository.to_string(), &a.description)
+                .cmp(&(b.repository.to_string(), &b.description))
         });
         let bytes = serde_json::to_vec_pretty(&StoredFile {
             version: FILE_VERSION,

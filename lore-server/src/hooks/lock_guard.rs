@@ -53,7 +53,6 @@ use crate::hooks::HookRegistrationContext;
 use crate::hooks::HookRegistry;
 use crate::hooks::StatusCode;
 
-
 const HOOK_NAME: &str = "lock_guard";
 /// How many files a refusal names before it says "and N more".
 const NAMED_FILES: usize = 10;
@@ -120,7 +119,10 @@ impl Hook for LockGuardHook {
         {
             Ok(locks) => locks,
             Err(err) => {
-                warn!(?err, "Lock guard couldn't read the locks; letting the push through");
+                warn!(
+                    ?err,
+                    "Lock guard couldn't read the locks; letting the push through"
+                );
                 return Ok(());
             }
         };
@@ -138,17 +140,11 @@ impl Hook for LockGuardHook {
             stores.mutable.clone(),
             repository_id,
         ));
-        let changed = match changed_paths(
-            repository,
-            branch_id,
-            incoming,
-            self.config.history_limit,
-        )
-        .await
-        {
-            Some(changed) => changed,
-            None => return Ok(()),
-        };
+        let changed =
+            match changed_paths(repository, branch_id, incoming, self.config.history_limit).await {
+                Some(changed) => changed,
+                None => return Ok(()),
+            };
 
         let mut blocked: Vec<&LockData> = changed
             .iter()
@@ -175,10 +171,7 @@ fn refusal(blocked: &[&LockData]) -> String {
         .take(NAMED_FILES)
         .map(|lock| format!("{} (locked by {})", lock.resource.description, lock.owner))
         .collect();
-    let mut message = format!(
-        "Locked by another user: {}",
-        named.join(", ")
-    );
+    let mut message = format!("Locked by another user: {}", named.join(", "));
     if blocked.len() > NAMED_FILES {
         message.push_str(&format!(" and {} more", blocked.len() - NAMED_FILES));
     }
@@ -208,7 +201,9 @@ async fn changed_paths(
     if base == incoming {
         return Some(HashSet::new());
     }
-    let state_incoming = State::deserialize(repository.clone(), incoming).await.ok()?;
+    let state_incoming = State::deserialize(repository.clone(), incoming)
+        .await
+        .ok()?;
     if base.is_zero() {
         // A first push onto an empty branch: no file in it can have been locked yet.
         return None;
@@ -221,7 +216,10 @@ async fn changed_paths(
     let (_, changes) = match collected {
         Ok(collected) => collected,
         Err(err) => {
-            warn!(?err, "Lock guard couldn't diff the pushed revision; letting the push through");
+            warn!(
+                ?err,
+                "Lock guard couldn't diff the pushed revision; letting the push through"
+            );
             return None;
         }
     };
@@ -248,7 +246,10 @@ async fn branch_point(
     if incoming_ancestors.contains(&head) {
         return head;
     }
-    let head_ancestors: HashSet<Hash> = ancestors(repository, head, limit).await.into_iter().collect();
+    let head_ancestors: HashSet<Hash> = ancestors(repository, head, limit)
+        .await
+        .into_iter()
+        .collect();
     incoming_ancestors
         .into_iter()
         .find(|revision| head_ancestors.contains(revision))

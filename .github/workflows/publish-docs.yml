@@ -16,6 +16,8 @@ concurrency:
 
 jobs:
   build:
+    # Lore's documentation site belongs to Epic's repository; a fork doesn't publish it.
+    if: github.repository == 'EpicGames/lore'
     runs-on: ubuntu-latest
     permissions:
       contents: read # Clone the repository

@@ -324,4 +324,3 @@ func (s *Server) members(w http.ResponseWriter, r *http.Request) {
 		"local": local, "accounts": accounts, "groups": groups, "directory": s.config.Directory != nil,
 	})
 }
-
