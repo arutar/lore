@@ -2,5 +2,5 @@
   <title>Lore History</title>
   <desc>Revision history: clock.</desc>
   <g transform="matrix(2.1923 0 0 2.1923 -612.2 -612.2)"><circle cx="396" cy="396" r="104" fill="#8250DF" stroke="#FFFFFF" stroke-width="0"/>
-  <g transform="translate(396 396) scale(1)" fill="none" stroke="#FFFFFF" stroke-width="15.48" stroke-linecap="round" stroke-linejoin="round"><circle cx="0" cy="0" r="41.28"/><path d="M-2.96085 5.6939439 V-21.8260561"/><path d="M-2.96085 5.6939439 H17.67915"/></g></g>
+  <g transform="translate(396 396) scale(1.4)" fill="none" stroke="#FFFFFF" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"><circle cx="0" cy="0" r="41.28"/><path d="M-2.96085 5.6939439 V-21.8260561"/><path d="M-2.96085 5.6939439 H17.67915"/></g></g>
 </svg>

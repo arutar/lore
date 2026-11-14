@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Lore Accounts</title>
+  <desc>Sign-ins to Lore servers: person on teal.</desc>
+  <g transform="matrix(2.1923 0 0 2.1923 -612.2 -612.2)"><circle cx="396" cy="396" r="104" fill="#0A7E8C" stroke="#FFFFFF" stroke-width="0"/>
+  <g transform="translate(396 396) scale(1.08)" fill="none" stroke="#FFFFFF" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"><circle cx="0" cy="-24" r="27" fill="#FFFFFF" stroke="none"/>
+  <path d="M-50 60 C-50 22 -26 10 0 10 C26 10 50 22 50 60 Z" fill="#FFFFFF" stroke="none"/></g></g>
+</svg>

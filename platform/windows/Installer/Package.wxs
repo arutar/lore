@@ -66,7 +66,9 @@
       <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\*\shellex\ContextMenuHandlers\Lore" Value="{cc69a511-5c48-46bc-9a41-d14050831a93}" Type="string" />
       <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Directory\shellex\ContextMenuHandlers\Lore" Value="{cc69a511-5c48-46bc-9a41-d14050831a93}" Type="string" />
       <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Directory\Background\shellex\ContextMenuHandlers\Lore" Value="{cc69a511-5c48-46bc-9a41-d14050831a93}" Type="string" />
-      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Folder\shellex\ContextMenuHandlers\Lore" Value="{cc69a511-5c48-46bc-9a41-d14050831a93}" Type="string      <!-- Three leading spaces and the digits put Lore overlays ahead of other clients: Explorer uses only the first 15 (see LoreShell/Registration.cpp). -->
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Folder\shellex\ContextMenuHandlers\Lore" Value="{cc69a511-5c48-46bc-9a41-d14050831a93}" Type="string" />
+
+      <!-- Three leading spaces and the digits put Lore overlays ahead of other clients: Explorer uses only the first 15 (see LoreShell/Registration.cpp). -->
       <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\   Lore1Conflicted" Value="{9dcc2578-1112-455a-9af7-d28f18cea2b1}" Type="string" />
       <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\   Lore2Modified" Value="{b056f7b6-3445-46d0-b3e3-01573d936aba}" Type="string" />
       <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\   Lore3Locked" Value="{224f8e7b-61ba-4da3-97d3-6092d9c47a0b}" Type="string" />

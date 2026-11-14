@@ -16,6 +16,11 @@ constexpr UINT CommandHistory = 5;
 constexpr UINT CommandLock = 6;
 constexpr UINT CommandUnlock = 7;
 constexpr UINT CommandAccounts = 8;
+// Numbered as the Companion's operations, which these are passed as.
+constexpr UINT CommandUnstage = 9;
+constexpr UINT CommandRevert = 10;
+constexpr UINT CommandResolve = 11;
+constexpr UINT CommandLast = CommandResolve;
 
 std::wstring RepositoryRoot(std::wstring path)
 {
@@ -92,11 +97,12 @@ HBITMAP IconBitmap(int resource, int size)
 
 HBITMAP LoreMenuBitmap(int operation = -1)
 {
-    constexpr int operationCount = 9;
+    constexpr int operationCount = 12;
     if (operation < -1 || operation >= operationCount) return nullptr;
     constexpr int resources[operationCount + 1]{
         IDI_LORE, IDI_LORE_CLONE, IDI_LORE_SYNC, IDI_LORE_COMMIT,
-        IDI_LORE_STAGE, IDI_LORE_STATUS, IDI_LORE_HISTORY, IDI_LORE_LOCK, IDI_LORE_UNLOCK, IDI_LORE_STATUS,
+        IDI_LORE_STAGE, IDI_LORE_STATUS, IDI_LORE_HISTORY, IDI_LORE_LOCK, IDI_LORE_UNLOCK, IDI_LORE_ACCOUNTS,
+        IDI_LORE_UNSTAGE, IDI_LORE_REVERT, IDI_LORE_RESOLVE,
     };
     const int size = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem());
     static int cachedSize = 0;
@@ -248,6 +254,13 @@ STDMETHODIMP ContextMenu::QueryContextMenu(HMENU menu, UINT index, UINT first, U
     HMENU submenu = CreatePopupMenu();
     AppendMenuW(submenu, MF_STRING, first + CommandStage, L"Stage selected paths");
     SetLoreMenuIcon(submenu, first + CommandStage, CommandStage);
+    AppendMenuW(submenu, MF_STRING, first + CommandUnstage, L"Unstage");
+    SetLoreMenuIcon(submenu, first + CommandUnstage, CommandUnstage);
+    AppendMenuW(submenu, MF_STRING, first + CommandRevert, L"Revert changes...");
+    SetLoreMenuIcon(submenu, first + CommandRevert, CommandRevert);
+    AppendMenuW(submenu, MF_STRING, first + CommandResolve, L"Resolve conflicts...");
+    SetLoreMenuIcon(submenu, first + CommandResolve, CommandResolve);
+    AppendMenuW(submenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(submenu, MF_STRING, first + CommandStatus, L"Status");
     SetLoreMenuIcon(submenu, first + CommandStatus, CommandStatus);
     AppendMenuW(submenu, MF_STRING, first + CommandHistory, L"History");
@@ -266,14 +279,14 @@ STDMETHODIMP ContextMenu::QueryContextMenu(HMENU menu, UINT index, UINT first, U
     submenuInfo.hbmpItem = LoreMenuBitmap();
     SetMenuItemInfoW(menu, index + 3, TRUE, &submenuInfo);
     InsertMenuW(menu, next, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
-    return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, CommandAccounts + 1);
+    return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, CommandLast + 1);
 }
 
 STDMETHODIMP ContextMenu::InvokeCommand(CMINVOKECOMMANDINFO* info)
 {
     if (!info || HIWORD(info->lpVerb)) return E_INVALIDARG;
     const auto command = LOWORD(info->lpVerb);
-    if (command > CommandAccounts) return E_INVALIDARG;
+    if (command > CommandLast) return E_INVALIDARG;
     if (command == CommandClone && insideRepository_) return E_INVALIDARG;
     if (command != CommandClone && !insideRepository_) return E_INVALIDARG;
 

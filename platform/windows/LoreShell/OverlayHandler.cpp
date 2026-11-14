@@ -32,18 +32,39 @@ uint64_t HashPath(const std::wstring& input)
     return hash;
 }
 
+// The cache is a named section that exists only while some process holds a handle to it. The
+// companion fills it, but exits when its window closes; Explorer, which lives for the whole session,
+// therefore creates (or opens) the section once and keeps it — and with it the overlays — alive.
+const unsigned char* CacheView()
+{
+    static std::atomic<const unsigned char*> view{nullptr};
+    if (const auto* existing = view.load()) return existing;
+    constexpr auto size = 16 + Capacity * EntrySize;
+    HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, static_cast<DWORD>(size), MapName);
+    if (!mapping) return nullptr;
+    const auto* bytes = static_cast<const unsigned char*>(MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, size));
+    if (!bytes)
+    {
+        CloseHandle(mapping);
+        return nullptr;
+    }
+    const unsigned char* expected = nullptr;
+    if (!view.compare_exchange_strong(expected, bytes))
+    {
+        // Another thread got there first; keep its view and drop this one.
+        UnmapViewOfFile(bytes);
+        CloseHandle(mapping);
+        return expected;
+    }
+    return bytes; // the mapping handle is intentionally never closed
+}
+
 int Lookup(const std::wstring& path)
 {
     const auto hash = HashPath(path);
     if (!hash) return 0;
-    HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, MapName);
-    if (!mapping) return 0;
-    const auto* bytes = static_cast<const unsigned char*>(MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 16 + Capacity * EntrySize));
-    if (!bytes)
-    {
-        CloseHandle(mapping);
-        return 0;
-    }
+    const auto* bytes = CacheView();
+    if (!bytes) return 0;
     int32_t count = 0;
     memcpy(&count, bytes, sizeof(count));
     count = (std::max)(0, (std::min)(count, static_cast<int32_t>(Capacity)));
@@ -57,8 +78,6 @@ int Lookup(const std::wstring& path)
             break;
         }
     }
-    UnmapViewOfFile(bytes);
-    CloseHandle(mapping);
     return state;
 }
 }

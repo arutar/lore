@@ -13,6 +13,9 @@ public enum CompanionOperation
     Lock,
     Unlock,
     Accounts,
+    Unstage,
+    Revert,
+    Resolve,
 }
 
 public sealed class OperationRequest
@@ -22,6 +25,13 @@ public sealed class OperationRequest
     public string RepositoryUrl { get; set; } = "";
     public string TargetPath { get; set; } = "";
     public string Message { get; set; } = "";
+    /// <summary>How to go on after the operation stopped to ask (ChoiceRequired): "commit" or
+    /// "unstage" for staged files, "mine" or "theirs" for files changed here and on the server.
+    /// Empty on the first run.</summary>
+    public string Choice { get; set; } = "";
+    /// <summary>The files the user saw when choosing (relative to the repository root). A choice
+    /// applies only to these: a file that turned up since is asked about again.</summary>
+    public string[] Files { get; set; } = [];
 
     public static OperationRequest Parse(string json)
     {
@@ -47,6 +57,18 @@ public sealed class OperationRequest
         if (Operation != CompanionOperation.Clone && Operation != CompanionOperation.Accounts && Paths.Length == 0)
         {
             throw new InvalidDataException("Select a repository path");
+        }
+        if (Choice is not ("" or "commit" or "unstage" or "mine" or "theirs"))
+        {
+            throw new InvalidDataException("Choice isn't supported");
+        }
+        if (Files.Length > 100_000 || Files.Any(file => string.IsNullOrWhiteSpace(file) || file.Length > 32_768 || Path.IsPathRooted(file) || file.Split('\\', '/').Contains("..")))
+        {
+            throw new InvalidDataException("Request contains an invalid file");
+        }
+        if (Operation == CompanionOperation.Resolve && forExecution && Message is not ("mine" or "theirs"))
+        {
+            throw new InvalidDataException("Choose which version to keep");
         }
         if (Operation == CompanionOperation.Clone && (forExecution && string.IsNullOrWhiteSpace(TargetPath) || !string.IsNullOrWhiteSpace(TargetPath) && !Path.IsPathFullyQualified(TargetPath)))
         {

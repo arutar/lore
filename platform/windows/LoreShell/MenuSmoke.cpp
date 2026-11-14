@@ -62,12 +62,12 @@ bool TestPath(GetClass getClass, const wchar_t* path, int expectedCount)
         icons = icons && HasIcon(menu, 2) && HasIcon(menu, 3) && submenu;
         if (submenu)
         {
-            for (UINT position : {0u, 1u, 2u, 4u, 5u, 7u}) icons = icons && HasIcon(submenu, position);
+            for (UINT position : {0u, 1u, 2u, 3u, 5u, 6u, 8u, 9u, 11u}) icons = icons && HasIcon(submenu, position);
         }
     }
     context->Release();
     DestroyMenu(menu);
-    const bool commandRange = expectedCount != 5 || HRESULT_CODE(result) == 9;
+    const bool commandRange = expectedCount != 5 || HRESULT_CODE(result) == 12;
     return SUCCEEDED(result) && count == expectedCount && icons && grouped && commandRange;
 }
 

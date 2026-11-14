@@ -4,6 +4,7 @@ public static class OperationError
 {
     public static string UserMessage(Exception exception, CompanionOperation operation)
     {
+        if (exception is CompanionException) return exception.Message;
         if (exception is TaskCanceledException) return "The server did not answer in time. Check the connection and try again.";
         if (exception is OperationCanceledException) return "The operation was canceled.";
         if (exception is InvalidDataException or ArgumentException) return exception.Message;
@@ -50,6 +51,9 @@ public static class OperationError
             CompanionOperation.History => "The revision history could not be loaded. Check the repository and server connection.",
             CompanionOperation.Lock => "The locks could not be acquired. Check the selected paths and existing locks.",
             CompanionOperation.Unlock => "The locks could not be released. Check the selected paths and lock ownership.",
+            CompanionOperation.Unstage => "The selected files could not be unstaged. Check that they belong to this repository.",
+            CompanionOperation.Revert => "The selected files could not be reverted. Your changes are still in place.",
+            CompanionOperation.Resolve => "The conflicts could not be resolved. Check the selected files and try again.",
             _ => "The operation could not be completed. Check the repository and try again.",
         };
     }

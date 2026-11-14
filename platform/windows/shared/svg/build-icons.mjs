@@ -21,6 +21,7 @@ const C = {
   green: '#2EA043',     // clone, sync, commit, success, update, unlock
   deepBlue: '#1F6FEB',  // stage, status, info, staged overlay
   purple: '#8250DF',    // history
+  teal: '#0A7E8C',      // accounts
   amber: '#D29922',     // locked overlay
   orange: '#DB6D28',    // modified overlay
   red: '#CF222E',       // error, conflicted overlay, uninstaller
@@ -65,7 +66,9 @@ function badge(color, symbol, { cx = 396, cy = 396, r = 104, ring = 20, scale = 
 }
 
 // ---- overlay badge, lower left corner ---------------------------------------
-function overlay(color, symbol, { cx = 150, cy = 362, r = 132, ring = 24, scale = 1.15, stroke = 30 } = {}) {
+// About 70 % of the icon (outer edge 184 of 512), touching the lower left corner: at 16 px the
+// symbol must still read next to the file icon. The white ring separates it from the icon below.
+function overlay(color, symbol, { cx = 186, cy = 326, r = 162, ring = 22, scale = 1.41, stroke = 30 } = {}) {
   return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${color}" stroke="${C.white}" stroke-width="${ring}"/>
   <g transform="translate(${cx} ${cy}) scale(${scale})" fill="none" stroke="${C.white}" stroke-width="${stroke}" stroke-linecap="round" stroke-linejoin="round">${symbol}</g>`;
 }
@@ -86,6 +89,8 @@ const sym = {
   cross: `<path d="M-42 -42 L42 42"/><path d="M42 -42 L-42 42"/>`,
   lock: (open) => `<rect x="-46" y="-6" width="92" height="70" rx="14" fill="${C.white}" stroke="none"/>
   <path d="M-26 -6 V-40 A${open ? '28 28' : '26 26'} 0 0 1 ${open ? 28 : 26} ${open ? -42 : -40} V${open ? -22 : -6}" stroke-width="20"/>`,
+  person: `<circle cx="0" cy="-24" r="27" fill="${C.white}" stroke="none"/>
+  <path d="M-50 60 C-50 22 -26 10 0 10 C26 10 50 22 50 60 Z" fill="${C.white}" stroke="none"/>`,
   terminal: `<path d="M-46 -34 L-10 0 L-46 34" stroke-width="24"/><path d="M6 34 H50" stroke-width="24"/>`,
   pencil: (color) => `<g transform="rotate(-45)" fill="${C.white}" stroke="none">
     <path d="M-78 0 L-40 -22 L-40 22 Z"/>
@@ -173,9 +178,14 @@ command('sync', 'Lore Sync', 'Sync a repository: green circular arrows.', C.gree
 command('commit', 'Lore Commit', 'Commit changes: green arrow up.', C.green, sym.commit);
 command('stage', 'Lore Stage', 'Stage selected paths: blue plus.', C.deepBlue, sym.plus);
 command('status', 'Lore Status', 'Repository status: information sign.', C.deepBlue, sym.info);
-command('history', 'Lore History', 'Revision history: clock.', C.purple, historySymbol, { scale: 1, stroke: 15.48 });
+command('history', 'Lore History', 'Revision history: clock.', C.purple, historySymbol, { scale: 1.4, stroke: 15 });
 command('lock', 'Lore Acquire Locks', 'Acquire locks: closed padlock.', C.muted, sym.lock(false));
+command('accounts', 'Lore Accounts', 'Sign-ins to Lore servers: person on teal.', C.teal, sym.person, { scale: 1.08 });
 command('unlock', 'Lore Release Locks', 'Release locks: open padlock.', C.green, sym.lock(true));
+command('unstage', 'Lore Unstage', 'Take files out of the next commit: blue minus.', C.deepBlue, sym.minus);
+command('revert', 'Lore Revert', 'Discard local changes: orange arrow turning back.', C.orange, arcArrow(50, 70, -200, 28, 19, false));
+command('resolve', 'Lore Resolve Conflicts', 'Choose a version for conflicting files: two lines joining on red.', C.red,
+  `<path d="M-40 -56 V-22 C-40 4 0 8 0 30 V58"/><path d="M40 -56 V-22 C40 4 0 8 0 30"/>`);
 out.set('folder-open', doc('Select folder', 'Open folder used to pick a directory.', folder()));
 
 // ---- Explorer: state overlays, lower left corner ----------------------------
@@ -191,8 +201,12 @@ out.set('overlay-ignored', doc('Lore ignored', 'Grey minus overlay for the lower
   overlay(C.grey, sym.minus)));
 out.set('overlay-staged-modified', doc('Lore staged and modified',
   'Blue plus badge with an orange pencil badge for the lower left corner of a file icon.',
-  `${overlay(C.orange, sym.pencil(C.orange), { cx: 256, cy: 256, r: 72, ring: 20, scale: 0.62, stroke: 22 })}
-  ${overlay(C.deepBlue, sym.plus, { cx: 120, cy: 392, r: 104, ring: 24, scale: 0.9, stroke: 32 })}`));
+  // The blue plus at the size of every other overlay, so the file reads as "staged" like the others;
+  // the pencil sits above it on the right as a smaller second badge.
+  `${overlay(C.orange, sym.pencil(C.orange), { cx: 382, cy: 130, r: 104, ring: 20, scale: 0.9, stroke: 26 })}
+  ${overlay(C.deepBlue, sym.plus)}`));
+out.set('overlay-clean', doc('Lore clean', 'Green check overlay for the lower left corner of a working copy folder.',
+  overlay(C.green, sym.check, { scale: 1.25, stroke: 34 })));
 
 // ---- Interface states -------------------------------------------------------
 out.set('success', doc('Success', 'Green check.', stateIcon(C.green, successSymbol, { scale: 1.7 })));

@@ -12,30 +12,30 @@ internal sealed class WebViewOperationWindow : Window
     private readonly OperationRequest request;
     private readonly ClientSettings settings = ClientSettings.Load();
     private readonly WebView2 webView = new();
-    private readonly int baseHeight;
+    // The page reports its natural height ("size") and the window follows it, so each dialog is
+    // as tall as its content instead of one fixed size with empty space. Once the user resizes the
+    // window by hand, it keeps that size.
+    private bool fitted;
+    private bool userSized;
+    private double fittedHeight;
     private bool running;
     private WebViewOperationWindow? accountsWindow;
 
     public WebViewOperationWindow(OperationRequest request)
     {
         this.request = request;
-        baseHeight = request.Operation switch
-        {
-            CompanionOperation.Clone => 340,
-            CompanionOperation.Sync => 340,
-            CompanionOperation.Commit => 500,
-            CompanionOperation.Status => 450,
-            CompanionOperation.History => 420,
-            CompanionOperation.Accounts => 600,
-            _ => 430,
-        };
         Title = $"Lore {request.Operation}";
-        Width = 620;
-        Height = baseHeight;
+        // Wide where paths, URLs or revision IDs are shown; narrower for short confirmations.
+        Width = request.Operation is CompanionOperation.Clone or CompanionOperation.Commit or CompanionOperation.History ? 620 : 560;
+        Height = 360; // until the page reports its height
         MinWidth = 480;
-        MinHeight = 340;
+        MinHeight = 220;
+        SizeChanged += (_, _) =>
+        {
+            if (fitted && Math.Abs(ActualHeight - fittedHeight) > 2) userSized = true;
+        };
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        Icon = new System.Windows.Media.Imaging.BitmapImage(new Uri("pack://application:,,,/lore.ico"));
+        Icon = new System.Windows.Media.Imaging.BitmapImage(new Uri("pack://application:,,,/app.ico"));
         SourceInitialized += (_, _) => ApplyWindowTheme();
         Content = webView;
         if (request.Operation == CompanionOperation.Clone && string.IsNullOrWhiteSpace(request.TargetPath) && request.Paths.Length > 0)
@@ -55,7 +55,8 @@ internal sealed class WebViewOperationWindow : Window
 
     private void ApplyWindowTheme()
     {
-        var dark = settings.Theme == "midnight" ? 1 : 0;
+        // Every theme but Light is dark; the title bar follows.
+        var dark = settings.Theme == "light" ? 0 : 1;
         DwmSetWindowAttribute(new WindowInteropHelper(this).Handle, 20, ref dark, sizeof(int));
     }
 
@@ -181,8 +182,12 @@ internal sealed class WebViewOperationWindow : Window
                             : "The saved sign-in was deleted from this computer. The server couldn't be reached to end its session; it expires on its own.",
                     });
                     break;
+                case "size":
+                    FitHeight(root.GetProperty("height").GetDouble());
+                    break;
                 case "theme-set":
                     settings.SetTheme(root.GetProperty("theme").GetString() ?? "");
+                    ApplyWindowTheme();
                     Send(new { type = "theme", theme = settings.Theme });
                     break;
                 case "cancel":
@@ -191,7 +196,10 @@ internal sealed class WebViewOperationWindow : Window
                 case "run":
                     if (!running)
                     {
-                        await Run(root.GetProperty("repositoryUrl").GetString(), root.GetProperty("targetPath").GetString(), root.GetProperty("message").GetString());
+                        var choice = root.TryGetProperty("choice", out var chosen) ? chosen.GetString() ?? "" : "";
+                        var files = root.TryGetProperty("files", out var listed) && listed.ValueKind == JsonValueKind.Array
+                            ? listed.EnumerateArray().Select(file => file.GetString() ?? "").ToArray() : [];
+                        await Run(root.GetProperty("repositoryUrl").GetString(), root.GetProperty("targetPath").GetString(), root.GetProperty("message").GetString(), choice, files);
                     }
                     break;
             }
@@ -228,18 +236,41 @@ internal sealed class WebViewOperationWindow : Window
         });
     }
 
-    private async Task Run(string? repositoryUrl, string? targetPath, string? message)
+    private void FitHeight(double content)
+    {
+        if (userSized || content <= 0) return;
+        // Title bar and borders: the window's height minus the page's.
+        var chrome = ActualHeight - webView.ActualHeight;
+        if (chrome <= 0 || webView.ActualHeight <= 0) chrome = SystemParameters.WindowCaptionHeight + 16;
+        var area = SystemParameters.WorkArea;
+        var target = Math.Ceiling(Math.Clamp(content + chrome, MinHeight, area.Height * 0.9));
+        if (fitted && Math.Abs(target - ActualHeight) < 1) return;
+        var first = !fitted;
+        fitted = true;
+        fittedHeight = target;
+        Height = target;
+        // The window was centred for its provisional height; centre it again for the real one.
+        if (first) Top = area.Top + Math.Max(0, (area.Height - target) / 2);
+    }
+
+    private async Task Run(string? repositoryUrl, string? targetPath, string? message, string choice, string[] files)
     {
         request.RepositoryUrl = repositoryUrl?.Trim() ?? "";
         request.TargetPath = targetPath?.Trim() ?? "";
         request.Message = message?.Trim() ?? "";
+        request.Choice = choice;
+        request.Files = files;
         try
         {
             request.Validate();
             running = true;
-            Height = baseHeight + 140;
-            await LoreOperations.ExecuteAsync(request, text => Send(new { type = "progress", text }), CancellationToken.None);
-            Send(new { type = "complete", text = CompletionText() });
+            var outcome = await LoreOperations.ExecuteAsync(request, text => Send(new { type = "progress", text }), CancellationToken.None);
+            Send(new { type = "complete", text = outcome.Summary ?? CompletionText(), warning = outcome.Warning });
+        }
+        catch (ChoiceRequired question)
+        {
+            // Nothing the question is about was changed; the page shows the files and the ways forward.
+            Send(new { type = "choice", kind = question.Kind, files = question.Files, text = question.Message, merged = question.Merged });
         }
         catch (Exception exception)
         {
@@ -261,6 +292,9 @@ internal sealed class WebViewOperationWindow : Window
         CompanionOperation.History => "Revision history updated.",
         CompanionOperation.Lock => "Locks acquired for the selected paths.",
         CompanionOperation.Unlock => "Locks released for the selected paths.",
+        CompanionOperation.Unstage => "The selected files are no longer staged; their changes are kept.",
+        CompanionOperation.Revert => "The selected files were reverted.",
+        CompanionOperation.Resolve => "Conflicts resolved.",
         _ => "Operation completed.",
     };
 

@@ -53,6 +53,7 @@ zero overlap.
 | `#0D1117` | main sign mark, terminal badge fill |
 | `#2EA043` | clone, sync, commit, success, update, installer, unlock |
 | `#1F6FEB` | stage, status, info, staged overlay |
+| `#0A7E8C` | accounts |
 | `#8250DF` | history |
 | `#D29922` | locked overlay |
 | `#DB6D28` | modified overlay |
@@ -83,6 +84,7 @@ zero overlap.
 | `history.svg` | none, menu command (full circle, no white ring) | purple clock |
 | `lock.svg` | none, menu command (full circle, no white ring) | grey closed padlock |
 | `unlock.svg` | none, menu command (full circle, no white ring) | green open padlock |
+| `accounts.svg` | none, menu command (full circle, no white ring) | white person on teal |
 | `folder-open.svg` | none | folder, used for choosing a directory |
 | `overlay-modified.svg` | none | orange pencil |
 | `overlay-staged.svg` | none | blue plus |

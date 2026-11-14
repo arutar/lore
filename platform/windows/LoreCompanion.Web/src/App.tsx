@@ -5,14 +5,19 @@ import errorIcon from "../../shared/svg/error.svg?url";
 import folderIcon from "../../shared/svg/folder-open.svg?url";
 import historyIcon from "../../shared/svg/history.svg?url";
 import lockIcon from "../../shared/svg/lock.svg?url";
-import loreIcon from "../../shared/svg/lore.svg?url";
+import loreIcon from "../../shared/svg/app.svg?url";
+import accountsIcon from "../../shared/svg/accounts.svg?url";
 import stageIcon from "../../shared/svg/stage.svg?url";
 import statusIcon from "../../shared/svg/status.svg?url";
 import successIcon from "../../shared/svg/success.svg?url";
 import syncIcon from "../../shared/svg/sync.svg?url";
 import unlockIcon from "../../shared/svg/unlock.svg?url";
+import unstageIcon from "../../shared/svg/unstage.svg?url";
+import revertIcon from "../../shared/svg/revert.svg?url";
+import resolveIcon from "../../shared/svg/resolve.svg?url";
+import warningIcon from "../../shared/svg/warning.svg?url";
 
-const Operation = { Clone: 0, Sync: 1, Commit: 2, Stage: 3, Status: 4, History: 5, Lock: 6, Unlock: 7, Accounts: 8 } as const;
+const Operation = { Clone: 0, Sync: 1, Commit: 2, Stage: 3, Status: 4, History: 5, Lock: 6, Unlock: 7, Accounts: 8, Unstage: 9, Revert: 10, Resolve: 11 } as const;
 type OperationValue = typeof Operation[keyof typeof Operation];
 type StoredAccount = { authUrl: string; userId: string; username: string; domains: string; selected: boolean };
 
@@ -26,17 +31,24 @@ type InitMessage = {
   paths: string[];
   theme: string;
 };
+// The operation stopped to ask (ChoiceRequired in LoreOperations.cs); nothing it asks about was changed.
+type ChoiceMessage = { type: "choice"; kind: "staged" | "both"; files: string[]; text: string; merged: boolean };
+type Choice = "commit" | "unstage" | "mine" | "theirs";
+// A step that deletes the user's changes waits for this confirmation.
+type Confirmation = { files: string[]; text: string; action: string; run: () => void };
 type HostMessage = InitMessage
   | { type: "progress"; text: string }
-  | { type: "complete"; text: string }
+  | { type: "complete"; text: string; warning?: boolean }
   | { type: "error"; text: string; accessDenied?: boolean }
+  | ChoiceMessage
   | { type: "accounts"; items: StoredAccount[] }
   | { type: "directory"; path: string }
   | { type: "theme"; theme: string };
 type ClientMessage = { type: "ready" } | { type: "browse" } | { type: "cancel" } | { type: "accounts-open" }
   | { type: "accounts-add"; remoteUrl: string } | { type: "accounts-select"; userId: string }
   | { type: "accounts-remove"; authUrl: string; userId: string } | { type: "theme-set"; theme: string }
-  | { type: "run"; repositoryUrl: string; targetPath: string; message: string };
+  | { type: "size"; height: number }
+  | { type: "run"; repositoryUrl: string; targetPath: string; message: string; choice?: Choice; files?: string[] };
 
 interface WebViewBridge {
   postMessage(message: ClientMessage): void;
@@ -47,21 +59,72 @@ declare global { interface Window { chrome?: { webview?: WebViewBridge } } }
 
 const info: Record<OperationValue, { title: string; subtitle: string; action: string; icon: string }> = {
   [Operation.Clone]: { title: "Clone repository", subtitle: "Create a local copy of a Lore repository.", action: "Clone", icon: cloneIcon },
-  [Operation.Sync]: { title: "Sync repository", subtitle: "Update the working copy from the Lore server.", action: "Sync", icon: syncIcon },
-  [Operation.Commit]: { title: "Commit changes", subtitle: "Record selected changes in a new revision.", action: "Commit", icon: commitIcon },
+  [Operation.Sync]: { title: "Sync repository", subtitle: "Download what others sent to the server and send your commits.", action: "Sync", icon: syncIcon },
+  [Operation.Commit]: { title: "Commit changes", subtitle: "Record the selected changes in a new revision and send it to the server.", action: "Commit", icon: commitIcon },
   [Operation.Stage]: { title: "Stage paths", subtitle: "Prepare selected files for the next commit.", action: "Stage", icon: stageIcon },
   [Operation.Status]: { title: "Repository status", subtitle: "Inspect the current working copy.", action: "Refresh", icon: statusIcon },
   [Operation.History]: { title: "Revision history", subtitle: "Recent revisions in this repository.", action: "Refresh", icon: historyIcon },
   [Operation.Lock]: { title: "Acquire locks", subtitle: "Prevent conflicting edits to selected files.", action: "Acquire locks", icon: lockIcon },
   [Operation.Unlock]: { title: "Release locks", subtitle: "Release locks held on selected files.", action: "Release locks", icon: unlockIcon },
+  [Operation.Unstage]: { title: "Unstage", subtitle: "Take the selected files out of the next commit. Their changes stay.", action: "Unstage", icon: unstageIcon },
+  [Operation.Revert]: { title: "Revert changes", subtitle: "Discard your changes to the selected files and restore the last synced version.", action: "Revert…", icon: revertIcon },
+  [Operation.Resolve]: { title: "Resolve conflicts", subtitle: "You and someone else changed the same files. Choose which version to keep.", action: "Resolve", icon: resolveIcon },
   [Operation.Accounts]: { title: "Accounts", subtitle: "One sign-in per Lore server. Signing in as another user signs out the previous one.", action: "Sign in", icon: statusIcon },
 };
 // The same themes as the WebUI (platform/web/src/themes.css).
-const themes: [string, string][] = [["midnight", "Midnight"], ["sky", "Sky"], ["ember", "Ember"], ["sage", "Sage"], ["aurora", "Aurora"],
+const themes: [string, string][] = [["midnight", "Midnight"], ["sky", "Sky"], ["ember", "Ember"], ["sage", "Sage"],
   ["ocean", "Ocean"], ["retro", "Retro"], ["autumn", "Autumn"], ["light", "Light"], ["cyberpunk", "Cyberpunk"]];
 const post = (message: ClientMessage) => window.chrome?.webview?.postMessage(message);
 
+const discardText = "Your changes to these files will be deleted and can't be restored. If you need them, copy the files somewhere else first.";
+
+// The ways forward for each question, safest first; "danger" ones delete the user's changes and
+// are confirmed separately.
+function choiceOptions(question: ChoiceMessage): { choice: Choice; label: string; hint: string; danger?: boolean }[] {
+  if (question.kind === "staged") return [
+    { choice: "commit", label: "Commit and sync", hint: "Commits these files, then syncs and sends the commit to the server." },
+    { choice: "unstage", label: "Sync without committing", hint: "Your changes stay in the files; commit them later." },
+  ];
+  return [
+    { choice: "mine", label: "Keep my version", hint: question.merged
+      ? "Your version replaces the server's, and the merge is sent to the server."
+      : "Commits your version and sends it. If Lore can merge both changes, both are kept; otherwise yours replaces the server's." },
+    { choice: "theirs", label: "Take the server's version", hint: "Discards your changes to these files.", danger: true },
+  ];
+}
+
+// Reports the dialog's natural height to the host, which sizes the window to it. The layout
+// normally stretches to the window (footer at the bottom, the account list filling the rest);
+// "measuring" switches that off for one synchronous layout pass, so nothing flickers.
+function useFitWindow() {
+  useEffect(() => {
+    let frame = 0;
+    let last = 0;
+    const measure = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const dialog = document.querySelector<HTMLElement>(".dialog");
+        if (!dialog) return;
+        document.documentElement.classList.add("measuring");
+        const height = Math.ceil(dialog.getBoundingClientRect().height);
+        document.documentElement.classList.remove("measuring");
+        if (height !== last) {
+          last = height;
+          post({ type: "size", height });
+        }
+      });
+    };
+    const resize = new ResizeObserver(measure);
+    resize.observe(document.body);
+    const mutation = new MutationObserver(measure);
+    mutation.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
+    measure();
+    return () => { cancelAnimationFrame(frame); resize.disconnect(); mutation.disconnect(); };
+  }, []);
+}
+
 export default function App() {
+  useFitWindow();
   const [config, setConfig] = useState<InitMessage | null>(null);
   const operationRef = useRef<OperationValue>(Operation.Clone);
   const [repositoryUrl, setRepositoryUrl] = useState("");
@@ -72,20 +135,26 @@ export default function App() {
   const [error, setError] = useState("");
   const [accessDenied, setAccessDenied] = useState(false);
   const [success, setSuccess] = useState("");
+  const [warning, setWarning] = useState(false);
   const [statuses, setStatuses] = useState<Record<string, number>>({});
   const [revisions, setRevisions] = useState<{ number: string; id: string }[]>([]);
   const [accounts, setAccounts] = useState<StoredAccount[]>([]);
   const [theme, setTheme] = useState("midnight");
+  const [question, setQuestion] = useState<ChoiceMessage | null>(null);
+  const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
 
-  const start = (current: InitMessage) => {
+  const start = (current: InitMessage, answer?: { choice: Choice; files: string[] }) => {
     setRunning(true);
+    setQuestion(null);
+    setConfirmation(null);
     setLogs([]);
     setError("");
     setAccessDenied(false);
     setSuccess("");
+    setWarning(false);
     setStatuses({});
     setRevisions([]);
-    post({ type: "run", repositoryUrl: current.repositoryUrl, targetPath: current.targetPath, message: current.message });
+    post({ type: "run", repositoryUrl: current.repositoryUrl, targetPath: current.targetPath, message: current.message, ...answer });
   };
 
   useEffect(() => {
@@ -99,7 +168,9 @@ export default function App() {
         setRepositoryUrl(data.repositoryUrl);
         setTargetPath(data.targetPath);
         setMessage(data.message);
-        if (data.operation !== Operation.Clone && data.operation !== Operation.Commit && data.operation !== Operation.Accounts) start(data);
+        // Operations that change or discard work wait for the user; the rest start at once.
+        const waits: OperationValue[] = [Operation.Clone, Operation.Commit, Operation.Accounts, Operation.Revert, Operation.Resolve];
+        if (!waits.includes(data.operation)) start(data);
       } else if (data.type === "theme") {
         document.documentElement.dataset.theme = data.theme;
         setTheme(data.theme);
@@ -120,6 +191,10 @@ export default function App() {
       } else if (data.type === "complete") {
         setRunning(false);
         setSuccess(data.text);
+        setWarning(Boolean(data.warning));
+      } else if (data.type === "choice") {
+        setRunning(false);
+        setQuestion(data);
       } else if (data.type === "error") {
         setRunning(false);
         setError(data.text);
@@ -148,7 +223,7 @@ export default function App() {
     post({ type: "accounts-add", remoteUrl: repositoryUrl });
   };
   if (config.operation === Operation.Accounts) return <main className="dialog accounts">
-    <header className="header"><img className="operation-icon" src={loreIcon} alt="" /><div><h1>{current.title}</h1><p>{current.subtitle}</p></div></header>
+    <header className="header"><img className="operation-icon" src={accountsIcon} alt="" /><div><h1>{current.title}</h1><p>{current.subtitle}</p></div></header>
     <form className="account-form" onSubmit={addAccount}>
       <label><span>Lore server</span><span className="directory-row"><input required disabled={running} value={repositoryUrl}
         onChange={(event) => setRepositoryUrl(event.target.value)} placeholder="lore://localhost" />
@@ -181,9 +256,33 @@ export default function App() {
     }
     start({ ...config, repositoryUrl, targetPath, message });
   };
-  const hasPaths = config.operation === Operation.Commit || config.operation === Operation.Stage
-    || config.operation === Operation.Lock || config.operation === Operation.Unlock;
+  const hasPaths = ([Operation.Commit, Operation.Stage, Operation.Lock, Operation.Unlock, Operation.Unstage, Operation.Revert, Operation.Resolve] as OperationValue[])
+    .includes(config.operation);
+  const resolve = (choice: "mine" | "theirs") => {
+    if (!window.chrome?.webview) {
+      setError("The WebView2 bridge is unavailable.");
+      return;
+    }
+    start({ ...config, repositoryUrl, targetPath, message: choice });
+  };
   const statusCount = (name: string) => statuses[name] ?? 0;
+  const answer = (choice: Choice, files: string[], danger?: boolean) => {
+    const run = () => start({ ...config, repositoryUrl, targetPath, message }, { choice, files });
+    if (danger) setConfirmation({ files, text: discardText, action: "Discard and take the server's version", run });
+    else run();
+  };
+
+  if (confirmation) return <main className="dialog">
+    <header className="header"><img className="operation-icon" src={warningIcon} alt="" /><div><h1>Discard your changes?</h1><p>{current.title}</p></div></header>
+    <div className="form">
+      <div className="alert danger" role="alert"><img src={errorIcon} alt="" /><span>{confirmation.text}</span></div>
+      <label><span>Files · {confirmation.files.length}</span><ul className="path-list">{confirmation.files.map((path) => <li key={path}>{path}</li>)}</ul></label>
+      <footer className="actions">
+        <button className="button secondary" type="button" autoFocus onClick={() => setConfirmation(null)}>Cancel</button>
+        <button className="button danger solid" type="button" onClick={confirmation.run}>{confirmation.action}</button>
+      </footer>
+    </div>
+  </main>;
 
   return (
     <main className="dialog">
@@ -201,11 +300,13 @@ export default function App() {
               <img src={folderIcon} alt="" />Browse</button></span></label>
         </> : <label><span>Repository</span><input value={config.repositoryPath} readOnly /></label>}
 
-        {config.operation === Operation.Sync && <div className="summary">The server revision will be downloaded and integrated into this working copy. Local staged changes are preserved whenever possible.</div>}
-        {hasPaths && <label><span>Selected paths · {config.paths.length}</span><ul className="path-list">{config.paths.map((path) => <li key={path}>{path}</li>)}</ul></label>}
-        {config.operation === Operation.Commit && <label><span>Commit message (optional)</span><textarea disabled={running} value={message}
+        {config.operation === Operation.Sync && !question && <div className="summary">If files are staged, or changed both here and on the server, Sync asks what to do before it changes them.</div>}
+        {config.operation === Operation.Revert && !question && <div className="summary">Your changes to the selected files are deleted and can't be restored. You'll be asked to confirm. New files the server doesn't have yet are left in place.</div>}
+        {config.operation === Operation.Resolve && !question && <div className="summary">Choose your version or the server's for the selected files. When no conflict is left, the merge is committed and sent to the server.</div>}
+        {hasPaths && !question && <label><span>Selected paths · {config.paths.length}</span><ul className="path-list">{config.paths.map((path) => <li key={path}>{path}</li>)}</ul></label>}
+        {config.operation === Operation.Commit && !question && <label><span>Commit message (optional)</span><textarea disabled={running} value={message}
           onChange={(event) => setMessage(event.target.value)} placeholder="Describe the changes" /></label>}
-        {(config.operation === Operation.Stage || config.operation === Operation.Lock || config.operation === Operation.Unlock)
+        {(config.operation === Operation.Stage || config.operation === Operation.Unstage || config.operation === Operation.Lock || config.operation === Operation.Unlock)
           && <div className="summary">Only the selected paths will be changed. This operation does not create a revision.</div>}
 
         {config.operation === Operation.Status && <>
@@ -220,15 +321,29 @@ export default function App() {
           ? <ul className="history-list">{revisions.map((revision) => <li key={revision.number}><span className="revision">#{revision.number}</span><div className="revision-id">{revision.id}</div></li>)}</ul>
           : <div className="summary">{running ? "Loading revision history…" : "Select Refresh to load revision history."}</div>)}
 
+        {question && !running && <div className="choice" role="group" aria-label="Choose how to go on">
+          <div className="alert warning"><img src={warningIcon} alt="" /><span>{question.text}</span></div>
+          <label><span>Files · {question.files.length}</span><ul className="path-list">{question.files.map((path) => <li key={path}>{path}</li>)}</ul></label>
+          <div className="options">{choiceOptions(question).map((option) =>
+            <button key={option.choice} type="button" className={`option${option.danger ? " danger" : ""}`} onClick={() => answer(option.choice, question.files, option.danger)}>
+              <strong>{option.label}{option.danger ? "…" : ""}</strong><span>{option.hint}</span></button>)}</div>
+          {question.merged && <div className="summary">If you cancel, these files stay in conflict: Sync and Commit wait until you choose (Lore &gt; Resolve conflicts).</div>}
+        </div>}
         {running && <div className="progress" role="progressbar" aria-label="Running operation"><span /></div>}
         {error && <div className="alert error" role="alert"><img src={errorIcon} alt="" /><div className="alert-content"><span>{error}</span>{accessDenied && <button className="button secondary error-action" type="button" onClick={() => post({ type: "accounts-open" })}>Sign in with another account</button>}</div></div>}
-        {success && <div className="alert success" role="status"><img src={successIcon} alt="" /><span>{success}</span></div>}
+        {success && <div className={`alert ${warning ? "warning" : "success"}`} role="status"><img src={warning ? warningIcon : successIcon} alt="" /><span>{success}</span></div>}
         {logs.length > 0 && config.operation !== Operation.History && <pre className="output" aria-live="polite">{logs.join("\n")}</pre>}
 
         <footer className="actions">
-          {success && config.operation !== Operation.Status && config.operation !== Operation.History ? <button className="button primary" type="button" onClick={() => post({ type: "cancel" })}>OK</button> : <>
+          {question && !running ? <button className="button secondary" type="button" autoFocus onClick={() => post({ type: "cancel" })}>Cancel</button>
+          : success && config.operation !== Operation.Status && config.operation !== Operation.History ? <button className="button primary" type="button" onClick={() => post({ type: "cancel" })}>OK</button> : <>
             <button className="button secondary" type="button" disabled={running} onClick={() => post({ type: "cancel" })}>{error ? "Close" : "Cancel"}</button>
-            <button className="button primary" type="submit" disabled={running}>{running ? "Working…" : error ? "Retry" : current.action}</button>
+            {config.operation === Operation.Resolve ? <>
+              <button className="button danger" type="button" disabled={running} onClick={() => setConfirmation({ files: config.paths, text: discardText, action: "Discard and take the server's version", run: () => resolve("theirs") })}>Use the server's version…</button>
+              <button className="button primary" type="button" disabled={running} onClick={() => resolve("mine")}>{running ? "Working…" : "Keep my version"}</button>
+            </> : config.operation === Operation.Revert && !error
+              ? <button className="button danger solid" type="button" disabled={running} onClick={() => setConfirmation({ files: config.paths, text: discardText, action: "Discard changes", run: () => start({ ...config, repositoryUrl, targetPath, message }) })}>{running ? "Working…" : current.action}</button>
+              : <button className="button primary" type="submit" disabled={running}>{running ? "Working…" : error ? "Retry" : current.action}</button>}
           </>}
         </footer>
       </form>

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Lore Resolve Conflicts</title>
+  <desc>Choose a version for conflicting files: two lines joining on red.</desc>
+  <g transform="matrix(2.1923 0 0 2.1923 -612.2 -612.2)"><circle cx="396" cy="396" r="104" fill="#CF222E" stroke="#FFFFFF" stroke-width="0"/>
+  <g transform="translate(396 396) scale(0.86)" fill="none" stroke="#FFFFFF" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"><path d="M-40 -56 V-22 C-40 4 0 8 0 30 V58"/><path d="M40 -56 V-22 C40 4 0 8 0 30"/></g></g>
+</svg>

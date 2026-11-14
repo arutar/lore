@@ -5,7 +5,7 @@ namespace LoreCompanion;
 internal sealed class ClientSettings
 {
     /// <summary>The themes of the WebUI (platform/web/src/themes.css); the companion windows use the same set.</summary>
-    public static readonly string[] Themes = ["midnight", "sky", "ember", "sage", "aurora", "ocean", "retro", "autumn", "light", "cyberpunk"];
+    public static readonly string[] Themes = ["midnight", "sky", "ember", "sage", "ocean", "retro", "autumn", "light", "cyberpunk"];
 
     public string Theme { get; set; } = "midnight";
     public Dictionary<string, string> SelectedAccounts { get; set; } = new(StringComparer.OrdinalIgnoreCase);

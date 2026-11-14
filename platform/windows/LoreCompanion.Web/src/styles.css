@@ -4,6 +4,8 @@
 :root { --panel: var(--surface); --panel-hover: var(--surface-2); --success: var(--ok); --radius-theme: var(--radius-sm); }
 
 * { box-sizing: border-box; }
+/* Scrollbars in the theme's colours, so a long list visibly scrolls in every theme. */
+* { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--muted) 70%, transparent) transparent; }
 :root { font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); font-synthesis: none; }
 body { margin: 0; min-width: 420px; min-height: 100vh; overflow-x: hidden; }
 button, input, textarea { font: inherit; outline-color: var(--accent); }
@@ -35,6 +37,7 @@ textarea { min-height: 64px; resize: vertical; }
 .error-action { justify-self: start; }
 .alert.error { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--panel)); color: var(--danger); }
 .alert.success { border-color: var(--success); background: color-mix(in srgb, var(--success) 10%, var(--panel)); color: var(--success); }
+.alert.warning { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); color: var(--text); }
 .output { min-height: 62px; max-height: 115px; margin: 0; padding: 8px 11px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-theme); background: var(--panel); color: var(--muted); font: 10px/1.5 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .summary { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-theme); background: var(--panel); color: var(--muted); font-size: 11px; line-height: 1.5; }
 .path-list, .history-list { margin: 0; padding: 0; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-theme); background: var(--panel); list-style: none; }
@@ -56,12 +59,37 @@ textarea { min-height: 64px; resize: vertical; }
    sign-ins scrolls, and only when there are more than fit. */
 .dialog.accounts { height: 100vh; min-height: 0; overflow-y: auto; }
 .dialog.accounts .account-list { flex: 1 1 auto; min-height: 64px; max-height: none; align-content: start; }
+
+/* Natural height, measured for the window size (useFitWindow): no stretching, footer right after
+   the content, the account list shows up to about six sign-ins before it scrolls. */
+.measuring body { min-height: 0; }
+.measuring .dialog, .measuring .dialog.accounts { min-height: 0; height: auto; overflow: visible; }
+.measuring form { flex: none; }
+.measuring .actions { margin-top: 0; }
+.measuring .dialog.accounts .account-list { flex: none; max-height: 380px; }
 .account-row { display: flex; align-items: center; gap: 8px; padding: 10px 11px; border: 1px solid var(--line); border-radius: var(--radius-theme); background: var(--panel); }
 .account-info { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
 .account-info strong { font-size: 12px; }
 .account-info span { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .account-row .button { min-height: 29px; padding: 5px 9px; font-size: 11px; }
 .button.danger { border-color: var(--danger); background: transparent; color: var(--danger); }
+.button.danger:not(:disabled):hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.button.danger.solid { background: var(--danger); color: var(--bg); }
+.button.danger.solid:not(:disabled):hover { background: color-mix(in srgb, var(--danger) 88%, var(--text)); }
+.alert.danger { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--panel)); color: var(--text); }
+/* The confirmation page has no <form>; it lays out the same way. */
+.form { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 12px; }
+.measuring .form { flex: none; }
+/* A question (ChoiceRequired): the files, then one button per way forward with what it does. */
+.choice { display: grid; gap: 12px; }
+.options { display: grid; gap: 8px; }
+.option { display: grid; gap: 3px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-theme); background: var(--panel); color: var(--text); text-align: left; font: inherit; cursor: pointer; }
+.option strong { font-size: 12px; font-weight: 600; }
+.option span { color: var(--muted); font-size: 11px; line-height: 1.4; }
+.option:hover, .option:focus-visible { border-color: var(--accent); background: var(--panel-hover); }
+.option.danger { border-color: color-mix(in srgb, var(--danger) 60%, var(--line)); }
+.option.danger strong { color: var(--danger); }
+.option.danger:hover, .option.danger:focus-visible { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--panel)); }
 .selected-account { color: var(--success); font-size: 11px; font-weight: 600; }
 .loading { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 100vh; background: var(--bg); color: var(--muted); }
 .loading img { width: 36px; height: 36px; }
