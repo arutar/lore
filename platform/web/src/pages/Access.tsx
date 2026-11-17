@@ -53,8 +53,10 @@ export function AccessTab({ repository, onChanged }: { repository: Repository; o
           <div className="grow"><h3>{t("access.public")}</h3><p>{t("access.publicText")}</p></div>
           <Switch checked={general("anonymous")} onChange={(on) => setGeneral("anonymous", on)} label={t("access.public")} /></div>
         <div className="setting-row"><span className="repo-tile" style={{ "--tone": "var(--accent)" } as React.CSSProperties}><Icon name="users" /></span>
-          <div className="grow"><h3>{t("access.authenticated")}</h3><p>{t("access.authenticatedText")}</p></div>
-          <Switch checked={general("authenticated")} onChange={(on) => setGeneral("authenticated", on)} label={t("access.authenticated")} /></div>
+          {/* Public read covers signed-in users too, so the switch shows that and can't be changed
+              while the repository is public; its own grant is kept as it was for when it isn't. */}
+          <div className="grow"><h3>{t("access.authenticated")}</h3><p>{t(general("anonymous") ? "access.authenticatedByPublic" : "access.authenticatedText")}</p></div>
+          <Switch checked={general("anonymous") || general("authenticated")} disabled={general("anonymous")} onChange={(on) => setGeneral("authenticated", on)} label={t("access.authenticated")} /></div>
       </div>
       <div className="card">
         <div className="card-head"><div className="grow"><h2>{t("access.subjects")}</h2><p>{t("access.subjectsText")}</p></div>
