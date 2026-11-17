@@ -348,6 +348,13 @@ func (s *Server) provisionADUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "ad_lookup_failed", "Couldn't read the user's Active Directory groups")
 		return
 	}
+	// A realm that registers local accounts by email (email as username) keeps directory
+	// accounts under their email too, while their tokens carry the directory username, the
+	// attribute they sign in with. Store that name now, not only at the first sign-in, so the
+	// account can be found by login at once. Local accounts don't come through here.
+	if account.User.Username != "" {
+		user.Username = account.User.Username
+	}
 	now := time.Now().UTC()
 	user.Groups = account.Groups
 	user.DirectoryDisabled = account.Disabled

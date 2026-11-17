@@ -344,6 +344,9 @@ type fakeAccountManager struct {
 	syncCalls        int
 	wrongLink        bool
 	links            map[string]string
+	// emailAsUsername makes the identity provider keep directory accounts under their
+	// email, as Keycloak does when the realm uses the email as the username.
+	emailAsUsername bool
 }
 
 func (f *fakeAccountManager) DirectoryLink(_ context.Context, id string) (string, error) {
@@ -380,7 +383,11 @@ func (f *fakeAccountManager) GetFederatedUser(_ context.Context, username string
 	if f.wrongLink {
 		link = "ffffffff-ffff-4fff-8fff-ffffffffffff"
 	}
-	return model.User{ID: "ad-user-id", Username: username, DisplayName: "AD User", Role: model.RoleUser, Source: "ad", DirectoryID: link}, nil
+	name := username
+	if f.emailAsUsername {
+		name = "elessar@example.com"
+	}
+	return model.User{ID: "ad-user-id", Username: name, Email: "elessar@example.com", DisplayName: "AD User", Role: model.RoleUser, Source: "ad", DirectoryID: link}, nil
 }
 
 func (f *fakeAccountManager) SyncFederatedUsers(context.Context) error {
@@ -410,6 +417,27 @@ func TestProvisionADUser(t *testing.T) {
 	entries, _ := storage.ListAccess(t.Context())
 	if stored.AccessDenied || len(entries) != 1 || entries[0].Subject != elessarGUID || entries[0].Name != "elessar" {
 		t.Fatalf("provisioned account wasn't admitted: %+v %+v", stored, entries)
+	}
+}
+
+// An account added from the directory is stored under its directory username, the name its
+// token carries at sign-in, even when the identity provider keeps it under its email; otherwise
+// it can't be found by login until the person first signs in.
+func TestProvisionADUserKeepsTheDirectoryUsername(t *testing.T) {
+	storage := store.NewMemory()
+	auth, _ := NewAuthenticator(t.Context(), storage, AuthConfig{SessionTTL: time.Hour})
+	client := &testClient{t: t, handler: NewServer(storage, auth, Config{
+		DevAuth: true, DevUser: model.User{ID: "admin", Username: "admin", Role: model.RoleAdmin},
+		Accounts: &fakeAccountManager{emailAsUsername: true}, Directory: fakeSubjectDirectory{},
+	})}
+	client.login()
+	status, provisioned := client.request(http.MethodPost, "/web/v1/admin/users/provision", map[string]any{"username": "elessar"}, true)
+	if status != http.StatusCreated || provisioned["username"] != "elessar" {
+		t.Fatalf("AD provisioning status = %d, user = %v", status, provisioned)
+	}
+	stored, err := storage.GetUser(t.Context(), "ad-user-id")
+	if err != nil || stored.Username != "elessar" || stored.Email != "elessar@example.com" {
+		t.Fatalf("stored AD user = %+v, %v", stored, err)
 	}
 }
 
