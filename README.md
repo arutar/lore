@@ -164,7 +164,7 @@ You need a host with Docker (Docker Engine with Compose v2 on Linux, Docker Desk
 
 ```sh
 # 1. Unpack the bundle
-tar -xzf lore-platform-server-0.2.2.tar.gz && cd lore-platform-server-0.2.2
+tar -xzf lore-platform-server-0.2.3.tar.gz && cd lore-platform-server-0.2.3
 
 # 2. Run setup with the name your users will type; keep the data outside the bundle
 LORE_DATA_ROOT=/srv/lore-data LORE_PUBLIC_HOST=lore.corp.local sh setup.sh
@@ -186,8 +186,8 @@ In PowerShell, as the user that runs Docker Desktop:
 
 ```powershell
 # 1. Unpack the bundle
-Expand-Archive lore-platform-server-0.2.2.zip -DestinationPath C:\lore
-cd C:\lore\lore-platform-server-0.2.2
+Expand-Archive lore-platform-server-0.2.3.zip -DestinationPath C:\lore
+cd C:\lore\lore-platform-server-0.2.3
 
 # 2. Run setup with the name your users will type; keep the data outside the bundle
 $env:LORE_DATA_ROOT = "D:\lore-data"
