@@ -278,6 +278,21 @@ fn clean_brings_a_path_onto_the_canonical_form() {
     assert_eq!("", clean(String::new()));
 }
 
+/// A working copy on a network share keeps naming the share: without its two
+/// leading separators Windows would resolve it against the current drive.
+#[cfg(windows)]
+#[test]
+fn clean_keeps_a_network_path_on_its_share() {
+    let share = "//server/share/repo";
+    assert_eq!(share, clean(r"\\server\share\repo".to_owned()));
+    assert_eq!(share, clean("//server/share/repo".to_owned()));
+    assert_eq!(share, clean(r"\\?\UNC\server\share\repo".to_owned()));
+    assert_eq!(share, clean(r"\\?\unc\server\share\repo".to_owned()));
+    assert_eq!(share, clean(r"\\server\share\.\repo".to_owned()));
+    assert_eq!(share, clean(share.to_owned()), "a cleaned network path stays as it is");
+    assert_eq!("c:/repo", clean(r"\\?\c:\repo".to_owned()), "a verbatim drive path is not a share");
+}
+
 /// Only a component that is `..` entire is a step up. A name that merely
 /// begins with two periods, or is made of them, is a name.
 #[test]

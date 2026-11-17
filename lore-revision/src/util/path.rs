@@ -208,6 +208,38 @@ const VERBATIM_PREFIX: &str = r"\\?\";
 /// A Windows device path prefix, which names what follows it.
 const DEVICE_PREFIX: &str = r"\\.\";
 
+/// A Windows verbatim path prefix for a network share: `\\?\UNC\server\share`
+/// names `\\server\share`.
+#[cfg(windows)]
+const VERBATIM_UNC_PREFIX: &str = r"\\?\UNC\";
+
+/// Remove the prefix that makes `path` a Windows network path (`\\server\share`,
+/// `//server/share` or `\\?\UNC\server\share`), leaving `server` first, and say
+/// whether there was one.
+///
+/// Stripping the verbatim prefix and collapsing separators would otherwise leave
+/// `/server/share`, which Windows resolves against the root of the current
+/// drive: a working copy on a share would land on the local disk instead.
+#[cfg(windows)]
+fn take_network_root(path: &mut String) -> bool {
+    let bytes = path.as_bytes();
+    if bytes.len() > VERBATIM_UNC_PREFIX.len()
+        && bytes[..VERBATIM_UNC_PREFIX.len()].eq_ignore_ascii_case(VERBATIM_UNC_PREFIX.as_bytes())
+    {
+        path.drain(..VERBATIM_UNC_PREFIX.len());
+        return true;
+    }
+    if path.starts_with(VERBATIM_PREFIX) || path.starts_with(DEVICE_PREFIX) {
+        return false;
+    }
+    let separator = |byte: u8| byte == b'\\' || byte == b'/';
+    if bytes.len() > 2 && separator(bytes[0]) && separator(bytes[1]) && !separator(bytes[2]) {
+        path.drain(..2);
+        return true;
+    }
+    false
+}
+
 /// Replace every `from` in `path` with `to`, leaving a path that holds no `from`
 /// as it is.
 ///
@@ -328,7 +360,8 @@ fn contains_directory_step_up(path: &str) -> bool {
 }
 
 /// `path` in the form the repository names paths in: forward separators, none of
-/// them repeated, and no `.` or `..` left to resolve.
+/// them repeated, and no `.` or `..` left to resolve. On Windows a network path
+/// keeps the two separators that start it, as `//server/share/...`.
 pub fn clean(mut path: String) -> String {
     clean_in_place(&mut path);
     path
@@ -337,6 +370,19 @@ pub fn clean(mut path: String) -> String {
 /// [`clean`] applied to a buffer the caller owns, for a loop that would
 /// otherwise allocate a `String` per path it normalizes.
 pub fn clean_in_place(path: &mut String) {
+    #[cfg(windows)]
+    let network = take_network_root(path);
+
+    clean_local(path);
+
+    #[cfg(windows)]
+    if network {
+        path.insert_str(0, "//");
+    }
+}
+
+/// [`clean_in_place`] for everything after a network path's leading separators.
+fn clean_local(path: &mut String) {
     replace_present(path, VERBATIM_PREFIX, "");
     replace_present(path, DEVICE_PREFIX, "");
     replace_present(path, "\\", "/");
