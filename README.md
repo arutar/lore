@@ -5,6 +5,8 @@
 
 # Lore Platform
 
+<a href="https://arutar.github.io/lore/"><b>LIVE PREVIEW&nbsp;→</b></a>
+
 **A self-hosted version control server for teams with large binary files —<br>
 as simple as SVN, built on [Epic Games' Lore](https://github.com/EpicGames/lore).**
 
@@ -14,7 +16,7 @@ Web interface · Active Directory sign-in · Windows Explorer integration · enf
 [![Platform Server](https://github.com/arutar/lore/actions/workflows/platform-server.yml/badge.svg)](https://github.com/arutar/lore/actions/workflows/platform-server.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-<a href="https://arutar.github.io/lore/"><img src="https://img.shields.io/badge/Live%20preview-open%20the%20web%20interface-61a9f6?style=for-the-badge" alt="Live preview: open the web interface" height="32"></a>
+<a href="https://arutar.github.io/lore/"><img src="https://img.shields.io/badge/%E2%96%B6%20Live%20preview-open%20the%20web%20interface-1f6feb?style=for-the-badge&labelColor=0d419d" alt="Live preview: open the web interface" height="36"></a>
 
 [Live preview](https://arutar.github.io/lore/) · [Install](platform/docs/install.md) · [Docker reference](platform/docs/docker.md) · [Download](../../releases) · [How it works](#how-it-works) · [Differences from Lore](#how-this-differs-from-upstream-lore) · [Status](#status)
 
