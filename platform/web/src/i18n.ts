@@ -220,6 +220,8 @@ const ru = {
   "audit.details": "Описание",
   "audit.superseded": "Прежняя запись «{name}» освободила имя; права не переданы",
   "audit.lockReleased": "{path} (держал {owner})",
+  "audit.registrationOn": "включена",
+  "audit.registrationOff": "выключена",
   "action.repository.create": "Репозиторий создан",
   "action.repository.update": "Репозиторий изменён",
   "action.repository.delete": "Репозиторий удалён",
@@ -285,6 +287,10 @@ const ru = {
   "error.invalid_import": "Файл импорта некорректен",
   "error.registration_sync_failed": "Не удалось обновить регистрацию в Keycloak",
   "error.clipboard": "Не удалось скопировать: разрешите доступ к буферу обмена",
+  "error.demo_read_only": "Это демо: изменения отключены",
+  "demo.badge": "Демо",
+  "demo.text": "Данные выдуманы, изменения не сохраняются. Смотрите разделы и пробуйте темы.",
+  "demo.themes": "Темы",
   "error.unknown": "Что-то пошло не так",
 };
 
@@ -377,7 +383,7 @@ const en: Record<Key, string> = {
   "audit.formerRepository": "Former repository", "audit.older": "Older events", "audit.empty": "No events yet", "audit.noAccess": "no access",
   "audit.anyone": "Everyone", "audit.anySignedIn": "All signed-in users", "audit.renamed": "Renamed from {name}", "audit.details": "Description",
   "audit.superseded": "Former record \"{name}\" released the name; access wasn't transferred",
-  "audit.lockReleased": "{path} (held by {owner})",
+  "audit.lockReleased": "{path} (held by {owner})", "audit.registrationOn": "on", "audit.registrationOff": "off",
   "action.repository.create": "Repository created", "action.repository.update": "Repository updated", "action.repository.delete": "Repository deleted",
   "action.grant.set": "Access changed", "action.grant.remove": "Access revoked", "action.user.create": "User created",
   "action.user.provision": "Added from AD", "action.user.update": "Role changed", "action.user.disable": "Account disabled",
@@ -402,7 +408,8 @@ const en: Record<Key, string> = {
   "error.directory_unavailable": "Active Directory is unavailable", "error.ad_lookup_failed": "Couldn't reach Active Directory",
   "error.self_lockout": "You can't disable, demote or delete yourself, nor remove the access you're an administrator through", "error.builtin_admin": "The built-in admin account can't be deleted: setup recreates it", "error.managed_by_access_list": "Active Directory accounts are changed in the list of users and groups", "error.lore_unavailable": "The Lore server is unavailable",
   "error.content_unavailable": "Repository content is unavailable", "error.invalid_import": "The import file is invalid",
-  "error.registration_sync_failed": "Couldn't update registration in Keycloak", "error.clipboard": "Couldn't copy: allow clipboard access",
+  "error.registration_sync_failed": "Couldn't update registration in Keycloak", "error.clipboard": "Couldn't copy: allow clipboard access", "error.demo_read_only": "This is a demo: changes are turned off",
+  "demo.badge": "Demo", "demo.text": "Fictional data; nothing you do is saved. Look around and try the themes.", "demo.themes": "Themes",
   "error.unknown": "Something went wrong",
 };
 

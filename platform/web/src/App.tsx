@@ -1,15 +1,15 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { api, setCSRFToken } from "./api";
+import { api, isDemo, setCSRFToken } from "./api";
 import { LocaleContext, makeLocale, useLocale } from "./i18n";
-import type { PublicConfig, Repository, Session } from "./types";
+import type { GlobalSettings, PublicConfig, Repository, Session } from "./types";
 import { CopyButton, Icon, RepoTile, Avatar, ToastProvider, TopBarContext, useToast } from "./ui";
 import type { TopBarState } from "./ui";
 import { Home } from "./pages/Home";
 import { RepositoryPage } from "./pages/Repository";
 import { UsersPage } from "./pages/Users";
 import { AuditPage } from "./pages/Audit";
-import { SettingsPage } from "./pages/Settings";
+import { SettingsPage, themes } from "./pages/Settings";
 import { NewRepositoryDialog } from "./pages/NewRepository";
 
 export interface AppState {
@@ -117,7 +117,7 @@ function Shell({ session, config, setConfig }: { session: Session; config: Publi
     <TopBarContext.Provider value={setTopBar}>
       <div className={`shell ${wide ? "wide" : ""} ${home ? "home" : ""}`}>
         <nav className="rail" aria-label="Lore">
-          <Link className="brand" to="/" aria-label="Lore"><img src="/icons/lore-mark.svg" alt="" /></Link>
+          <Link className="brand" to="/" aria-label="Lore"><img src={`${import.meta.env.BASE_URL}icons/lore-mark.svg`} alt="" /></Link>
           {nav.map((item) => <NavLink key={item.to} to={item.to} end={item.end}
             className={({ isActive }) => (isActive || (item.to === "/" && location.pathname.startsWith("/repositories/")) ? "on" : "")}
             data-tip={item.label} aria-label={item.label}><Icon name={item.icon} /></NavLink>)}
@@ -126,6 +126,7 @@ function Shell({ session, config, setConfig }: { session: Session; config: Publi
         </nav>
         {!wide && <RepositoryList version={listVersion} />}
         <div className="detail">
+          {isDemo && <DemoBar />}
           <div className="top">
             <span className="grow top-title">{topBar.title && <b>{topBar.title}</b>}{topBar.description && <span className="truncate">{topBar.description}</span>}</span>
             {topBar.actions}
@@ -151,6 +152,27 @@ function Shell({ session, config, setConfig }: { session: Session; config: Publi
       {palette && <Palette onClose={() => setPalette(false)} />}
     </TopBarContext.Provider>
   </AppContext.Provider>;
+}
+
+// The demo's strip above the top bar: what this is, every theme one click away, the other
+// language, and the source. Theme and language are kept in this browser (demo/api.ts).
+function DemoBar() {
+  const { t } = useLocale();
+  const { config, setConfig } = useApp();
+  const apply = (change: Partial<GlobalSettings>) => {
+    const next: GlobalSettings = { registrationEnabled: config.registrationEnabled, theme: config.theme, language: config.language, ...change };
+    setConfig({ ...config, ...next });
+    void api.saveSettings(next);
+  };
+  return <div className="demo-bar" role="note">
+    <span className="demo-badge">{t("demo.badge")}</span>
+    <span className="grow truncate demo-text">{t("demo.text")}</span>
+    <span className="demo-themes" role="group" aria-label={t("demo.themes")}>{themes.map(([id, name, background, , accent]) =>
+      <button key={id} title={name} aria-label={name} aria-pressed={config.theme === id} className={config.theme === id ? "on" : ""}
+        style={{ background: `linear-gradient(135deg, ${background} 50%, ${accent} 50%)` }} onClick={() => apply({ theme: id })} />)}</span>
+    <button className="demo-lang" onClick={() => apply({ language: config.language === "ru" ? "en" : "ru" })}>{config.language === "ru" ? "EN" : "RU"}</button>
+    <a className="demo-link" href="https://github.com/arutar/lore" target="_blank" rel="noreferrer">GitHub</a>
+  </div>;
 }
 
 function Account({ session, config }: { session: Session; config: PublicConfig }) {

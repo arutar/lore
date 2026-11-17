@@ -14,9 +14,13 @@ Web interface · Active Directory sign-in · Windows Explorer integration · enf
 [![Platform Server](https://github.com/arutar/lore/actions/workflows/platform-server.yml/badge.svg)](https://github.com/arutar/lore/actions/workflows/platform-server.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[Install](platform/docs/install.md) · [Docker reference](platform/docs/docker.md) · [Download](../../releases) · [How it works](#how-it-works) · [Differences from Lore](#how-this-differs-from-upstream-lore) · [Status](#status)
+<a href="https://arutar.github.io/lore/"><img src="https://img.shields.io/badge/Live%20preview-open%20the%20web%20interface-61a9f6?style=for-the-badge" alt="Live preview: open the web interface" height="32"></a>
 
-<img src="platform/docs/images/repository-files.png" alt="Repository files in the Lore Platform web interface" width="900">
+[Live preview](https://arutar.github.io/lore/) · [Install](platform/docs/install.md) · [Docker reference](platform/docs/docker.md) · [Download](../../releases) · [How it works](#how-it-works) · [Differences from Lore](#how-this-differs-from-upstream-lore) · [Status](#status)
+
+<a href="https://arutar.github.io/lore/"><img src="platform/docs/images/repository-files.png" alt="Repository files in the Lore Platform web interface" width="900"></a>
+
+<sub>The live preview is the real web interface running in your browser on a fictional studio's data: browse repositories, files, history, locks, access, users and the audit log, and switch between the nine themes. It's read-only — nothing you do is saved.</sub>
 
 </div>
 

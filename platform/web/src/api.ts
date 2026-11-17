@@ -1,3 +1,4 @@
+import { demoApi } from "./demo/api";
 import type { AccessEntry, ADUser, Members, AuditEvent, BulkResult, GlobalSettings, Grant, GrantSubject, LabeledGrant, Page, PublicConfig, Repository, RepositoryLock, RepositoryTree, Revision, Role, Session, User } from "./types";
 
 let csrfToken = "";
@@ -39,7 +40,7 @@ const grantBody = ({ repositoryId, subjectType, subject, permission }: Grant): G
 const query = (values: Record<string, string | number | undefined>) =>
   Object.entries(values).filter(([, value]) => value !== undefined && value !== "").map(([key, value]) => `${key}=${encodeURIComponent(String(value))}`).join("&");
 
-export const api = {
+const serverApi = {
   config: () => request<PublicConfig>("/config"),
   session: () => request<Session>("/session"),
   devLogin: () => request<{ authenticated: boolean }>("/dev-login", { method: "POST" }),
@@ -82,3 +83,11 @@ export const api = {
   saveSettings: (settings: GlobalSettings) => request<GlobalSettings>("/admin/settings", { method: "PATCH", body: JSON.stringify(settings) }),
   audit: (cursor = "") => request<Page<AuditEvent>>(`/admin/audit?${query({ pageSize: 50, cursor })}`),
 };
+
+export type Api = typeof serverApi;
+
+/** The read-only demo (npm run build:demo) answers in the browser from fictional data; the
+ *  regular build talks to the control plane. The demo's module is dropped from the regular build. */
+export const isDemo = import.meta.env.MODE === "demo";
+
+export const api: Api = isDemo ? demoApi : serverApi;
