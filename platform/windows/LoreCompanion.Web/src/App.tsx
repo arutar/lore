@@ -79,10 +79,12 @@ const themes: [string, string][] = [["midnight", "Midnight"], ["sky", "Sky"], ["
   ["ocean", "Ocean"], ["retro", "Retro"], ["autumn", "Autumn"], ["light", "Light"], ["cyberpunk", "Cyberpunk"]];
 const post = (message: ClientMessage) => window.chrome?.webview?.postMessage(message);
 
-const changeMark: Record<Change["change"], { letter: string; title: string }> = {
-  added: { letter: "A", title: "New file" },
-  modified: { letter: "M", title: "Changed" },
-  deleted: { letter: "D", title: "Deleted" },
+// A file's change shows as a stripe at the row's edge and the colour of its name: green new,
+// yellow changed, red (and struck out) deleted.
+const changeMark: Record<Change["change"], { title: string }> = {
+  added: { title: "New file" },
+  modified: { title: "Changed" },
+  deleted: { title: "Deleted" },
 };
 // A filter field only where the list is long enough to need one.
 const filterFrom = 12;
@@ -157,12 +159,11 @@ function ChangeList({ changes, checked, setChecked, disabled }: { changes: Chang
   const fileRow = (change: Change, depth: number, folder: string) => {
     const name = change.path.split(/[\\/]/).pop() ?? change.path;
     const mark = changeMark[change.change];
-    return <li key={change.path} className={change.lockedBy ? "locked" : ""} title={change.path}>
+    return <li key={change.path} className={`${change.change}${change.lockedBy ? " locked" : ""}`} title={`${mark.title}: ${change.path}`}>
       <label className="check" style={{ paddingLeft: 10 + depth * 18 }}>
         <span className="caret" />
         <input type="checkbox" disabled={disabled || Boolean(change.lockedBy)} checked={checked.has(change.path)} onChange={() => setAll([change], !checked.has(change.path))} />
-        <span className={`mark ${change.change}`} title={mark.title}>{mark.letter}</span>
-        <span className="name">{name}</span>
+        <span className={`name ${change.change}`}>{name}</span>
         {folder && <span className="folder">{folder}</span>}
         {change.lockedBy && <span className="lock-note"><img src={lockIcon} alt="" />{change.lockedBy}</span>}
       </label></li>;
@@ -201,9 +202,9 @@ function ChangeList({ changes, checked, setChecked, disabled }: { changes: Chang
         aria-label="Filter files" onChange={(event) => setFilter(event.target.value)} />}
     </div>
     <ul className="change-list">{rows(buildTree(shown), 0)}{shown.length === 0 && <li className="none">No files match the filter.</li>}</ul>
-    {/* What the letters mean, for the kinds of change the list holds. */}
+    {/* What the colours mean, for the kinds of change the list holds. */}
     <div className="legend">{(Object.keys(changeMark) as Change["change"][]).filter((kind) => changes.some((change) => change.change === kind)).map((kind) =>
-      <span key={kind}><span className={`mark ${kind}`}>{changeMark[kind].letter}</span>{changeMark[kind].title.toLowerCase()}</span>)}</div>
+      <span key={kind}><i className={`dot ${kind}`} />{changeMark[kind].title.toLowerCase()}</span>)}</div>
   </div>;
 }
 

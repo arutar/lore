@@ -118,13 +118,18 @@ span.caret { cursor: inherit; }
 .change-list .count { margin-left: auto; color: var(--muted); font-size: 10px; font-weight: 400; }
 .change-list li.locked .check { cursor: default; opacity: .75; }
 .change-list li.none { padding: 6px 10px; color: var(--muted); font-size: 11px; }
-.mark { flex: none; width: 15px; border-radius: 3px; font: 700 10px/15px Consolas, monospace; text-align: center; }
-.mark.modified { background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
-.mark.added { background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ok); }
-.mark.deleted { background: color-mix(in srgb, var(--danger) 22%, transparent); color: var(--danger); }
 .change-list .name { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.change-list .name.added, .dot.added { color: var(--ok); }
+.change-list .name.modified, .dot.modified { color: var(--warn); }
+.change-list .name.deleted, .dot.deleted { color: var(--danger); }
+.change-list .name.deleted { text-decoration: line-through; }
+.change-list li.added, .change-list li.modified, .change-list li.deleted { box-shadow: inset 3px 0 0 var(--stripe); }
+.change-list li.added { --stripe: var(--ok); }
+.change-list li.modified { --stripe: var(--warn); }
+.change-list li.deleted { --stripe: var(--danger); }
 .change-list .folder { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .lock-note { display: flex; flex: none; align-items: center; gap: 4px; margin-left: auto; color: var(--danger); font-size: 10px; }
 .lock-note img { width: 12px; height: 12px; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 10px; }
 .legend > span { display: flex; align-items: center; gap: 5px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
