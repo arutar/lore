@@ -130,12 +130,37 @@ export function useTopBar(state: TopBarState, deps: unknown[]) {
 
 /* ── copy to clipboard ── */
 
+// navigator.clipboard exists only in secure contexts (HTTPS, localhost); the internal-network
+// HTTP mode lacks it. There the deprecated but universally supported execCommand("copy") still
+// works inside a click handler.
+async function writeClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const active = document.activeElement as HTMLElement | null;
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.top = "-1000px";
+  area.style.opacity = "0";
+  document.body.appendChild(area);
+  try {
+    area.select();
+    if (!document.execCommand("copy")) throw new Error("copy command rejected");
+  } finally {
+    area.remove();
+    active?.focus();
+  }
+}
+
 export function useCopy() {
   const { t } = useLocale();
   const toast = useToast();
   return useCallback(async (text: string, message: string) => {
     try {
-      await navigator.clipboard.writeText(text);
+      await writeClipboard(text);
       toast(message);
       return true;
     } catch {

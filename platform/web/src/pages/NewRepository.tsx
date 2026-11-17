@@ -5,6 +5,17 @@ import { useApp } from "../App";
 import { useLocale } from "../i18n";
 import { Dialog, ErrorNote, Switch, useToast } from "../ui";
 
+// crypto.randomUUID exists only in secure contexts (HTTPS, localhost); the internal-network
+// HTTP mode lacks it. getRandomValues works in any context, so build a v4 UUID from it.
+export function newUUID(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export function NewRepositoryDialog({ onClose }: { onClose: () => void }) {
   const { t, error } = useLocale();
   const { refreshRepositories, config } = useApp();
@@ -16,7 +27,7 @@ export function NewRepositoryDialog({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState("");
   // One ID per dialog: a retry after a timeout creates the same repository, not a second one.
-  const [id] = useState(() => crypto.randomUUID());
+  const [id] = useState(newUUID);
   const host = (config.nativeRepositoryUrl || `lore://${window.location.hostname}`).replace(/:41337$/, "");
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
