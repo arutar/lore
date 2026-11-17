@@ -271,6 +271,9 @@ internal sealed class WebViewOperationWindow : Window
         Height = target;
         // The window was centred for its provisional height; centre it again for the real one.
         if (first) Top = area.Top + Math.Max(0, (area.Height - target) / 2);
+        // Content that arrives later (the Commit window's file list) makes it taller: keep its
+        // bottom, and the buttons there, above the taskbar.
+        else if (Top + target > area.Bottom) Top = Math.Max(area.Top, area.Bottom - target);
     }
 
     private async Task Run(string? repositoryUrl, string? targetPath, string? message, string choice, string[] files)

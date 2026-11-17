@@ -87,48 +87,120 @@ const changeMark: Record<Change["change"], { letter: string; title: string }> = 
 // A filter field only where the list is long enough to need one.
 const filterFrom = 12;
 
-// The Commit window's list: one row per file (name first, its folder after it, dimmed), a box to
-// leave it out, and a box in the header for all of them. Files someone else has locked can't be
-// committed, so their boxes are off and disabled.
+// The Commit window's list, grouped by folder. A folder with two or more changed files below it
+// gets a row of its own: its box takes in or leaves out everything below it, and the arrow folds
+// it to that one row. A folder holding only further folders is merged into them ("art\textures"),
+// and a lone file stays a single row with its folder after it, dimmed. Files someone else has
+// locked can't be committed, so their boxes are off and disabled.
+type Folder = { name: string; path: string; folders: Map<string, Folder>; files: Change[] };
+
+function buildTree(changes: Change[]): Folder {
+  const root: Folder = { name: "", path: "", folders: new Map(), files: [] };
+  for (const change of changes) {
+    const parts = change.path.split(/[\\/]/);
+    let node = root;
+    for (const part of parts.slice(0, -1)) {
+      const key = part.toLowerCase();
+      let next = node.folders.get(key);
+      if (!next) {
+        next = { name: part, path: node.path ? `${node.path}\\${part}` : part, folders: new Map(), files: [] };
+        node.folders.set(key, next);
+      }
+      node = next;
+    }
+    node.files.push(change);
+  }
+  return root;
+}
+
+function filesBelow(folder: Folder): Change[] {
+  return [...folder.files, ...[...folder.folders.values()].flatMap(filesBelow)];
+}
+
+// "art" holding only "textures" reads as one folder, "art\textures".
+function compact(folder: Folder): Folder {
+  let current = folder;
+  let name = folder.name;
+  while (current.files.length === 0 && current.folders.size === 1) {
+    current = [...current.folders.values()][0];
+    name = `${name}\\${current.name}`;
+  }
+  return current === folder ? folder : { ...current, name };
+}
+
+const byName = (left: string, right: string) => left.localeCompare(right, undefined, { sensitivity: "base", numeric: true });
+
 function ChangeList({ changes, checked, setChecked, disabled }: { changes: Change[]; checked: Set<string>; setChecked: (next: Set<string>) => void; disabled: boolean }) {
   const [filter, setFilter] = useState("");
+  const [folded, setFolded] = useState<Set<string>>(new Set());
   const allowed = changes.filter((change) => !change.lockedBy);
   const needle = filter.trim().toLowerCase();
   const shown = needle ? changes.filter((change) => change.path.toLowerCase().includes(needle)) : changes;
-  const shownAllowed = shown.filter((change) => !change.lockedBy);
-  const allOn = shownAllowed.length > 0 && shownAllowed.every((change) => checked.has(change.path));
-  const someOn = shownAllowed.some((change) => checked.has(change.path));
-  const toggle = (path: string) => {
+
+  // Puts every file of `files` someone may commit in, or takes them all out.
+  const setAll = (files: Change[], on: boolean) => {
     const next = new Set(checked);
-    if (next.has(path)) next.delete(path); else next.add(path);
+    for (const change of files) if (!change.lockedBy) { if (on) next.add(change.path); else next.delete(change.path); }
     setChecked(next);
   };
-  const toggleAll = () => {
-    const next = new Set(checked);
-    for (const change of shownAllowed) { if (allOn) next.delete(change.path); else next.add(change.path); }
-    setChecked(next);
+  const state = (files: Change[]) => {
+    const open = files.filter((change) => !change.lockedBy);
+    const on = open.filter((change) => checked.has(change.path)).length;
+    return { open: open.length, all: open.length > 0 && on === open.length, some: on > 0 && on < open.length };
   };
+  const box = (files: Change[], label: string) => {
+    const { open, all, some } = state(files);
+    return <input type="checkbox" disabled={disabled || open === 0} checked={all} aria-label={label}
+      ref={(element) => { if (element) element.indeterminate = some; }} onChange={() => setAll(files, !all)} />;
+  };
+
+  const fileRow = (change: Change, depth: number, folder: string) => {
+    const name = change.path.split(/[\\/]/).pop() ?? change.path;
+    const mark = changeMark[change.change];
+    return <li key={change.path} className={change.lockedBy ? "locked" : ""} title={change.path}>
+      <label className="check" style={{ paddingLeft: 10 + depth * 18 }}>
+        <span className="caret" />
+        <input type="checkbox" disabled={disabled || Boolean(change.lockedBy)} checked={checked.has(change.path)} onChange={() => setAll([change], !checked.has(change.path))} />
+        <span className={`mark ${change.change}`} title={mark.title}>{mark.letter}</span>
+        <span className="name">{name}</span>
+        {folder && <span className="folder">{folder}</span>}
+        {change.lockedBy && <span className="lock-note"><img src={lockIcon} alt="" />{change.lockedBy}</span>}
+      </label></li>;
+  };
+
+  const rows = (node: Folder, depth: number): React.ReactNode[] => {
+    const out: React.ReactNode[] = [];
+    for (const child of [...node.folders.values()].map(compact).sort((left, right) => byName(left.name, right.name))) {
+      const files = filesBelow(child);
+      if (files.length === 1) {
+        // One file: its row carries the folder, relative to where the list stands.
+        const relative = child.path.slice(node.path ? node.path.length + 1 : 0);
+        out.push(fileRow(files[0], depth, relative));
+        continue;
+      }
+      const isFolded = folded.has(child.path) && !needle;
+      out.push(<li key={`folder:${child.path}`} className="folder-row" title={child.path}>
+        <div className="check" style={{ paddingLeft: 10 + depth * 18 }}>
+          <button type="button" className="caret" aria-label={isFolded ? `Expand ${child.name}` : `Collapse ${child.name}`} aria-expanded={!isFolded}
+            onClick={() => { const next = new Set(folded); if (next.has(child.path)) next.delete(child.path); else next.add(child.path); setFolded(next); }}>{isFolded ? "▸" : "▾"}</button>
+          {box(files, `All files in ${child.name}`)}
+          <span className="name" onClick={() => setAll(files, !state(files).all)}>{child.name}</span>
+          <span className="count">{files.length} files</span>
+        </div></li>);
+      if (!isFolded) out.push(...rows(child, depth + 1));
+    }
+    for (const change of [...node.files].sort((left, right) => byName(left.path, right.path))) out.push(fileRow(change, depth, ""));
+    return out;
+  };
+
   return <div className="changes">
     <div className="changes-head">
-      <label className="check"><input type="checkbox" disabled={disabled || shownAllowed.length === 0} checked={allOn}
-        ref={(box) => { if (box) box.indeterminate = someOn && !allOn; }} onChange={toggleAll} aria-label="Select all" />
+      <label className="check">{box(shown, "Select all")}
         <span>Changes · {checked.size} of {allowed.length}</span></label>
       {changes.length >= filterFrom && <input className="changes-filter" type="search" value={filter} placeholder="Filter"
         aria-label="Filter files" onChange={(event) => setFilter(event.target.value)} />}
     </div>
-    <ul className="change-list">{shown.map((change) => {
-      const cut = Math.max(change.path.lastIndexOf("\\"), change.path.lastIndexOf("/"));
-      const name = change.path.slice(cut + 1);
-      const folder = cut > 0 ? change.path.slice(0, cut) : "";
-      const mark = changeMark[change.change];
-      return <li key={change.path} className={change.lockedBy ? "locked" : ""} title={change.path}>
-        <label className="check"><input type="checkbox" disabled={disabled || Boolean(change.lockedBy)} checked={checked.has(change.path)} onChange={() => toggle(change.path)} />
-          <span className={`mark ${change.change}`} title={mark.title}>{mark.letter}</span>
-          <span className="name">{name}</span>
-          {folder && <span className="folder">{folder}</span>}
-          {change.lockedBy && <span className="lock-note"><img src={lockIcon} alt="" />{change.lockedBy}</span>}
-        </label></li>;
-    })}{shown.length === 0 && <li className="none">No files match the filter.</li>}</ul>
+    <ul className="change-list">{rows(buildTree(shown), 0)}{shown.length === 0 && <li className="none">No files match the filter.</li>}</ul>
   </div>;
 }
 

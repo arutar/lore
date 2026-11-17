@@ -111,6 +111,11 @@ textarea { min-height: 64px; resize: vertical; }
 .change-list li:last-child { border: 0; }
 .change-list li .check { height: 28px; padding: 0 10px; color: var(--text); font-size: 11px; font-weight: 400; }
 .change-list li:hover { background: var(--panel-hover); }
+.change-list .caret { flex: none; width: 14px; margin-right: -4px; padding: 0; border: 0; background: none; color: var(--muted); font-size: 12px; line-height: 1; text-align: center; cursor: pointer; }
+span.caret { cursor: inherit; }
+.change-list .folder-row .check { height: 28px; padding-right: 10px; font-size: 11px; font-weight: 600; color: var(--text); }
+.change-list .folder-row .name { cursor: pointer; }
+.change-list .count { margin-left: auto; color: var(--muted); font-size: 10px; font-weight: 400; }
 .change-list li.locked .check { cursor: default; opacity: .75; }
 .change-list li.none { padding: 6px 10px; color: var(--muted); font-size: 11px; }
 .mark { flex: none; width: 15px; border-radius: 3px; font: 700 10px/15px Consolas, monospace; text-align: center; }
