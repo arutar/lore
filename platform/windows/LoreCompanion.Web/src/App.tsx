@@ -81,8 +81,8 @@ const post = (message: ClientMessage) => window.chrome?.webview?.postMessage(mes
 
 const changeMark: Record<Change["change"], { letter: string; title: string }> = {
   added: { letter: "A", title: "New file" },
-  deleted: { letter: "D", title: "Deleted" },
   modified: { letter: "M", title: "Changed" },
+  deleted: { letter: "D", title: "Deleted" },
 };
 // A filter field only where the list is long enough to need one.
 const filterFrom = 12;
@@ -201,6 +201,9 @@ function ChangeList({ changes, checked, setChecked, disabled }: { changes: Chang
         aria-label="Filter files" onChange={(event) => setFilter(event.target.value)} />}
     </div>
     <ul className="change-list">{rows(buildTree(shown), 0)}{shown.length === 0 && <li className="none">No files match the filter.</li>}</ul>
+    {/* What the letters mean, for the kinds of change the list holds. */}
+    <div className="legend">{(Object.keys(changeMark) as Change["change"][]).filter((kind) => changes.some((change) => change.change === kind)).map((kind) =>
+      <span key={kind}><span className={`mark ${kind}`}>{changeMark[kind].letter}</span>{changeMark[kind].title.toLowerCase()}</span>)}</div>
   </div>;
 }
 

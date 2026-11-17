@@ -126,3 +126,5 @@ span.caret { cursor: inherit; }
 .change-list .folder { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .lock-note { display: flex; flex: none; align-items: center; gap: 4px; margin-left: auto; color: var(--danger); font-size: 10px; }
 .lock-note img { width: 12px; height: 12px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 10px; }
+.legend > span { display: flex; align-items: center; gap: 5px; }
