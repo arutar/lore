@@ -12,7 +12,8 @@ function loadSettings(): GlobalSettings {
   const fallback: GlobalSettings = {
     registrationEnabled: data.config.registrationEnabled,
     theme: data.config.theme,
-    language: (navigator.language.startsWith("ru") ? "ru" : "en") as Language,
+    // English first, whatever the browser's language; RU in the strip switches.
+    language: "en" as Language,
   };
   try {
     return { ...fallback, ...JSON.parse(localStorage.getItem(settingsKey) ?? "{}") };
