@@ -155,6 +155,10 @@ kbd { font-family:var(--mono); font-size:11px; padding:1px 6px; border:1px solid
 .clone button:hover { background:var(--surface-2); color:var(--text); }
 .clone button.done { color:var(--ok); }
 .repo-hero { display:flex; gap:16px; align-items:flex-start; }
+/* The title column may shrink below its text, so a long name or description wraps instead of
+   widening the page on a phone. */
+.repo-hero > .grow { min-width:0; }
+.repo-hero h1 { overflow-wrap:anywhere; }
 .repo-hero .facts { display:flex; gap:18px; flex-wrap:wrap; justify-content:flex-end; color:var(--muted); font-size:12.5px; margin:6px 0 0 auto; white-space:nowrap; }
 .repo-hero .facts span { display:inline-flex; align-items:center; gap:6px; }
 .repo-hero .clone { width:400px; flex:0 1 auto; max-width:100%; height:36px; }
@@ -277,6 +281,7 @@ main.content { padding:var(--pad) var(--pad) 48px; max-width:1408px; width:100%;
   .combo { min-width:0; flex-basis:100%; }
   .repo-card h2 { white-space:normal; overflow-wrap:anywhere; }
   .repo-hero .clone { width:100%; }
+  .repo-hero .facts { margin-left:0; white-space:normal; gap:6px 14px; }
   .table .opt { display:none; }
   .change-cell .who { display:none; } .change-cell .when::before { content:none; }
   .repo-grid { grid-template-columns:1fr; }
