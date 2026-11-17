@@ -60,7 +60,7 @@ export function AuditPage() {
     const [registrationBefore, themeBefore, languageBefore] = before.split(":");
     const [registration, theme, language] = after.split(":");
     const parts: string[] = [];
-    if (registration && registration !== registrationBefore) parts.push(`${t("settings.registration")}: ${registration === "true" ? t("settings.enabled") : t("settings.disabled")}`);
+    if (registration && registration !== registrationBefore) parts.push(`${t("settings.registration")}: ${registration === "true" ? t("audit.registrationOn") : t("audit.registrationOff")}`);
     if (theme && theme !== themeBefore) parts.push(`${t("settings.theme")}: ${themeBefore || "—"} → ${theme}`);
     if (language && language !== languageBefore) parts.push(`${t("settings.language")}: ${(languageBefore || "—").toUpperCase()} → ${language.toUpperCase()}`);
     return parts.join(" · ") || "—";
