@@ -140,7 +140,13 @@ jobs:
           set -euo pipefail
           owner=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
           sed -e "s|{{VERSION}}|$VERSION|g" -e "s|{{OWNER}}|$owner|g" -e "s|{{REPOSITORY}}|$REPOSITORY|g" \
-            platform/docs/release-notes-template.md > notes.md
+            platform/docs/release-notes-template.md > template.md
+          # What changed (platform/docs/releases/<version>.md) goes under the title, above the
+          # downloads; a release without one still gets the downloads and install steps.
+          changes="platform/docs/releases/$VERSION.md"
+          { head -n 1 template.md; echo
+            if [ -f "$changes" ]; then cat "$changes"; echo; else echo "::warning::No $changes: the release has no list of changes" >&2; fi
+            tail -n +2 template.md; } > notes.md
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
