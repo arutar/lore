@@ -97,3 +97,27 @@ textarea { min-height: 64px; resize: vertical; }
 @media (prefers-reduced-motion: reduce) { .progress span { width: 100%; animation: none; } }
 .theme-row { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; font-weight: 550; }
 .theme-row select { min-height: 30px; padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--radius-theme); background: var(--panel-hover); color: var(--text); font: inherit; }
+
+/* Commit: the files that go in. Compact rows (name, then folder dimmed), at most about nine
+   visible before the list scrolls; the window grows with it up to that. */
+.changes { display: grid; gap: 6px; }
+.changes-head { display: flex; align-items: center; gap: 10px; min-height: 22px; }
+.changes-head .check { flex: 1; color: var(--muted); font-size: 11px; font-weight: 550; }
+.changes-filter { width: 150px; min-height: 0; padding: 3px 8px; font-size: 11px; }
+.check { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; }
+.check input { flex: none; width: 14px; height: 14px; min-height: 0; margin: 0; padding: 0; accent-color: var(--accent); }
+.change-list { max-height: 262px; margin: 0; padding: 0; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-theme); background: var(--panel); list-style: none; }
+.change-list li { border-bottom: 1px solid var(--line); }
+.change-list li:last-child { border: 0; }
+.change-list li .check { height: 28px; padding: 0 10px; color: var(--text); font-size: 11px; font-weight: 400; }
+.change-list li:hover { background: var(--panel-hover); }
+.change-list li.locked .check { cursor: default; opacity: .75; }
+.change-list li.none { padding: 6px 10px; color: var(--muted); font-size: 11px; }
+.mark { flex: none; width: 15px; border-radius: 3px; font: 700 10px/15px Consolas, monospace; text-align: center; }
+.mark.modified { background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
+.mark.added { background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ok); }
+.mark.deleted { background: color-mix(in srgb, var(--danger) 22%, transparent); color: var(--danger); }
+.change-list .name { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.change-list .folder { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.lock-note { display: flex; flex: none; align-items: center; gap: 4px; margin-left: auto; color: var(--danger); font-size: 10px; }
+.lock-note img { width: 12px; height: 12px; }

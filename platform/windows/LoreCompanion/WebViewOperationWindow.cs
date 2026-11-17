@@ -124,6 +124,7 @@ internal sealed class WebViewOperationWindow : Window
                         theme = settings.Theme,
                     });
                     if (request.Operation == CompanionOperation.Accounts) await SendAccounts();
+                    if (request.Operation == CompanionOperation.Commit) await SendCommitCandidates();
                     break;
                 case "browse":
                     if (request.Operation != CompanionOperation.Clone) break;
@@ -208,6 +209,25 @@ internal sealed class WebViewOperationWindow : Window
         {
             running = false;
             Send(new { type = "error", text = OperationError.UserMessage(exception, request.Operation), accessDenied = OperationError.IsAccessDenied(exception, request.Operation) });
+        }
+    }
+
+    // The files the commit would record, each with a box to leave it out. A failure leaves the
+    // window able to commit the selection as it is, and says why the list is missing.
+    private async Task SendCommitCandidates()
+    {
+        try
+        {
+            var files = await LoreOperations.CommitCandidates(request);
+            Send(new
+            {
+                type = "changes",
+                items = files.Select(file => new { path = file.Path, change = file.Change, staged = file.Staged, lockedBy = file.LockedBy }),
+            });
+        }
+        catch (Exception exception)
+        {
+            Send(new { type = "changes", items = Array.Empty<object>(), error = OperationError.UserMessage(exception, request.Operation) });
         }
     }
 

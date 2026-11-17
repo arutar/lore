@@ -28,7 +28,11 @@ public sealed class ChoiceRequired(string kind, IReadOnlyList<string> files, str
 }
 
 /// <summary>One file as the working copy's status reports it.</summary>
-public sealed record FileState(string Path, bool Staged, bool Conflicted, bool Merged, bool Added = false);
+public sealed record FileState(string Path, bool Staged, bool Conflicted, bool Merged, bool Added = false, bool Deleted = false);
+
+/// <summary>A file the Commit window offers: <paramref name="Change"/> is "added", "deleted" or
+/// "modified"; <paramref name="LockedBy"/> names someone else holding a lock on it, or is empty.</summary>
+public sealed record CommitCandidate(string Path, string Change, bool Staged, string LockedBy);
 
 public static class LoreOperations
 {
@@ -114,6 +118,9 @@ public static class LoreOperations
         using var globals = new LoreGlobalArgs { RepositoryPath = request.TargetPath, Identity = SelectedIdentity(request) };
         using var args = new LoreRepositoryCloneArgs { RepositoryUrl = request.RepositoryUrl };
         await Lore.RepositoryClone(globals, args).Callback(LogCallback(report)).WaitAsync();
+        // Hidden at once: a status, which also hides it, comes only with the first other
+        // operation, and an empty repository has nothing else to show in the folder.
+        HideMetadata(request.TargetPath);
         report("Clone completed");
         return new OperationOutcome();
     }
@@ -245,6 +252,36 @@ public static class LoreOperations
 
     private static readonly Regex LocalChangeLine = new(@"File has local changes:\s*(.+?)(\s+\(incoming|$)", RegexOptions.IgnoreCase);
 
+    /// <summary>What a commit of the selection would record, for the Commit window to list: the
+    /// changed files under the selected paths and the files staged anywhere (a commit records every
+    /// staged file). Conflicted files are left out, as Commit refuses them until they're resolved.
+    /// Locks are looked up on the server; without it the files are listed without them.</summary>
+    public static async Task<List<CommitCandidate>> CommitCandidates(OperationRequest request)
+    {
+        var files = (await ReadStatus(request, scan: true))
+            .Where(file => !file.Conflicted && (file.Staged || Selected(request, file.Path)))
+            .ToList();
+        var locks = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var held in await LockedByOthers(request, files.Select(file => file.Path).ToList()))
+            {
+                locks[RelativePath(request, held.Path)] = held.Owner;
+            }
+        }
+        catch (LoreError)
+        {
+            // Offline or not signed in: Commit itself still refuses files someone else has locked.
+        }
+        return files
+            .OrderBy(file => file.Path, StringComparer.OrdinalIgnoreCase)
+            .Select(file => new CommitCandidate(file.Path, file.Added ? "added" : file.Deleted ? "deleted" : "modified", file.Staged, locks.GetValueOrDefault(file.Path, "")))
+            .ToList();
+    }
+
+    private static string RelativePath(OperationRequest request, string path) =>
+        Path.IsPathRooted(path) ? Path.GetRelativePath(request.RepositoryRoot(), path) : path.Replace('/', '\\');
+
     // Commit stages the selection, refuses if another user holds a lock on any file it would
     // commit (before anything is recorded, so nothing has to be undone), then commits and sends.
     // With nothing new to commit it sends commits an earlier push couldn't. When someone changed
@@ -255,7 +292,14 @@ public static class LoreOperations
         var before = await ReadStatus(request);
         var unresolved = before.Where(file => file.Conflicted).Select(file => file.Path).ToList();
         if (unresolved.Count > 0) throw MergeConflict(unresolved);
-        await Stage(request, report);
+        if (request.Files.Length > 0)
+        {
+            await StageExactly(request, before, request.Files, report);
+        }
+        else
+        {
+            await Stage(request, report);
+        }
         var staged = (await ReadStatus(request)).Where(file => file.Staged).Select(file => file.Path).ToList();
         if (staged.Count == 0)
         {
@@ -387,6 +431,20 @@ public static class LoreOperations
         using var args = new LoreFileStageArgs { Paths = request.Paths, Scan = true };
         await Lore.FileStage(globals, args).Callback(LogCallback(report)).WaitAsync();
         report("Selected paths staged");
+    }
+
+    // The files the user ticked in the Commit window become exactly what is staged: they are
+    // staged, and anything else staged is unstaged (its changes stay in the files), since a commit
+    // records every staged file.
+    private static async Task StageExactly(OperationRequest request, List<FileState> before, string[] files, Action<string> report)
+    {
+        var wanted = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
+        var extra = before.Where(file => file.Staged && !wanted.Contains(file.Path)).Select(file => FullPath(request, file.Path)).ToArray();
+        if (extra.Length > 0) await UnstagePaths(request, extra, report);
+        using var globals = Globals(request);
+        using var args = new LoreFileStageArgs { Paths = files.Select(file => FullPath(request, file)).ToArray(), Scan = true };
+        await Lore.FileStage(globals, args).Callback(LogCallback(report)).WaitAsync();
+        report($"Staged {Count(files.Length, "file")}");
     }
 
     private static async Task<OperationOutcome> Unstage(OperationRequest request, Action<string> report)
@@ -529,8 +587,10 @@ public static class LoreOperations
             if (status.Type == LoreNodeType.DIRECTORY) return;
             var path = Path.IsPathRooted(status.Path) ? Path.GetRelativePath(root, status.Path) : status.Path.Replace('/', '\\');
             var conflicted = status.FlagConflictUnresolved || status.FlagConflict && !status.FlagStaged;
-            var added = status.Action.ToString().StartsWith("ADD", StringComparison.OrdinalIgnoreCase);
-            files.Add(new FileState(path, status.FlagStaged, conflicted, status.FlagMerged, added));
+            var action = status.Action.ToString();
+            var added = action.StartsWith("ADD", StringComparison.OrdinalIgnoreCase);
+            var deleted = action.StartsWith("DELETE", StringComparison.OrdinalIgnoreCase);
+            files.Add(new FileState(path, status.FlagStaged, conflicted, status.FlagMerged, added, deleted));
         }).WaitAsync();
         return files;
     }
@@ -641,14 +701,20 @@ public static class LoreOperations
         });
     }
 
-    private static async Task Status(OperationRequest request, Action<string> report, bool scan)
+    // The working copy's .lore folder, hidden as Lore's own data rather than the user's files.
+    private static void HideMetadata(string root)
     {
-        var root = request.RepositoryRoot();
         var metadata = Path.Combine(root, ".lore");
         if (Directory.Exists(metadata))
         {
             File.SetAttributes(metadata, File.GetAttributes(metadata) | FileAttributes.Hidden);
         }
+    }
+
+    private static async Task Status(OperationRequest request, Action<string> report, bool scan)
+    {
+        var root = request.RepositoryRoot();
+        HideMetadata(root);
         OverlayCacheAccessor.Clear(root);
         var folderStates = new Dictionary<string, OverlayState>(StringComparer.OrdinalIgnoreCase);
         var fileStates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

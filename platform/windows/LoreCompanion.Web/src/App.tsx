@@ -36,7 +36,10 @@ type ChoiceMessage = { type: "choice"; kind: "staged" | "both"; files: string[];
 type Choice = "commit" | "unstage" | "mine" | "theirs";
 // A step that deletes the user's changes waits for this confirmation.
 type Confirmation = { files: string[]; text: string; action: string; run: () => void };
+// What Commit would record (LoreOperations.CommitCandidates); the user ticks what goes in.
+type Change = { path: string; change: "added" | "deleted" | "modified"; staged: boolean; lockedBy: string };
 type HostMessage = InitMessage
+  | { type: "changes"; items: Change[]; error?: string }
   | { type: "progress"; text: string }
   | { type: "complete"; text: string; warning?: boolean }
   | { type: "error"; text: string; accessDenied?: boolean }
@@ -48,7 +51,7 @@ type ClientMessage = { type: "ready" } | { type: "browse" } | { type: "cancel" }
   | { type: "accounts-add"; remoteUrl: string } | { type: "accounts-select"; userId: string }
   | { type: "accounts-remove"; authUrl: string; userId: string } | { type: "theme-set"; theme: string }
   | { type: "size"; height: number }
-  | { type: "run"; repositoryUrl: string; targetPath: string; message: string; choice?: Choice; files?: string[] };
+  | { type: "run"; repositoryUrl: string; targetPath: string; message: string; choice?: Choice | ""; files?: string[] };
 
 interface WebViewBridge {
   postMessage(message: ClientMessage): void;
@@ -75,6 +78,59 @@ const info: Record<OperationValue, { title: string; subtitle: string; action: st
 const themes: [string, string][] = [["midnight", "Midnight"], ["sky", "Sky"], ["ember", "Ember"], ["sage", "Sage"],
   ["ocean", "Ocean"], ["retro", "Retro"], ["autumn", "Autumn"], ["light", "Light"], ["cyberpunk", "Cyberpunk"]];
 const post = (message: ClientMessage) => window.chrome?.webview?.postMessage(message);
+
+const changeMark: Record<Change["change"], { letter: string; title: string }> = {
+  added: { letter: "A", title: "New file" },
+  deleted: { letter: "D", title: "Deleted" },
+  modified: { letter: "M", title: "Changed" },
+};
+// A filter field only where the list is long enough to need one.
+const filterFrom = 12;
+
+// The Commit window's list: one row per file (name first, its folder after it, dimmed), a box to
+// leave it out, and a box in the header for all of them. Files someone else has locked can't be
+// committed, so their boxes are off and disabled.
+function ChangeList({ changes, checked, setChecked, disabled }: { changes: Change[]; checked: Set<string>; setChecked: (next: Set<string>) => void; disabled: boolean }) {
+  const [filter, setFilter] = useState("");
+  const allowed = changes.filter((change) => !change.lockedBy);
+  const needle = filter.trim().toLowerCase();
+  const shown = needle ? changes.filter((change) => change.path.toLowerCase().includes(needle)) : changes;
+  const shownAllowed = shown.filter((change) => !change.lockedBy);
+  const allOn = shownAllowed.length > 0 && shownAllowed.every((change) => checked.has(change.path));
+  const someOn = shownAllowed.some((change) => checked.has(change.path));
+  const toggle = (path: string) => {
+    const next = new Set(checked);
+    if (next.has(path)) next.delete(path); else next.add(path);
+    setChecked(next);
+  };
+  const toggleAll = () => {
+    const next = new Set(checked);
+    for (const change of shownAllowed) { if (allOn) next.delete(change.path); else next.add(change.path); }
+    setChecked(next);
+  };
+  return <div className="changes">
+    <div className="changes-head">
+      <label className="check"><input type="checkbox" disabled={disabled || shownAllowed.length === 0} checked={allOn}
+        ref={(box) => { if (box) box.indeterminate = someOn && !allOn; }} onChange={toggleAll} aria-label="Select all" />
+        <span>Changes · {checked.size} of {allowed.length}</span></label>
+      {changes.length >= filterFrom && <input className="changes-filter" type="search" value={filter} placeholder="Filter"
+        aria-label="Filter files" onChange={(event) => setFilter(event.target.value)} />}
+    </div>
+    <ul className="change-list">{shown.map((change) => {
+      const cut = Math.max(change.path.lastIndexOf("\\"), change.path.lastIndexOf("/"));
+      const name = change.path.slice(cut + 1);
+      const folder = cut > 0 ? change.path.slice(0, cut) : "";
+      const mark = changeMark[change.change];
+      return <li key={change.path} className={change.lockedBy ? "locked" : ""} title={change.path}>
+        <label className="check"><input type="checkbox" disabled={disabled || Boolean(change.lockedBy)} checked={checked.has(change.path)} onChange={() => toggle(change.path)} />
+          <span className={`mark ${change.change}`} title={mark.title}>{mark.letter}</span>
+          <span className="name">{name}</span>
+          {folder && <span className="folder">{folder}</span>}
+          {change.lockedBy && <span className="lock-note"><img src={lockIcon} alt="" />{change.lockedBy}</span>}
+        </label></li>;
+    })}{shown.length === 0 && <li className="none">No files match the filter.</li>}</ul>
+  </div>;
+}
 
 const discardText = "Your changes to these files will be deleted and can't be restored. If you need them, copy the files somewhere else first.";
 
@@ -142,8 +198,12 @@ export default function App() {
   const [theme, setTheme] = useState("midnight");
   const [question, setQuestion] = useState<ChoiceMessage | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  // Commit: null while the files are being looked up.
+  const [changes, setChanges] = useState<Change[] | null>(null);
+  const [changesError, setChangesError] = useState("");
+  const [checked, setChecked] = useState<Set<string>>(new Set());
 
-  const start = (current: InitMessage, answer?: { choice: Choice; files: string[] }) => {
+  const start = (current: InitMessage, answer?: { choice: Choice | ""; files: string[] }) => {
     setRunning(true);
     setQuestion(null);
     setConfirmation(null);
@@ -171,6 +231,10 @@ export default function App() {
         // Operations that change or discard work wait for the user; the rest start at once.
         const waits: OperationValue[] = [Operation.Clone, Operation.Commit, Operation.Accounts, Operation.Revert, Operation.Resolve];
         if (!waits.includes(data.operation)) start(data);
+      } else if (data.type === "changes") {
+        setChanges(data.items);
+        setChangesError(data.error ?? "");
+        setChecked(new Set(data.items.filter((change) => !change.lockedBy).map((change) => change.path)));
       } else if (data.type === "theme") {
         document.documentElement.dataset.theme = data.theme;
         setTheme(data.theme);
@@ -254,7 +318,10 @@ export default function App() {
       setError("The WebView2 bridge is unavailable.");
       return;
     }
-    start({ ...config, repositoryUrl, targetPath, message });
+    // With a list, exactly the ticked files are committed; without one (it failed, or nothing
+    // changed and Commit only sends earlier commits) the selection is.
+    const files = config.operation === Operation.Commit && changes && changes.length > 0 ? [...checked] : undefined;
+    start({ ...config, repositoryUrl, targetPath, message }, files ? { choice: "", files } : undefined);
   };
   const hasPaths = ([Operation.Commit, Operation.Stage, Operation.Lock, Operation.Unlock, Operation.Unstage, Operation.Revert, Operation.Resolve] as OperationValue[])
     .includes(config.operation);
@@ -303,7 +370,11 @@ export default function App() {
         {config.operation === Operation.Sync && !question && <div className="summary">If files are staged, or changed both here and on the server, Sync asks what to do before it changes them.</div>}
         {config.operation === Operation.Revert && !question && <div className="summary">Your changes to the selected files are deleted and can't be restored. You'll be asked to confirm. New files the server doesn't have yet are left in place.</div>}
         {config.operation === Operation.Resolve && !question && <div className="summary">Choose your version or the server's for the selected files. When no conflict is left, the merge is committed and sent to the server.</div>}
-        {hasPaths && !question && <label><span>Selected paths · {config.paths.length}</span><ul className="path-list">{config.paths.map((path) => <li key={path}>{path}</li>)}</ul></label>}
+        {config.operation === Operation.Commit && !question && !success && (changes === null
+          ? <div className="summary">Looking for changes…</div>
+          : changes.length > 0 ? <ChangeList changes={changes} checked={checked} setChecked={setChecked} disabled={running} />
+          : <div className="summary">{changesError ? `The list of changes isn't available (${changesError}). Commit records the selected paths.` : "No changes in the selected paths. Commit sends earlier commits that weren't sent yet, if there are any."}</div>)}
+        {hasPaths && config.operation !== Operation.Commit && !question && <label><span>Selected paths · {config.paths.length}</span><ul className="path-list">{config.paths.map((path) => <li key={path}>{path}</li>)}</ul></label>}
         {config.operation === Operation.Commit && !question && <label><span>Commit message (optional)</span><textarea disabled={running} value={message}
           onChange={(event) => setMessage(event.target.value)} placeholder="Describe the changes" /></label>}
         {(config.operation === Operation.Stage || config.operation === Operation.Unstage || config.operation === Operation.Lock || config.operation === Operation.Unlock)
@@ -343,7 +414,7 @@ export default function App() {
               <button className="button primary" type="button" disabled={running} onClick={() => resolve("mine")}>{running ? "Working…" : "Keep my version"}</button>
             </> : config.operation === Operation.Revert && !error
               ? <button className="button danger solid" type="button" disabled={running} onClick={() => setConfirmation({ files: config.paths, text: discardText, action: "Discard changes", run: () => start({ ...config, repositoryUrl, targetPath, message }) })}>{running ? "Working…" : current.action}</button>
-              : <button className="button primary" type="submit" disabled={running}>{running ? "Working…" : error ? "Retry" : current.action}</button>}
+              : <button className="button primary" type="submit" disabled={running || config.operation === Operation.Commit && (changes === null || changes.length > 0 && checked.size === 0)}>{running ? "Working…" : error ? "Retry" : current.action}</button>}
           </>}
         </footer>
       </form>
