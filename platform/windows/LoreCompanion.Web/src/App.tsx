@@ -32,14 +32,20 @@ type InitMessage = {
   theme: string;
 };
 // The operation stopped to ask (ChoiceRequired in LoreOperations.cs); nothing it asks about was changed.
-type ChoiceMessage = { type: "choice"; kind: "staged" | "both"; files: string[]; text: string; merged: boolean };
+type ChoiceMessage = { type: "choice"; kind: "staged" | "both"; files: string[]; total?: number; text: string; merged: boolean };
 type Choice = "commit" | "unstage" | "mine" | "theirs";
 // A step that deletes the user's changes waits for this confirmation.
 type Confirmation = { files: string[]; text: string; action: string; run: () => void };
 // What Commit would record (LoreOperations.CommitCandidates); the user ticks what goes in.
-type Change = { path: string; change: "added" | "deleted" | "modified"; staged: boolean; lockedBy: string };
+type Change = { path: string; change: "added" | "deleted" | "modified"; staged: boolean; lockedBy: string; selected?: boolean };
+// One folder row of the Commit list: everything below it, split by kind, and what is ticked.
+type ChangeFolder = { path: string; name: string; depth: number; files: number; added: number; modified: number; deleted: number; locked: number; selected: number };
+type ChangeSummary = { total: number; selected: number; eligible: number; folders: ChangeFolder[]; whole: boolean };
+type ChangePage = { folder: string; filter: string; offset: number; total: number; selected: number; items: Change[] };
 type HostMessage = InitMessage
-  | { type: "changes"; items: Change[]; error?: string }
+  | ({ type: "changes"; items?: Change[] | null; error?: string } & Partial<ChangeSummary>)
+  | ({ type: "changes-page" } & Partial<ChangePage>)
+  | ({ type: "selection" } & Partial<ChangeSummary>)
   | { type: "progress"; text: string }
   | { type: "complete"; text: string; warning?: boolean }
   | { type: "error"; text: string; accessDenied?: boolean }
@@ -50,6 +56,8 @@ type HostMessage = InitMessage
 type ClientMessage = { type: "ready" } | { type: "browse" } | { type: "cancel" } | { type: "accounts-open" }
   | { type: "accounts-add"; remoteUrl: string } | { type: "accounts-select"; userId: string }
   | { type: "accounts-remove"; authUrl: string; userId: string } | { type: "theme-set"; theme: string }
+  | { type: "changes-page"; folder: string; filter: string; offset: number; limit: number; search: boolean }
+  | { type: "changes-select"; scope: "all" | "folder" | "file"; path: string; on: boolean }
   | { type: "size"; height: number }
   | { type: "run"; repositoryUrl: string; targetPath: string; message: string; choice?: Choice | ""; files?: string[] };
 
@@ -88,124 +96,218 @@ const changeMark: Record<Change["change"], { title: string }> = {
 };
 // A filter field only where the list is long enough to need one.
 const filterFrom = 12;
+// Files per page of one folder, as CommitList.PageSize in the host.
+const pageSize = 200;
 
-// The Commit window's list, grouped by folder. A folder with two or more changed files below it
-// gets a row of its own: its box takes in or leaves out everything below it, and the arrow folds
-// it to that one row. A folder holding only further folders is merged into them ("art\textures"),
-// and a lone file stays a single row with its folder after it, dimmed. Files someone else has
-// locked can't be committed, so their boxes are off and disabled.
-type Folder = { name: string; path: string; folders: Map<string, Folder>; files: Change[] };
+// The folder a file sits in, the way the host names folders in its tree.
+const folderOf = (path: string) => path.split(/[\\/]/).slice(0, -1).join("\\");
+const nameOf = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
-function buildTree(changes: Change[]): Folder {
-  const root: Folder = { name: "", path: "", folders: new Map(), files: [] };
-  for (const change of changes) {
-    const parts = change.path.split(/[\\/]/);
-    let node = root;
-    for (const part of parts.slice(0, -1)) {
-      const key = part.toLowerCase();
-      let next = node.folders.get(key);
-      if (!next) {
-        next = { name: part, path: node.path ? `${node.path}\\${part}` : part, folders: new Map(), files: [] };
-        node.folders.set(key, next);
-      }
-      node = next;
-    }
-    node.files.push(change);
+function groupPages(items: Change[] | null): Record<string, ChangePage> {
+  const grouped: Record<string, ChangePage> = {};
+  for (const item of items ?? []) {
+    const folder = folderOf(item.path);
+    const page = grouped[folder] ?? { folder, filter: "", offset: 0, total: 0, selected: 0, items: [] };
+    page.items.push(item);
+    page.total += 1;
+    if (!item.lockedBy && item.selected !== false) page.selected += 1;
+    grouped[folder] = page;
   }
-  return root;
+  return grouped;
 }
 
-function filesBelow(folder: Folder): Change[] {
-  return [...folder.files, ...[...folder.folders.values()].flatMap(filesBelow)];
-}
-
-// "art" holding only "textures" reads as one folder, "art\textures".
-function compact(folder: Folder): Folder {
-  let current = folder;
-  let name = folder.name;
-  while (current.files.length === 0 && current.folders.size === 1) {
-    current = [...current.folders.values()][0];
-    name = `${name}\\${current.name}`;
-  }
-  return current === folder ? folder : { ...current, name };
-}
-
-const byName = (left: string, right: string) => left.localeCompare(right, undefined, { sensitivity: "base", numeric: true });
-
-function ChangeList({ changes, checked, setChecked, disabled }: { changes: Change[]; checked: Set<string>; setChecked: (next: Set<string>) => void; disabled: boolean }) {
+// The Commit window's list, grouped by folder. A folder row's box takes in or leaves out
+// everything below it, and its arrow folds it to that one row. The host sends the folder tree and
+// then one page of files per folder as it opens, so a working copy with hundreds of thousands of
+// changes costs the page a few rows at a time. Files someone else has locked can't be committed,
+// so their boxes are off and disabled.
+function ChangeList({ summary, items, disabled, onSelected }: {
+  summary: ChangeSummary;
+  items: Change[] | null;
+  disabled: boolean;
+  onSelected: (selected: number) => void;
+}) {
+  const [folders, setFolders] = useState<ChangeFolder[]>(summary.folders);
+  const [open, setOpen] = useState<Set<string>>(() => new Set(summary.whole ? summary.folders.map((folder) => folder.path) : []));
+  const [pages, setPages] = useState<Record<string, ChangePage>>(() => groupPages(items));
   const [filter, setFilter] = useState("");
-  const [folded, setFolded] = useState<Set<string>>(new Set());
-  const allowed = changes.filter((change) => !change.lockedBy);
-  const needle = filter.trim().toLowerCase();
-  const shown = needle ? changes.filter((change) => change.path.toLowerCase().includes(needle)) : changes;
+  const [found, setFound] = useState<ChangePage | null>(null);
+  const [waiting, setWaiting] = useState<Set<string>>(new Set());
+  const scope = useRef<"all" | "folder" | "file">("file");
+  const pagesRef = useRef(pages);
+  pagesRef.current = pages;
 
-  // Puts every file of `files` someone may commit in, or takes them all out.
-  const setAll = (files: Change[], on: boolean) => {
-    const next = new Set(checked);
-    for (const change of files) if (!change.lockedBy) { if (on) next.add(change.path); else next.delete(change.path); }
-    setChecked(next);
-  };
-  const state = (files: Change[]) => {
-    const open = files.filter((change) => !change.lockedBy);
-    const on = open.filter((change) => checked.has(change.path)).length;
-    return { open: open.length, all: open.length > 0 && on === open.length, some: on > 0 && on < open.length };
-  };
-  const box = (files: Change[], label: string) => {
-    const { open, all, some } = state(files);
-    return <input type="checkbox" disabled={disabled || open === 0} checked={all} aria-label={label}
-      ref={(element) => { if (element) element.indeterminate = some; }} onChange={() => setAll(files, !all)} />;
+  const merge = (current: ChangePage | undefined, page: ChangePage): ChangePage => {
+    if (!current || page.offset === 0) return page;
+    const merged = [...current.items];
+    for (const item of page.items) if (!merged.some((known) => known.path === item.path)) merged.push(item);
+    return { ...page, items: merged };
   };
 
-  const fileRow = (change: Change, depth: number, folder: string) => {
-    const name = change.path.split(/[\\/]/).pop() ?? change.path;
+  const request = (folder: string, offset: number, limit = pageSize, search = "") => {
+    post({ type: "changes-page", folder, filter: search, offset, limit, search: Boolean(search) });
+  };
+
+  useEffect(() => {
+    const bridge = window.chrome?.webview;
+    if (!bridge) return;
+    const receive = (event: MessageEvent<HostMessage>) => {
+      const data = event.data;
+      if (data.type === "changes-page") {
+        const page = data as ChangePage;
+        if (page.filter) {
+          setFound(page);
+          return;
+        }
+        setPages((current) => ({ ...current, [page.folder]: merge(current[page.folder], page) }));
+        setWaiting((current) => {
+          const next = new Set(current);
+          next.delete(page.folder);
+          return next;
+        });
+      } else if (data.type === "selection") {
+        const next = data as Partial<ChangeSummary>;
+        if (next.folders) setFolders(next.folders);
+        if (typeof next.selected === "number") onSelected(next.selected);
+        // A folder's box changes counts the rows at hand cannot work out: ask for the pages that are
+        // open again. A single file's box is already right here.
+        if (scope.current !== "file") {
+          for (const folder of open) request(folder, 0, Math.max(pageSize, pagesRef.current[folder]?.items.length ?? 0));
+          if (found) request("", 0, Math.max(pageSize, found.items.length), filter);
+        }
+      }
+    };
+    bridge.addEventListener("message", receive);
+    return () => bridge.removeEventListener("message", receive);
+  });
+
+  const toggleFolder = (folder: ChangeFolder) => {
+    scope.current = "folder";
+    const on = folder.selected < folder.files - folder.locked;
+    post({ type: "changes-select", scope: "folder", path: folder.path, on });
+  };
+
+  const toggleAll = () => {
+    scope.current = "all";
+    post({ type: "changes-select", scope: "all", path: "", on: summary.selected < summary.eligible });
+  };
+
+  const toggleFile = (change: Change) => {
+    scope.current = "file";
+    const on = change.selected === false;
+    setPages((current) => mark(current, change.path, on));
+    setFound((current) => current ? { ...current, items: current.items.map((item) => item.path === change.path ? { ...item, selected: on } : item) } : current);
+    post({ type: "changes-select", scope: "file", path: change.path, on });
+  };
+
+  const fold = (folder: ChangeFolder) => {
+    const next = new Set(open);
+    if (next.has(folder.path)) next.delete(folder.path);
+    else {
+      next.add(folder.path);
+      if (!pages[folder.path] && !summary.whole) {
+        setWaiting((current) => new Set(current).add(folder.path));
+        request(folder.path, 0);
+      }
+    }
+    setOpen(next);
+  };
+
+  const search = (needle: string) => {
+    setFilter(needle);
+    if (!needle.trim()) {
+      setFound(null);
+      return;
+    }
+    request("", 0, Math.max(pageSize, found?.items.length ?? 0), needle);
+  };
+
+  const fileRow = (change: Change, level: number, folder: string) => {
     const mark = changeMark[change.change];
     return <li key={change.path} className={`${change.change}${change.lockedBy ? " locked" : ""}`} title={`${mark.title}: ${change.path}`}>
-      <label className="check" style={{ paddingLeft: 10 + depth * 18 }}>
+      <label className="check" style={{ paddingLeft: 10 + level * 18 }}>
         <span className="caret" />
-        <input type="checkbox" disabled={disabled || Boolean(change.lockedBy)} checked={checked.has(change.path)} onChange={() => setAll([change], !checked.has(change.path))} />
-        <span className={`name ${change.change}`}>{name}</span>
+        <input type="checkbox" disabled={disabled || Boolean(change.lockedBy)} checked={change.selected !== false} onChange={() => toggleFile(change)} />
+        <span className={`name ${change.change}`}>{nameOf(change.path)}</span>
         {folder && <span className="folder">{folder}</span>}
         {change.lockedBy && <span className="lock-note"><img src={lockIcon} alt="" />{change.lockedBy}</span>}
       </label></li>;
   };
 
-  const rows = (node: Folder, depth: number): React.ReactNode[] => {
-    const out: React.ReactNode[] = [];
-    for (const child of [...node.folders.values()].map(compact).sort((left, right) => byName(left.name, right.name))) {
-      const files = filesBelow(child);
-      if (files.length === 1) {
-        // One file: its row carries the folder, relative to where the list stands.
-        const relative = child.path.slice(node.path ? node.path.length + 1 : 0);
-        out.push(fileRow(files[0], depth, relative));
+  const known = new Set(folders.map((folder) => folder.path));
+  const visible = (folder: ChangeFolder) => {
+    let parent = folderOf(folder.path);
+    while (parent) {
+      if (known.has(parent) && !open.has(parent)) return false;
+      parent = folderOf(parent);
+    }
+    return true;
+  };
+
+  const rows: React.ReactNode[] = [];
+  if (found) {
+    // A filter searches every change, so the list becomes the matches, whatever folder they sit in.
+    rows.push(...found.items.map((change) => fileRow(change, 0, folderOf(change.path))));
+    if (found.items.length < found.total) rows.push(<li key="more-found" className="more">
+      <button type="button" className="button secondary" disabled={disabled}
+        onClick={() => request("", found.items.length, pageSize, filter)}>Show more · {found.items.length} of {found.total}</button></li>);
+    if (found.total === 0) rows.push(<li key="none" className="none">No files match the filter.</li>);
+  } else {
+    const top = pages[""];
+    if (top) rows.push(...top.items.map((change) => fileRow(change, 0, "")));
+    for (const folder of folders) {
+      if (!visible(folder)) continue;
+      const isOpen = open.has(folder.path);
+      const allowed = folder.files - folder.locked;
+      rows.push(<li key={`folder:${folder.path}`} className="folder-row" title={folder.path}>
+        <div className="check" style={{ paddingLeft: 10 + folder.depth * 18 }}>
+          <button type="button" className="caret" aria-label={isOpen ? `Collapse ${folder.name}` : `Expand ${folder.name}`} aria-expanded={isOpen}
+            onClick={() => fold(folder)}>{isOpen ? "▾" : "▸"}</button>
+          <input type="checkbox" disabled={disabled || allowed === 0} checked={allowed > 0 && folder.selected >= allowed}
+            aria-label={`All files in ${folder.name}`} ref={(element) => { if (element) element.indeterminate = folder.selected > 0 && folder.selected < allowed; }}
+            onChange={() => toggleFolder(folder)} />
+          <span className="name" onClick={() => toggleFolder(folder)}>{folder.name}</span>
+          <span className="count">{folder.files === 1 ? "1 file" : `${folder.files} files`}</span>
+        </div></li>);
+      if (!isOpen) continue;
+      const page = pages[folder.path];
+      if (!page) {
+        rows.push(<li key={`loading:${folder.path}`} className="none">{waiting.has(folder.path) ? "Loading files…" : "Open to load the files."}</li>);
         continue;
       }
-      const isFolded = folded.has(child.path) && !needle;
-      out.push(<li key={`folder:${child.path}`} className="folder-row" title={child.path}>
-        <div className="check" style={{ paddingLeft: 10 + depth * 18 }}>
-          <button type="button" className="caret" aria-label={isFolded ? `Expand ${child.name}` : `Collapse ${child.name}`} aria-expanded={!isFolded}
-            onClick={() => { const next = new Set(folded); if (next.has(child.path)) next.delete(child.path); else next.add(child.path); setFolded(next); }}>{isFolded ? "▸" : "▾"}</button>
-          {box(files, `All files in ${child.name}`)}
-          <span className="name" onClick={() => setAll(files, !state(files).all)}>{child.name}</span>
-          <span className="count">{files.length} files</span>
-        </div></li>);
-      if (!isFolded) out.push(...rows(child, depth + 1));
+      rows.push(...page.items.map((change) => fileRow(change, folder.depth + 1, "")));
+      if (page.items.length < page.total) rows.push(<li key={`more:${folder.path}`} className="more">
+        <button type="button" className="button secondary" disabled={disabled}
+          onClick={() => request(folder.path, page.items.length)}>Show more · {page.items.length} of {page.total}</button></li>);
     }
-    for (const change of [...node.files].sort((left, right) => byName(left.path, right.path))) out.push(fileRow(change, depth, ""));
-    return out;
-  };
+  }
 
   return <div className="changes">
     <div className="changes-head">
-      <label className="check">{box(shown, "Select all")}
-        <span>Changes · {checked.size} of {allowed.length}</span></label>
-      {changes.length >= filterFrom && <input className="changes-filter" type="search" value={filter} placeholder="Filter"
-        aria-label="Filter files" onChange={(event) => setFilter(event.target.value)} />}
+      <label className="check">
+        <input type="checkbox" disabled={disabled || summary.eligible === 0} checked={summary.eligible > 0 && summary.selected >= summary.eligible}
+          aria-label="Select all" ref={(element) => { if (element) element.indeterminate = summary.selected > 0 && summary.selected < summary.eligible; }}
+          onChange={toggleAll} />
+        <span>Changes · {summary.selected} of {summary.eligible}</span></label>
+      {summary.total >= filterFrom && <input className="changes-filter" type="search" value={filter} placeholder="Filter"
+        aria-label="Filter files" onChange={(event) => search(event.target.value)} />}
     </div>
-    <ul className="change-list">{rows(buildTree(shown), 0)}{shown.length === 0 && <li className="none">No files match the filter.</li>}</ul>
+    <ul className="change-list">{rows}</ul>
     {/* What the colours mean, for the kinds of change the list holds. */}
-    <div className="legend">{(Object.keys(changeMark) as Change["change"][]).filter((kind) => changes.some((change) => change.change === kind)).map((kind) =>
+    <div className="legend">{(Object.keys(changeMark) as Change["change"][]).filter((kind) => folders.some((folder) => folder[kind] > 0)).map((kind) =>
       <span key={kind}><i className={`dot ${kind}`} />{changeMark[kind].title.toLowerCase()}</span>)}</div>
   </div>;
+}
+
+// Takes a file in or out of the pages at hand, so its box answers at once.
+function mark(pages: Record<string, ChangePage>, path: string, on: boolean): Record<string, ChangePage> {
+  const folder = folderOf(path);
+  const page = pages[folder];
+  if (!page) return pages;
+  const items = page.items.map((item) => item.path === path ? { ...item, selected: on } : item);
+  const change = page.items.find((item) => item.path === path);
+  const selected = page.selected + (change && !change.lockedBy ? (on ? 1 : -1) : 0);
+  return { ...pages, [folder]: { ...page, items, selected } };
 }
 
 const discardText = "Your changes to these files will be deleted and can't be restored. If you need them, copy the files somewhere else first.";
@@ -274,10 +376,11 @@ export default function App() {
   const [theme, setTheme] = useState("midnight");
   const [question, setQuestion] = useState<ChoiceMessage | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
-  // Commit: null while the files are being looked up.
-  const [changes, setChanges] = useState<Change[] | null>(null);
+  // Commit: null while the files are being looked up; then the tree and a count of what is ticked.
+  const [changes, setChanges] = useState<ChangeSummary | null>(null);
+  const [changeItems, setChangeItems] = useState<Change[] | null>(null);
   const [changesError, setChangesError] = useState("");
-  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState(0);
 
   const start = (current: InitMessage, answer?: { choice: Choice | ""; files: string[] }) => {
     setRunning(true);
@@ -308,23 +411,48 @@ export default function App() {
         const waits: OperationValue[] = [Operation.Clone, Operation.Commit, Operation.Accounts, Operation.Revert, Operation.Resolve];
         if (!waits.includes(data.operation)) start(data);
       } else if (data.type === "changes") {
-        setChanges(data.items);
         setChangesError(data.error ?? "");
-        setChecked(new Set(data.items.filter((change) => !change.lockedBy).map((change) => change.path)));
+        setChangeItems(data.items ?? null);
+        setSelected(data.selected ?? 0);
+        setChanges(typeof data.total === "number"
+          ? { total: data.total, selected: data.selected ?? 0, eligible: data.eligible ?? 0, folders: data.folders ?? [], whole: Boolean(data.whole) }
+          : null);
+      } else if (data.type === "selection") {
+        setSelected(data.selected ?? 0);
+        setChanges((current) => current ? { ...current, selected: data.selected ?? current.selected, folders: data.folders ?? current.folders } : current);
       } else if (data.type === "theme") {
         document.documentElement.dataset.theme = data.theme;
         setTheme(data.theme);
       } else if (data.type === "accounts") {
         setAccounts(data.items);
       } else if (data.type === "progress") {
-        setLogs((current) => [...current, data.text]);
+        // The host batches the lines Lore reports per file, so one message can hold many of them;
+        // the log keeps the tail, which is what the window shows anyway.
+        const lines = data.text.split("\n").filter((line) => line.length > 0);
+        setLogs((current) => {
+          const next = [...current, ...lines];
+          return next.length > 200 ? next.slice(next.length - 200) : next;
+        });
         if (operationRef.current === Operation.Status) {
-          const match = data.text.match(/:\s*(Modified|StagedModified|Staged|Conflicted|Locked|Ignored)\s*$/);
-          if (match) setStatuses((current) => ({ ...current, [match[1]]: (current[match[1]] ?? 0) + 1 }));
+          setStatuses((current) => {
+            const next = { ...current };
+            for (const line of lines) {
+              const match = line.match(/:\s*(Modified|StagedModified|Staged|Conflicted|Locked|Ignored)\s*$/);
+              if (match) next[match[1]] = (next[match[1]] ?? 0) + 1;
+            }
+            return next;
+          });
         }
         if (operationRef.current === Operation.History) {
-          const match = data.text.match(/^Revision\s+(\d+):\s*(.+)$/);
-          if (match) setRevisions((current) => [...current, { number: match[1], id: match[2] }]);
+          // A long history would grow the list without bound; the newest few hundred are enough.
+          setRevisions((current) => {
+            const next = [...current];
+            for (const line of lines) {
+              const match = line.match(/^Revision\s+(\d+):\s*(.+)$/);
+              if (match) next.push({ number: match[1], id: match[2] });
+            }
+            return next.length > 500 ? next.slice(0, 500) : next;
+          });
         }
       } else if (data.type === "directory") {
         setTargetPath(data.path);
@@ -394,10 +522,9 @@ export default function App() {
       setError("The WebView2 bridge is unavailable.");
       return;
     }
-    // With a list, exactly the ticked files are committed; without one (it failed, or nothing
-    // changed and Commit only sends earlier commits) the selection is.
-    const files = config.operation === Operation.Commit && changes && changes.length > 0 ? [...checked] : undefined;
-    start({ ...config, repositoryUrl, targetPath, message }, files ? { choice: "", files } : undefined);
+    // The host keeps the ticked files itself (they never fit a page message for a large working
+    // copy), so Commit takes the selection from there; without a list it commits the paths.
+    start({ ...config, repositoryUrl, targetPath, message });
   };
   const hasPaths = ([Operation.Commit, Operation.Stage, Operation.Lock, Operation.Unlock, Operation.Unstage, Operation.Revert, Operation.Resolve] as OperationValue[])
     .includes(config.operation);
@@ -409,8 +536,10 @@ export default function App() {
     start({ ...config, repositoryUrl, targetPath, message: choice });
   };
   const statusCount = (name: string) => statuses[name] ?? 0;
+  // The question's files stay on the host: it asked about them and answers with the choice alone,
+  // because a working copy's worth of paths would not fit a message.
   const answer = (choice: Choice, files: string[], danger?: boolean) => {
-    const run = () => start({ ...config, repositoryUrl, targetPath, message }, { choice, files });
+    const run = () => start({ ...config, repositoryUrl, targetPath, message }, { choice, files: [] });
     if (danger) setConfirmation({ files, text: discardText, action: "Discard and take the server's version", run });
     else run();
   };
@@ -447,8 +576,8 @@ export default function App() {
         {config.operation === Operation.Revert && !question && <div className="summary">Your changes to the selected files are deleted and can't be restored. You'll be asked to confirm. New files the server doesn't have yet are left in place.</div>}
         {config.operation === Operation.Resolve && !question && <div className="summary">Choose your version or the server's for the selected files. When no conflict is left, the merge is committed and sent to the server.</div>}
         {config.operation === Operation.Commit && !question && !success && (changes === null
-          ? <div className="summary">Looking for changes…</div>
-          : changes.length > 0 ? <ChangeList changes={changes} checked={checked} setChecked={setChecked} disabled={running} />
+          ? <div className="summary">{changesError ? `The list of changes isn't available (${changesError}). Commit records the selected paths.` : "Looking for changes…"}</div>
+          : changes.total > 0 ? <ChangeList summary={{ ...changes, selected }} items={changeItems} disabled={running} onSelected={setSelected} />
           : <div className="summary">{changesError ? `The list of changes isn't available (${changesError}). Commit records the selected paths.` : "No changes in the selected paths. Commit sends earlier commits that weren't sent yet, if there are any."}</div>)}
         {hasPaths && config.operation !== Operation.Commit && !question && <label><span>Selected paths · {config.paths.length}</span><ul className="path-list">{config.paths.map((path) => <li key={path}>{path}</li>)}</ul></label>}
         {config.operation === Operation.Commit && !question && <label><span>Commit message (optional)</span><textarea disabled={running} value={message}
@@ -470,7 +599,8 @@ export default function App() {
 
         {question && !running && <div className="choice" role="group" aria-label="Choose how to go on">
           <div className="alert warning"><img src={warningIcon} alt="" /><span>{question.text}</span></div>
-          <label><span>Files · {question.files.length}</span><ul className="path-list">{question.files.map((path) => <li key={path}>{path}</li>)}</ul></label>
+          <label><span>Files · {question.total ?? question.files.length}</span><ul className="path-list">{question.files.map((path) => <li key={path}>{path}</li>)}</ul>
+            {(question.total ?? question.files.length) > question.files.length && <span className="summary">…and {(question.total ?? 0) - question.files.length} more. Your choice applies to all of them.</span>}</label>
           <div className="options">{choiceOptions(question).map((option) =>
             <button key={option.choice} type="button" className={`option${option.danger ? " danger" : ""}`} onClick={() => answer(option.choice, question.files, option.danger)}>
               <strong>{option.label}{option.danger ? "…" : ""}</strong><span>{option.hint}</span></button>)}</div>
@@ -490,7 +620,7 @@ export default function App() {
               <button className="button primary" type="button" disabled={running} onClick={() => resolve("mine")}>{running ? "Working…" : "Keep my version"}</button>
             </> : config.operation === Operation.Revert && !error
               ? <button className="button danger solid" type="button" disabled={running} onClick={() => setConfirmation({ files: config.paths, text: discardText, action: "Discard changes", run: () => start({ ...config, repositoryUrl, targetPath, message }) })}>{running ? "Working…" : current.action}</button>
-              : <button className="button primary" type="submit" disabled={running || config.operation === Operation.Commit && (changes === null || changes.length > 0 && checked.size === 0)}>{running ? "Working…" : error ? "Retry" : current.action}</button>}
+              : <button className="button primary" type="submit" disabled={running || config.operation === Operation.Commit && (changes === null || changes.total > 0 && selected === 0)}>{running ? "Working…" : error ? "Retry" : current.action}</button>}
           </>}
         </footer>
       </form>

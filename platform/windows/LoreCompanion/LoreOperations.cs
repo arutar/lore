@@ -264,9 +264,16 @@ public static class LoreOperations
         var locks = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         try
         {
-            foreach (var held in await LockedByOthers(request, files.Select(file => file.Path).ToList()))
+            // A server that cannot answer (an expired sign-in, no network) must not hold the window
+            // hostage: past this wait the files are listed without their locks, and Commit still
+            // refuses a locked file on the server's own check.
+            var held = LockedByOthers(request, files.Select(file => file.Path).ToList());
+            if (await Task.WhenAny(held, Task.Delay(TimeSpan.FromSeconds(20))) == held)
             {
-                locks[RelativePath(request, held.Path)] = held.Owner;
+                foreach (var file in await held)
+                {
+                    locks[RelativePath(request, file.Path)] = file.Owner;
+                }
             }
         }
         catch (LoreError)
@@ -292,13 +299,21 @@ public static class LoreOperations
         var before = await ReadStatus(request);
         var unresolved = before.Where(file => file.Conflicted).Select(file => file.Path).ToList();
         if (unresolved.Count > 0) throw MergeConflict(unresolved);
-        if (request.Files.Length > 0)
+        if (request.All || request.Files.Length == 0)
         {
-            await StageExactly(request, before, request.Files, report);
+            // Everything under the selected paths goes in: staging the paths themselves spares
+            // listing hundreds of thousands of files one by one.
+            await Stage(request, report);
+            if (request.Excluded.Length > 0)
+            {
+                // The boxes the user cleared: staged with everything else, then taken back out.
+                await UnstagePaths(request, request.Excluded.Select(file => FullPath(request, file)).ToArray(), report);
+                report($"{Count(request.Excluded.Length, "file")} left out");
+            }
         }
         else
         {
-            await Stage(request, report);
+            await StageExactly(request, before, request.Files, report);
         }
         var staged = (await ReadStatus(request)).Where(file => file.Staged).Select(file => file.Path).ToList();
         if (staged.Count == 0)
@@ -596,26 +611,34 @@ public static class LoreOperations
     }
 
     /// <summary>Locks other users hold on <paramref name="paths"/> (relative to the root), with the
-    /// holder's display name where the server knows it.</summary>
+    /// holder's display name where the server knows it. Every lock on the branch arrives in one
+    /// answer and is intersected here: asking about hundreds of thousands of paths a hundred at a
+    /// time kept the Commit window busy for minutes on a large working copy.</summary>
     public static async Task<List<(string Path, string Owner, DateTime? Since)>> LockedByOthers(OperationRequest request, IReadOnlyCollection<string> paths)
     {
         if (paths.Count == 0) return [];
         var me = await CurrentUserId(request);
+        var wanted = new HashSet<string>(paths.Select(path => Normalize(RelativePath(request, path))), StringComparer.OrdinalIgnoreCase);
         var held = new List<(string Path, string Owner, ulong LockedAt)>();
         using (var globals = Globals(request))
-        using (var args = new LoreLockFileStatusArgs { Paths = paths.Select(path => FullPath(request, path)).ToArray() })
+        using (var args = new LoreLockFileQueryArgs())
         {
-            await Lore.LockFileStatus(globals, args).Callback((loreEvent, _) =>
+            await Lore.LockFileQuery(globals, args).Callback((loreEvent, _) =>
             {
-                if (loreEvent.Tag != LoreEventTag.LOCK_FILE_STATUS) return;
-                var status = loreEvent.GetData<LoreLockFileStatusEventDataFFI>();
-                if (!string.IsNullOrEmpty(status.Owner) && status.Owner != me) held.Add((status.Path, status.Owner, status.LockedAt));
+                if (loreEvent.Tag != LoreEventTag.LOCK_FILE_QUERY) return;
+                var status = loreEvent.GetData<LoreLockFileQueryEventDataFFI>();
+                if (string.IsNullOrEmpty(status.Owner) || status.Owner == me) return;
+                var path = Normalize(RelativePath(request, status.Path));
+                if (!wanted.Contains(path)) return;
+                held.Add((path, status.Owner, status.LockedAt));
             }).WaitAsync();
         }
         var names = await UserNames(request, held.Select(lock_ => lock_.Owner));
         return held.Select(lock_ => (lock_.Path, names.GetValueOrDefault(lock_.Owner, lock_.Owner),
             lock_.LockedAt > 0 ? (DateTime?)DateTimeOffset.FromUnixTimeMilliseconds((long)lock_.LockedAt).LocalDateTime : null)).ToList();
     }
+
+    private static string Normalize(string path) => path.Replace('/', '\\').Trim('\\');
 
     private static async Task<string> CurrentUserId(OperationRequest request)
     {
