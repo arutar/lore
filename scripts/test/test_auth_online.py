@@ -647,13 +647,16 @@ def test_expired_login_token_is_skipped_client_side(auth_env, make_actor):
     method = "ExchangeUserTokenForMultiresourceToken"
     exchanges_before = len(mock.requests_for(method))
 
-    with pytest.raises(LoreException):
+    with pytest.raises(LoreException) as refused:
         holder.clone()
 
-    # An anonymous lookup may use the same RPC after the expired login is skipped.
-    assert all(
-        not request["bearer"] for request in mock.requests_for(method)[exchanges_before:]
-    ), "an expired login must never be sent to the exchange"
+    # The fork tries an anonymous repository lookup when no usable login remains.
+    assert refused.value.returncode == 17, refused.value
+    lookups = mock.requests_for(method)[exchanges_before:]
+    assert lookups, "the clone must try anonymous access"
+    assert all(not request["bearer"] for request in lookups), (
+        "an expired login must never be sent to the exchange"
+    )
 
 
 @pytest.mark.smoke

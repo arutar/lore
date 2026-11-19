@@ -3473,8 +3473,8 @@ mod fuse_remote_tests {
                     prefetch_options(TreePrefetch::Off, Some(recording.path())),
                 )
                 .await;
-                // Hold the recorded file's content. Publishing the revision can read
-                // metadata synchronously before the background prefetch starts.
+                // Publishing reads the root listing to check for an ignore file. The
+                // recorded file's content is needed only by the background prefetch.
                 let recorded = clone
                     .served_state
                     .find_node(clone.served_repository.clone(), "keep/k1.txt")
@@ -3488,6 +3488,10 @@ mod fuse_remote_tests {
                 .await
                 .expect("the clone returns while the remote holds the recorded content")
                 .expect("the clone publishes");
+                assert!(
+                    wait_for_count(|| clone.store.waiting(), 1).await >= 1,
+                    "the remote received the recorded content request and is holding it"
+                );
                 assert!(
                     clone.filesystem.prefetch_running(),
                     "the prefetch waits on the remote"
