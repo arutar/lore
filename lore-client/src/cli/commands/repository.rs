@@ -1160,7 +1160,13 @@ pub fn handle_repository_clone(globals: LoreGlobalArgs, args: &RepositoryCloneAr
             .with_defaults(),
     ));
 
-    return run_command(globals, clone_args.into(), callback) as u8;
+    let status = run_command(globals, clone_args.into(), callback);
+    if matches!(status, 16 | 17) && !crate::config::config().json {
+        crate::eprintln!(
+            "Access was denied. To sign in, run 'lore auth login <server-url>', then retry the clone."
+        );
+    }
+    status as u8
 }
 
 pub fn handle_repository_verify(globals: LoreGlobalArgs, args: &RepositoryVerifyArgs) -> u8 {

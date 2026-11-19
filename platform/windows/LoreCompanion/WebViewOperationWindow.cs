@@ -19,6 +19,7 @@ internal sealed class WebViewOperationWindow : Window
     private bool userSized;
     private double fittedHeight;
     private bool running;
+    private CancellationTokenSource? signInCancellation;
     private CommitList? changes;
     // The files a ChoiceRequired question is about; the page shows the first few and answers by
     // choice alone.
@@ -186,7 +187,8 @@ internal sealed class WebViewOperationWindow : Window
                 case "accounts-add":
                     if (running) break;
                     running = true;
-                    var signIn = await LoreAccounts.Add(root.GetProperty("remoteUrl").GetString() ?? "", text => Send(new { type = "progress", text }));
+                    var signIn = await LoreAccounts.Add(root.GetProperty("remoteUrl").GetString() ?? "",
+                        text => Send(new { type = "progress", text }), SignIn);
                     running = false;
                     await SendAccounts();
                     Send(new { type = "complete", text = LoreAccounts.SignInMessage(signIn) });
@@ -282,6 +284,11 @@ internal sealed class WebViewOperationWindow : Window
                     }
                     break;
             }
+        }
+        catch (OperationCanceledException)
+        {
+            running = false;
+            if (IsVisible) Send(new { type = "error", text = "Sign-in was canceled." });
         }
         catch (Exception exception)
         {
@@ -505,9 +512,18 @@ internal sealed class WebViewOperationWindow : Window
 
     private static readonly JsonSerializerOptions SerializerOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
+    private async Task<string> SignIn(string remote)
+    {
+        using var cancellation = new CancellationTokenSource();
+        signInCancellation = cancellation;
+        try { return await DeviceSignIn.Run(remote, this, cancellation.Token); }
+        finally { signInCancellation = null; }
+    }
+
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
-        e.Cancel = running;
+        signInCancellation?.Cancel();
+        e.Cancel = running && signInCancellation is null;
         base.OnClosing(e);
     }
 }

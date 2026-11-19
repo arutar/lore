@@ -45,6 +45,20 @@ async fn supplied_access_token_replaces_the_resource_exchange() {
     assert_eq!(token, "supplied-authz");
 }
 
+#[tokio::test]
+async fn repository_session_without_a_login_uses_the_anonymous_partition_grant() {
+    let stub = StubAuthentication::new(|login, _| {
+        assert!(login.is_empty());
+        AUTHZ_ONE
+    });
+    let endpoint = AuthEndpoint::new("oidc+https://guest.test.invalid".into(), stub);
+    let (login, grant, identity) =
+        auth_exchange(&endpoint, "example.com", "", a_repository(), "", "").await;
+    assert!(login.is_empty());
+    assert!(identity.is_empty());
+    assert_eq!(grant, AUTHZ_ONE);
+}
+
 /// An access token on its own authorizes without an authentication token to
 /// trade in, and without reading one from the store. The authentication slot
 /// comes back empty, so the services that need one fail where they use it

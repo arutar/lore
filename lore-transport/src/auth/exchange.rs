@@ -677,9 +677,31 @@ pub async fn auth_exchange(
         return tokens;
     }
 
-    auth_exchange_for_stored_identity(auth_endpoint, remote_domain, "", repository)
-        .await
-        .unwrap_or_default()
+    match auth_exchange_for_stored_identity(auth_endpoint, remote_domain, "", repository).await {
+        Ok(tokens) => tokens,
+        Err(error)
+            if error.is_not_authenticated()
+                && !repository.is_zero()
+                && identity_token.is_empty()
+                && access_token.is_empty()
+                && auth_endpoint
+                    .url
+                    .starts_with(crate::auth::oidc::SCHEME_PREFIX) =>
+        {
+            let authorization = exchange(
+                auth_endpoint,
+                "",
+                repository,
+                remote_domain.to_owned(),
+                "",
+                "",
+            )
+            .await
+            .unwrap_or_default();
+            (String::new(), authorization, String::new())
+        }
+        Err(_) => Default::default(),
+    }
 }
 
 /// The tokens and identity of the first identity stored for `auth_endpoint` that authenticates

@@ -28,6 +28,21 @@ pub struct RepositoryService<I = AuthnInterceptor> {
 }
 
 impl RepositoryService {
+    pub(super) fn with_bearer(
+        channel: Channel,
+        token: String,
+    ) -> RepositoryService<impl Interceptor + Clone> {
+        let client = RepositoryServiceClient::with_interceptor(
+            channel,
+            move |mut request: tonic::Request<()>| {
+                super::inject_correlation_id(&mut request)?;
+                super::inject_authorization(&mut request, &token)?;
+                Ok(request)
+            },
+        );
+        RepositoryService { client }
+    }
+
     pub fn new(channel: Channel, auth: GRPCAuthRef) -> Self {
         let client = RepositoryServiceClient::with_interceptor(channel, AuthnInterceptor { auth });
 

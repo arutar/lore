@@ -909,6 +909,19 @@ pub async fn admin_client(
     Ok(Arc::new(admin))
 }
 
+/// A single lookup uses the bearer issued for the requested public repository name.
+pub async fn query_repository_with_bearer(
+    remote_url: &str,
+    token: String,
+    id: Option<RepositoryId>,
+    name: Option<&str>,
+) -> Result<RepositoryData, ProtocolError> {
+    let connection = connect(Weak::new(), remote_url, false).await?;
+    repository_client::RepositoryService::with_bearer(connection.channel(), token)
+        .query(id, name)
+        .await
+}
+
 pub async fn repository_client(
     connection: Arc<GRPCConnection>,
     auth_endpoint: &AuthEndpoint,

@@ -23,7 +23,7 @@ public static class OperationError
             return "The server certificate could not be validated. Check the HTTPS certificate or your trusted CA configuration.";
         if (Contains(message, "401") || Contains(message, "unauthorized") || Contains(message, "authentication") || Contains(message, "credentials") || Contains(message, "missingtoken") || Contains(message, "missing token") || Contains(message, "not authenticated"))
             return "Authentication failed. Sign in again and check your credentials.";
-        if (operation == CompanionOperation.Clone && Contains(message, "not found"))
+        if (operation == CompanionOperation.Clone && Contains(message, "repository", "not found"))
             return "This account does not have access to the repository, or the repository does not exist. Sign in with another account or ask a repository administrator for access.";
         if (IsAccessDenied(exception, operation))
             return "This account does not have access to the repository or operation. Sign in with another account or ask a repository administrator for access.";
@@ -60,9 +60,11 @@ public static class OperationError
 
     public static bool IsAccessDenied(Exception exception, CompanionOperation operation)
     {
-        if (operation == CompanionOperation.Clone && Contains(exception.Message, "not found")) return true;
+        if (exception is LoreVcs.LoreError { ReturnCode: 16 or 17 }) return true;
+        if (operation == CompanionOperation.Clone && Contains(exception.Message, "repository", "not found")) return true;
         var message = exception.Message;
-        return Contains(message, "403") || Contains(message, "forbidden") || Contains(message, "permission denied")
+        return Contains(message, "not authenticated") || Contains(message, "missing token") || Contains(message, "missingtoken")
+            || Contains(message, "401") || Contains(message, "403") || Contains(message, "forbidden") || Contains(message, "permission denied")
             || Contains(message, "not authorized") || Contains(message, "access_denied") || Contains(message, "access denied");
     }
 

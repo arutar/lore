@@ -273,6 +273,7 @@ mod offer {
     struct Peer {
         answers: Mutex<VecDeque<Result<BranchPushResponse, ProtocolError>>>,
         created: AtomicUsize,
+        head: Option<Hash>,
     }
 
     #[async_trait]
@@ -298,7 +299,12 @@ mod offer {
             _: Option<BranchId>,
             _: Option<&str>,
         ) -> Result<BranchQueryResponse, ProtocolError> {
-            unreachable!("an offer queries no branch")
+            Ok(BranchQueryResponse {
+                id: BranchId::default(),
+                metadata: Hash::default(),
+                latest: self.head.ok_or_else(|| ProtocolError::from(NotFound))?,
+                deleted: false,
+            })
         }
 
         async fn branch_push(
@@ -352,6 +358,43 @@ mod offer {
         Err(ProtocolError::from(NotFound))
     }
 
+    #[tokio::test]
+    async fn timeout_after_offer_confirms_only_the_offered_revision() {
+        let revision = Hash::from([1; 32]);
+        for head in [Some(revision), Some(Hash::from([2; 32])), None] {
+            let peer = Peer {
+                answers: Mutex::new(
+                    [Err(ProtocolError::internal(
+                        "Request handler timeout exceeded",
+                    ))]
+                    .into(),
+                ),
+                created: AtomicUsize::new(0),
+                head,
+            };
+            let result = with_execution(offer_revision(
+                &peer,
+                RepositoryId::default(),
+                BranchId::default(),
+                &BranchMetadata::default(),
+                Hash::default(),
+                revision,
+                7,
+                false,
+                false,
+                async || panic!("a timeout must not replay a write"),
+            ))
+            .await;
+            if head == Some(revision) {
+                let answer = result.unwrap();
+                assert_eq!(answer.revision_number, 7);
+                assert_eq!(answer.revision, revision);
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+
     fn missing() -> Result<BranchPushResponse, ProtocolError> {
         Err(ProtocolError::from(AddressNotFound { address: [7; 48] }))
     }
@@ -391,6 +434,7 @@ mod offer {
             let peer = Peer {
                 answers: Mutex::new(answers.into()),
                 created: AtomicUsize::new(0),
+                head: None,
             };
             let recoveries = AtomicUsize::new(0);
 
@@ -401,6 +445,7 @@ mod offer {
                 &BranchMetadata::default(),
                 Hash::default(),
                 Hash::from([1; 32]),
+                1,
                 false,
                 false,
                 async || {

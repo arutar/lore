@@ -41,39 +41,11 @@ public static class LoreOperations
     public static async Task<OperationOutcome> ExecuteAsync(OperationRequest request, Action<string> report, CancellationToken cancellationToken, Action<CommitProgress>? progress = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        try
-        {
-            return await ExecuteCore(request, report, progress);
-        }
-        catch (LoreError error) when (NeedsInteractiveLogin(error))
-        {
-            report("Authentication is required. Complete the sign-in in the browser.");
-            var userId = "";
-            using var globals = new LoreGlobalArgs
-            {
-                RepositoryPath = request.RepositoryRoot(),
-                Identity = SelectedIdentity(request),
-            };
-            using var args = new LoreAuthLoginInteractiveArgs
-            {
-                RemoteUrl = request.Operation == CompanionOperation.Clone ? request.RepositoryUrl : "",
-            };
-            await Lore.AuthLoginInteractive(globals, args).Callback((loreEvent, _) =>
-            {
-                LogCallback(report)(loreEvent, _);
-                if (loreEvent.Tag == LoreEventTag.AUTH_USER_INFO)
-                {
-                    userId = loreEvent.GetData<LoreAuthUserInfoEventDataFFI>().Id;
-                }
-            }).WaitAsync();
-            if (string.IsNullOrWhiteSpace(userId)) throw new InvalidDataException("The server returned no account identity after sign-in.");
-            ClientSettings.Load().SelectAccount(request.ServerKey(), userId);
-            return await ExecuteCore(request, report, progress);
-        }
+        return await ExecuteCore(request, report, progress);
     }
 
-    private static bool NeedsInteractiveLogin(LoreError error) =>
-        error.Message.Contains("Not authenticated", StringComparison.OrdinalIgnoreCase)
+    private static bool RequiresAuthentication(LoreError error) =>
+        error.ReturnCode == 16 || error.Message.Contains("Not authenticated", StringComparison.OrdinalIgnoreCase)
         || error.Message.Contains("MissingToken", StringComparison.OrdinalIgnoreCase)
         || error.Message.Contains("missing token", StringComparison.OrdinalIgnoreCase);
 
@@ -394,7 +366,7 @@ public static class LoreOperations
             await Lore.RevisionSync(globals, args).Callback(LogCallback(report)).WaitAsync();
             return new OperationOutcome();
         }
-        catch (LoreError error) when (!NeedsInteractiveLogin(error))
+        catch (LoreError error) when (!RequiresAuthentication(error))
         {
             return new OperationOutcome($"Revision created and sent to the server. Others changed files meanwhile; run Lore Sync to get their changes ({error.Message.Split('\n')[0]}).", true);
         }
@@ -423,7 +395,7 @@ public static class LoreOperations
                 if (loreEvent.Tag == LoreEventTag.BRANCH_PUSH && loreEvent.GetData<LoreBranchPushEventDataFFI>().FlagAlreadyPushed) alreadyPushed = true;
             }).WaitAsync();
         }
-        catch (LoreError error) when (!NeedsInteractiveLogin(error))
+        catch (LoreError error) when (!RequiresAuthentication(error))
         {
             var saved = committed ? "The commit is saved in this working copy but wasn't sent to the server: " : "Your saved commits weren't sent to the server: ";
             if (error.Message.Contains("Locked by another user", StringComparison.OrdinalIgnoreCase))
@@ -435,7 +407,7 @@ public static class LoreOperations
             {
                 throw new CompanionException(saved + "someone changed the same files on the server meanwhile. Run Lore Sync: it merges both and sends the result (if you both changed the same file, Lore > Resolve conflicts lets you choose).", error);
             }
-            throw new CompanionException(saved + error.Message + " Run Lore Sync, then Lore Commit again to send it.", error);
+            throw new CompanionException("Your commits are saved in this working copy. The server did not confirm the push. Check the server history before retrying. " + error.Message, error);
         }
         if (!alreadyPushed) report("Pushed to the server");
         return !alreadyPushed;

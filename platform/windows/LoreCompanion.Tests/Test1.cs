@@ -144,6 +144,13 @@ public sealed class RequestContractTests
     }
 
     [TestMethod]
+    public void MissingLocalFileDoesNotOfferSignIn()
+    {
+        var error = new FileNotFoundException("Local configuration file not found");
+        Assert.IsFalse(OperationError.IsAccessDenied(error, CompanionOperation.Clone));
+    }
+
+    [TestMethod]
     public void LogoutTimeoutIsReadable()
     {
         var message = OperationError.UserMessage(new TaskCanceledException("The operation was canceled."), CompanionOperation.Accounts);

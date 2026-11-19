@@ -4549,10 +4549,18 @@ pub async fn resolve_by_name(
     name: &str,
     identity: &str,
 ) -> Result<RepositoryData, RepositoryError> {
+    Ok(resolve_with_identity(remote_url, name, identity).await?.0)
+}
+
+async fn resolve_with_identity<'a>(
+    remote_url: &str,
+    name: &str,
+    identity: &'a str,
+) -> Result<(RepositoryData, &'a str), RepositoryError> {
     match resolve_by_name_authenticated(remote_url, name, identity).await {
-        Ok(repository) => Ok(repository),
-        Err(error) if error.is_not_authenticated() || error.is_not_found() => {
-            resolve_by_name_anonymous(remote_url, name).await
+        Ok(repository) => Ok((repository, identity)),
+        Err(error) if lore_base::error::is_refusal(&error) || error.is_not_found() => {
+            Ok((resolve_by_name_anonymous(remote_url, name).await?, ""))
         }
         Err(error) => Err(error),
     }
@@ -4606,46 +4614,42 @@ async fn resolve_by_name_anonymous(
             .await
             .forward::<RepositoryError>("resolving anonymous repository authentication")?;
     let recipient_domain = lore_credential::domain_from_url_or_url(&remote);
-    let resource = format!("lore-name:{name}");
-    let access_token = lore_transport::auth::exchange::exchange_custom_resource(
+    let id = RepositoryId::from_str(name).unwrap_or_default();
+    let grant = lore_transport::auth::exchange::exchange_custom_resource(
         &auth_endpoint,
         "",
-        &resource,
-        recipient_domain,
+        &format!("lore-name:{name}"),
+        recipient_domain.clone(),
         "",
         "",
     )
-    .await
-    .forward::<RepositoryError>("authorizing anonymous repository lookup")?;
-    let execution = execution_context();
-    let globals = execution.globals();
-    let connection = lore_transport::connect(
-        remote_url,
-        "anonymous",
-        RepositoryId::default(),
-        globals.max_connections as usize,
-        "",
-        &access_token,
-        globals.auth_mode,
-    )
-    .await
-    .forward::<RepositoryError>("connecting for anonymous repository lookup")?;
-    let repository_service = connection
-        .repository()
-        .await
-        .forward::<RepositoryError>("connecting the repository service")?;
-    match repository_service.query(None, Some(name)).await {
-        Ok(data) => Ok(data),
-        Err(error) if error.is_not_found() => {
-            let id = RepositoryId::from_str(name).unwrap_or_default();
-            if id.is_zero() {
-                return Err(RepositoryError::from(NotFound));
-            }
-            repository_service
-                .query(Some(id), None)
-                .await
-                .forward::<RepositoryError>("Repository not found")
+    .await;
+    let (token, by_id) = match grant {
+        Ok(token) => (token, false),
+        Err(error) if !id.is_zero() && lore_base::error::is_refusal(&error) => {
+            let token = lore_transport::auth::exchange::exchange(
+                &auth_endpoint,
+                "",
+                id,
+                recipient_domain,
+                "",
+                "",
+            )
+            .await
+            .forward::<RepositoryError>("authorizing anonymous repository ID lookup")?;
+            (token, true)
         }
-        Err(error) => Err(error).forward::<RepositoryError>("Repository not found"),
-    }
+        Err(error) => {
+            return Err(error)
+                .forward::<RepositoryError>("authorizing anonymous repository lookup");
+        }
+    };
+    lore_transport::grpc::query_repository_with_bearer(
+        remote_url,
+        token,
+        by_id.then_some(id),
+        (!by_id).then_some(name),
+    )
+    .await
+    .forward::<RepositoryError>("looking up public repository")
 }

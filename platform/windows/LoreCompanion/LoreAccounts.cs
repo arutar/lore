@@ -53,27 +53,13 @@ public static class LoreAccounts
     /// the same identity provider is signed out and deleted, so switching accounts never
     /// leaves the previous credentials on the machine.
     /// </summary>
-    public static async Task<SignInResult> Add(string remoteUrl, Action<string> report)
+    public static async Task<SignInResult> Add(string remoteUrl, Action<string> report, Func<string, Task<string>> signIn)
     {
         if (!Uri.TryCreate(remoteUrl, UriKind.Absolute, out var uri) || uri.Scheme != "lore" || string.IsNullOrEmpty(uri.Host))
         {
             throw new InvalidDataException("Enter a Lore server URL, for example lore://localhost");
         }
-        var userId = "";
-        using var globals = new LoreGlobalArgs();
-        using var args = new LoreAuthLoginInteractiveArgs { RemoteUrl = remoteUrl.Trim() };
-        await Lore.AuthLoginInteractive(globals, args).Callback((loreEvent, _) =>
-        {
-            if (loreEvent.Tag == LoreEventTag.LOG)
-            {
-                report(loreEvent.GetData<LoreLogEventDataFFI>().Message);
-            }
-            else if (loreEvent.Tag == LoreEventTag.AUTH_USER_INFO)
-            {
-                userId = loreEvent.GetData<LoreAuthUserInfoEventDataFFI>().Id;
-            }
-        }).WaitAsync();
-        if (string.IsNullOrWhiteSpace(userId)) throw new InvalidDataException("The server returned no account identity after sign-in.");
+        var userId = await signIn(remoteUrl.Trim());
         Select(remoteUrl, userId);
 
         var accounts = await List();

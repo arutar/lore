@@ -1271,6 +1271,7 @@ async fn push_local_history(
                 branch_metadata,
                 remote_latest,
                 current_revision,
+                state.revision_number(),
                 force,
                 options.fast_forward_merge,
                 || {
@@ -1975,6 +1976,7 @@ async fn offer_revision(
     metadata: &BranchMetadata,
     remote_latest: Hash,
     revision: Hash,
+    revision_number: u64,
     force: bool,
     fast_forward_merge: bool,
     recover: impl AsyncFnOnce() -> Result<(), PushError>,
@@ -2017,6 +2019,24 @@ async fn offer_revision(
         answer = revision_protocol
             .branch_push(branch, revision, force, fast_forward_merge)
             .await;
+    }
+    // The peer may have committed the head before the handler timed out.
+    // Confirm that exact offer without replaying a write or inferring a merge.
+    if let Err(error) = &answer
+        && error
+            .to_string()
+            .contains("Request handler timeout exceeded")
+        && let Ok(head) = revision_protocol.branch_query(Some(branch), None).await
+        && head.id == branch
+        && !head.deleted
+        && head.latest == revision
+    {
+        return Ok(BranchPushResponse {
+            revision,
+            revision_number,
+            fast_forward_merged: false,
+            message: None,
+        });
     }
     forward_branch_push(answer)
 }
