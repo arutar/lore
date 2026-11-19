@@ -7,8 +7,6 @@
 name: PR Validate
 
 on:
-  push:
-    tags: ["platform-v*"]
   workflow_dispatch:
 
 permissions: {}
