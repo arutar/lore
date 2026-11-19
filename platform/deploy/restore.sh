@@ -3,7 +3,7 @@
 # Everything that can fail without touching data runs first; once the databases are being
 # replaced, any failure puts the previous databases and storage back.
 set -eu
-cd "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+cd "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 BACKUP=${1:-}
 [ -n "$BACKUP" ] || { echo "Usage: restore.sh BACKUP [--yes]" >&2; exit 2; }
 for file in lore.dump keycloak.dump storage.tar manifest.json SHA256SUMS; do
@@ -13,7 +13,7 @@ if command -v sha256sum >/dev/null 2>&1; then (cd "$BACKUP" && sha256sum -c --qu
 [ -f .env ] || { echo ".env is missing; run setup on this host first" >&2; exit 1; }
 if [ "${2:-}" != "--yes" ]; then
     printf 'Restore %s over the current databases and storage? [y/N] ' "$BACKUP"
-    read answer
+    read -r answer
     [ "$answer" = "y" ] || exit 1
 fi
 

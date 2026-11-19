@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 set -eu
-cd "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+cd "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 # The data root comes from the environment or, as setup stores it, from .env. Compose reads
 # .env on its own; this script has to do the same or it archives the wrong directory.
 if [ -z "${LORE_DATA_ROOT:-}" ] && [ -f .env ]; then

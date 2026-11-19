@@ -10,7 +10,7 @@ set -euo pipefail
 VERSION=${1:?version, for example 0.1.12}
 PREFIX=${2:?image prefix, for example ghcr.io/arutar}
 OUTPUT=${3:?output directory}
-DEPLOY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+DEPLOY=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 NAME="lore-platform-server-$VERSION"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT

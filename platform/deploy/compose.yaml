@@ -190,4 +190,3 @@ services:
       keycloak:
         condition: service_healthy
     restart: unless-stopped
-

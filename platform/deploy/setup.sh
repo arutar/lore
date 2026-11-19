@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-cd "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+cd "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 command -v docker >/dev/null 2>&1 || { echo "Docker is required" >&2; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 is required" >&2; exit 1; }
 docker info >/dev/null 2>&1 || { echo "Docker engine isn't running" >&2; exit 1; }
@@ -22,7 +22,7 @@ load_env() {
         if eval "[ -z \"\${$key+set}\" ]"; then export "$key=$value"; fi
     done < .env
 }
-saved() { [ -f .env ] && sed -n "s/^$1=//p" .env | tr -d '\r' | tail -n 1 || true; }
+saved() { if [ -f .env ]; then sed -n "s/^$1=//p" .env | tr -d '\r' | tail -n 1; fi; }
 # This computer's DNS name (FQDN when it has one): it resolves for browsers and clients on the
 # network and for this machine itself. Containers reach it through the proxy's network alias.
 default_host() {
@@ -144,6 +144,8 @@ if [ -n "${LORE_SMTP_HOST:-}" ]; then
     esac
     SMTP_AUTH=false
     if [ -n "${LORE_SMTP_USERNAME:-}" ] || [ -n "${LORE_SMTP_PASSWORD:-}" ]; then SMTP_AUTH=true; fi
+    # Keycloak expands the password placeholder in the generated realm.
+    # shellcheck disable=SC2016
     SMTP_BLOCK=$(printf '"smtpServer": {"host":"%s","port":"%s","from":"%s","fromDisplayName":"%s","starttls":"%s","ssl":"%s","auth":"%s","user":"%s","password":"%s"}' \
         "$(escape_json "$LORE_SMTP_HOST")" "$(escape_json "${LORE_SMTP_PORT:-587}")" "$(escape_json "${LORE_SMTP_FROM:-}")" \
         "$(escape_json "${LORE_SMTP_FROM_NAME:-Lore}")" "$(escape_json "${LORE_SMTP_STARTTLS:-true}")" "$(escape_json "${LORE_SMTP_SSL:-false}")" \
@@ -187,13 +189,13 @@ if [ "$KEYCLOAK_URL" != "$WEB_URL/auth" ]; then
 fi
 
 export POSTGRES_PASSWORD KEYCLOAK_ADMIN_PASSWORD LORE_SERVICE_CLIENT_SECRET
-export LORE_WEB_PUBLIC_URL=$WEB_URL
-export LORE_EXCHANGE_PUBLIC_URL=$WEB_URL
-export KEYCLOAK_PUBLIC_URL=$KEYCLOAK_URL
-export LORE_PUBLIC_ADDRESS=$PUBLIC_ADDRESS
-export LORE_PROXY_BIND=${LORE_PROXY_BIND:-0.0.0.0}
-export LORE_REALM_FILE=$GENERATED/lore-realm.json
-export LORE_CONFIG_FILE=$GENERATED/lore.toml
+export LORE_WEB_PUBLIC_URL="$WEB_URL"
+export LORE_EXCHANGE_PUBLIC_URL="$WEB_URL"
+export KEYCLOAK_PUBLIC_URL="$KEYCLOAK_URL"
+export LORE_PUBLIC_ADDRESS="$PUBLIC_ADDRESS"
+export LORE_PROXY_BIND="${LORE_PROXY_BIND:-0.0.0.0}"
+export LORE_REALM_FILE="$GENERATED/lore-realm.json"
+export LORE_CONFIG_FILE="$GENERATED/lore.toml"
 export LORE_TOKEN_SIGNING_KEY_FILE=//data/token-exchange-signing.pem
 if [ "$SCHEME" = "https" ]; then export SECURE_COOKIES=true; else export SECURE_COOKIES=false; fi
 
@@ -209,29 +211,27 @@ elif [ -n "${LORE_CONTROL_PLANE_IMAGE:-}" ] && [ -n "${LORE_SERVER_IMAGE:-}" ]; 
 else
     BUILD=--build
 fi
+set -- -f compose.yaml
 if [ "${LORE_DIRECT_CADDY:-false}" = "true" ]; then
-    COMPOSE_FILES="-f compose.yaml -f compose.caddy.yaml"
-    case "$PUBLIC_HOST" in localhost|*.internal) COMPOSE_FILES="$COMPOSE_FILES -f compose.caddy-local.yaml" ;; esac
-    case "$COMPOSE_FILES" in
-        *caddy-local.yaml)
-            docker compose $COMPOSE_FILES up -d $BUILD --wait --wait-timeout 240 caddy
+    set -- "$@" -f compose.caddy.yaml
+    case "$PUBLIC_HOST" in
+        localhost|*.internal)
+            set -- "$@" -f compose.caddy-local.yaml
+            docker compose "$@" up -d "$BUILD" --wait --wait-timeout 240 caddy
             CERTIFICATE="${LORE_DATA_ROOT:-./data}/caddy/caddy/pki/authorities/local/root.crt"
-            for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
                 [ -f "$CERTIFICATE" ] && break
                 sleep 2
             done
             [ -f "$CERTIFICATE" ] || { echo "Caddy local CA wasn't created" >&2; exit 1; }
             ;;
     esac
-    docker compose $COMPOSE_FILES up -d $BUILD --wait --wait-timeout 240
-else
-    COMPOSE_FILES="-f compose.yaml"
-    docker compose $COMPOSE_FILES up -d $BUILD --wait --wait-timeout 240
 fi
+docker compose "$@" up -d "$BUILD" --wait --wait-timeout 240
 
 # The realm file is imported only on the first start; bring an existing realm in line with
 # the current settings. Secrets reach the script through the container environment.
-docker compose $COMPOSE_FILES exec -T \
+docker compose "$@" exec -T \
     -e LORE_PUBLIC_URL="$WEB_URL" -e LORE_PUBLIC_HOST="$PUBLIC_HOST" -e LORE_PUBLIC_SCHEME="$SCHEME" \
     -e LORE_SMTP_HOST="${LORE_SMTP_HOST:-}" -e LORE_SMTP_PORT="${LORE_SMTP_PORT:-}" -e LORE_SMTP_FROM="${LORE_SMTP_FROM:-}" \
     -e LORE_SMTP_FROM_NAME="${LORE_SMTP_FROM_NAME:-}" -e LORE_SMTP_USERNAME="${LORE_SMTP_USERNAME:-}" \

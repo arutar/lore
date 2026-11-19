@@ -98,4 +98,3 @@ jobs:
             platform/windows/bin/msi-smoke/*.log
           if-no-files-found: error
           retention-days: 14
-

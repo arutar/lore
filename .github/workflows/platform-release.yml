@@ -141,7 +141,7 @@ jobs:
           cp "artifacts/windows-client-${GITHUB_SHA}/LoreClient-win-x64.zip" "release/LoreClient-$VERSION-win-x64.zip"
           cp artifacts/linux-cli-*/lore-cli-*.tar.gz release/
           cp artifacts/server-bundle/* release/
-          (cd release && sha256sum * > SHA256SUMS)
+          (cd release && sha256sum -- * > SHA256SUMS)
           cat release/SHA256SUMS
       - name: Write release notes
         env:
@@ -150,8 +150,8 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          owner=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
-          sed -e "s|{{VERSION}}|$VERSION|g" -e "s|{{OWNER}}|$owner|g" -e "s|{{REPOSITORY}}|$REPOSITORY|g" \
+          registry_owner=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
+          sed -e "s|{{VERSION}}|$VERSION|g" -e "s|{{OWNER}}|$registry_owner|g" -e "s|{{REPOSITORY}}|$REPOSITORY|g" \
             platform/docs/release-notes-template.md > template.md
           # What changed (platform/docs/releases/<version>.md) goes under the title, above the
           # downloads; a release without one still gets the downloads and install steps.

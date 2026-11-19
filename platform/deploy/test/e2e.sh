@@ -23,7 +23,7 @@ set -euo pipefail
     echo "This test runs restore and replaces the installation's data. Set LORE_E2E=destroy-test-data to confirm." >&2
     exit 2
 }
-DEPLOY=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+DEPLOY=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$DEPLOY"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -57,7 +57,7 @@ if [ "${LORE_E2E_SKIP_SETUP:-false}" != "true" ]; then
 fi
 WEB=$(env_value LORE_PUBLIC_URL)
 ADMIN_PASSWORD=$(env_value LORE_ADMIN_PASSWORD)
-[ -n "$WEB" ] && [ -n "$ADMIN_PASSWORD" ] || fail ".env lacks LORE_PUBLIC_URL or LORE_ADMIN_PASSWORD"
+if [ -z "$WEB" ] || [ -z "$ADMIN_PASSWORD" ]; then fail ".env lacks LORE_PUBLIC_URL or LORE_ADMIN_PASSWORD"; fi
 curl -fsS "$WEB/healthz" > /dev/null || fail "$WEB/healthz isn't reachable from here"
 
 # --- helpers ---------------------------------------------------------------------------
@@ -156,7 +156,7 @@ step "backup"
 BACKUP_NAME="e2e-$RUN"
 run_backup ./backups "$BACKUP_NAME" > "$WORK/backup.log" 2>&1 || { tail -n 30 "$WORK/backup.log" >&2; fail "backup exited with an error"; }
 [ -f "backups/$BACKUP_NAME/SHA256SUMS" ] || fail "backup has no checksums"
-ok "backups/$BACKUP_NAME: $(ls "backups/$BACKUP_NAME" | tr '\n' ' ')"
+ok "Backup created in backups/$BACKUP_NAME"
 # backup stops the services: sign in again.
 login admin "$ADMIN_PASSWORD"
 login "$USER_EMAIL" "$PERMANENT"

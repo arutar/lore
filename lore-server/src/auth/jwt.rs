@@ -332,7 +332,9 @@ impl JwtVerifier {
                 ExchangeIssuer::discover(issuer, exchange_jwks)
                     .await
                     .with_context(|| {
-                        format!("fetching the keys of [server.auth.oidc] token_exchange_issuer {issuer}")
+                        format!(
+                            "fetching the keys of [server.auth.oidc] token_exchange_issuer {issuer}"
+                        )
                     })?,
             ),
             None => None,

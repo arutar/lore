@@ -19,7 +19,7 @@ if [ "$VERSION" != "v0.13.0" ]; then
     exit 1
 fi
 
-for tool in tar; do command -v "$tool" >/dev/null 2>&1 || { echo "$tool is required" >&2; exit 1; }; done
+command -v tar >/dev/null 2>&1 || { echo "tar is required" >&2; exit 1; }
 if [ -z "${LORE_ARCHIVE_PATH:-}" ]; then
     if command -v curl >/dev/null 2>&1; then
         download() { curl -fsSL "$1" -o "$2"; }
@@ -55,5 +55,5 @@ install -m 0755 "$TEMP/lore" "$INSTALL_DIR/lore"
 printf 'Lore CLI installed to %s/lore\n' "$INSTALL_DIR"
 case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
-    *) printf 'Add %s to PATH, for example in ~/.profile:\nexport PATH="%s:$PATH"\n' "$INSTALL_DIR" "$INSTALL_DIR" ;;
+    *) printf 'Add %s to PATH, for example in ~/.profile:\nexport PATH="%s:%s"\n' "$INSTALL_DIR" "$INSTALL_DIR" "\$PATH" ;;
 esac

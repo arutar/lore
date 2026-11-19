@@ -115,7 +115,7 @@ echo "Client $SERVICE_CLIENT: secret and roles applied"
 # local account is (re)created with LORE_ADMIN_PASSWORD. An existing local admin is left
 # alone: its password may have been changed since setup. While the federation is enabled
 # Keycloak refuses to create a user whose name exists in AD, so it's paused for the swap.
-ADMIN_NAME=admin  # BOOTSTRAP_ADMIN of the control plane in compose.yaml
+ADMIN_NAME="admin"  # BOOTSTRAP_ADMIN of the control plane in compose.yaml
 admin_id="" admin_link=""
 # exact=true matches the stored username. The answer can't be compared with the name: with
 # "email as username" on, Keycloak shows the email in place of the username.
