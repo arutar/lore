@@ -302,7 +302,21 @@ On Windows, the Release build of the Companion model was measured with 700,000 g
 | Search for a common filename substring and return the first page | 43 to 48 ms |
 | Toggle one file and update the selection counts in the model | 35 to 77 ms |
 
-In a separate headless Edge test with 50,000 top-level folders and a simulated WebView bridge, the first 200 folder rows appeared in 118 ms. Rendering all 50,000 rows in the original implementation took 3.17 s on the same machine. These measurements start after the change list is available. A Windows client downloaded 703,009 files (2.17 GiB) from a Lore server over the LAN and wrote the working copy to disk in 171 s. In a separate commit-and-push test on that copy, the client uploaded one selected file. A second clone confirmed that the revision contained only that file. Upload time for the full dataset was not measured.
+In a separate headless Edge test with 50,000 top-level folders and a simulated WebView bridge, the first 200 folder rows appeared in 118 ms. Rendering all 50,000 rows in the original implementation took 3.17 s on the same machine. These measurements start after the change list is available.
+
+### First upload of 703,009 files over a LAN
+
+On a Windows PC with a Ryzen 9 3900X and a 1 Gbit/s Ethernet link, the Windows Commit dialog and the CLI each uploaded 703,009 new files to a separate empty Lore repository. Each file contained 3,314 bytes of pseudorandom data (2.17 GiB total). The two runs used the same directory layout and different random seeds. File generation and verification are outside the timings.
+
+| Measured interval | Windows Commit dialog (0.2.4) | CLI |
+|---|---:|---:|
+| Open dialog, scan working copy and display the selection | 57.62 s | No preview requested |
+| Prepare changes, create the revision and push it | 328.03 s | 328.83 s |
+| Total, including the GUI preview | 385.65 s | 328.83 s |
+
+The CLI spent 2.85 s in `stage --scan`, 311.80 s in `commit` and 14.18 s in `push`. Lore can upload fragments during commit, so the network transfer spans more than the final push command. The GUI figure starts at the Commit click and ends at the success confirmation. The GUI list had been opened once before the timed run. Each path was timed once; the 0.80 s difference after selection is within the precision of this comparison.
+
+In a separate download test, cloning a 703,009-file repository (2.17 GiB) took 171 s, including the transfer and writing the Windows working copy.
 
 ## Repository layout
 

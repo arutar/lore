@@ -34,14 +34,16 @@ public sealed record FileState(string Path, bool Staged, bool Conflicted, bool M
 /// "modified"; <paramref name="LockedBy"/> names someone else holding a lock on it, or is empty.</summary>
 public sealed record CommitCandidate(string Path, string Change, bool Staged, string LockedBy);
 
+public sealed record CommitProgress(string Phase, ulong Complete = 0, ulong Total = 0, ulong Bytes = 0);
+
 public static class LoreOperations
 {
-    public static async Task<OperationOutcome> ExecuteAsync(OperationRequest request, Action<string> report, CancellationToken cancellationToken)
+    public static async Task<OperationOutcome> ExecuteAsync(OperationRequest request, Action<string> report, CancellationToken cancellationToken, Action<CommitProgress>? progress = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            return await ExecuteCore(request, report);
+            return await ExecuteCore(request, report, progress);
         }
         catch (LoreError error) when (NeedsInteractiveLogin(error))
         {
@@ -66,7 +68,7 @@ public static class LoreOperations
             }).WaitAsync();
             if (string.IsNullOrWhiteSpace(userId)) throw new InvalidDataException("The server returned no account identity after sign-in.");
             ClientSettings.Load().SelectAccount(request.ServerKey(), userId);
-            return await ExecuteCore(request, report);
+            return await ExecuteCore(request, report, progress);
         }
     }
 
@@ -75,7 +77,7 @@ public static class LoreOperations
         || error.Message.Contains("MissingToken", StringComparison.OrdinalIgnoreCase)
         || error.Message.Contains("missing token", StringComparison.OrdinalIgnoreCase);
 
-    private static async Task<OperationOutcome> ExecuteCore(OperationRequest request, Action<string> report)
+    private static async Task<OperationOutcome> ExecuteCore(OperationRequest request, Action<string> report, Action<CommitProgress>? progress)
     {
         try
         {
@@ -85,7 +87,7 @@ public static class LoreOperations
             {
                 CompanionOperation.Clone => await Clone(request, report),
                 CompanionOperation.Sync => await Sync(request, report),
-                CompanionOperation.Commit => await Commit(request, report),
+                CompanionOperation.Commit => await Commit(request, report, progress),
                 CompanionOperation.Status => await Done(Status(request, report, true)),
                 CompanionOperation.Stage => await Done(Stage(request, report)),
                 CompanionOperation.Unstage => await Unstage(request, report),
@@ -302,12 +304,13 @@ public static class LoreOperations
     // With nothing new to commit it sends commits an earlier push couldn't. When someone changed
     // the same files meanwhile the server can't take the commit as it is; Sync then merges it with
     // theirs and sends the result, asking first where both changed the same file.
-    private static async Task<OperationOutcome> Commit(OperationRequest request, Action<string> report)
+    private static async Task<OperationOutcome> Commit(OperationRequest request, Action<string> report, Action<CommitProgress>? progress)
     {
+        progress?.Invoke(new("prepare"));
         var staged = await PrepareCommit(request, report);
         if (staged.Count == 0)
         {
-            if (await Push(request, report)) return new OperationOutcome("Nothing new to commit; your earlier commits were sent to the server.");
+            if (await Push(request, report, progress: progress)) return new OperationOutcome("Nothing new to commit; your earlier commits were sent to the server.");
             throw new CompanionException("There is nothing to commit: the selected files have no changes.");
         }
 
@@ -318,18 +321,27 @@ public static class LoreOperations
             throw new CompanionException($"Nothing was committed: {LockList(blocked)}. Ask them to release the lock, or leave these files out of the commit.");
         }
 
-        using (var globals = Globals(request))
+        progress?.Invoke(new("commit"));
+        using (var globals = Globals(request, eventIntervalMs: progress is null ? 0u : 250u))
         using (var args = new LoreRevisionCommitArgs { Message = request.Message })
         {
-            await Lore.RevisionCommit(globals, args).Callback(LogCallback(report)).WaitAsync();
+            var log = LogCallback(report);
+            await Lore.RevisionCommit(globals, args).Callback((entry, context) =>
+            {
+                log(entry, context);
+                if (progress is null || entry.Tag != LoreEventTag.REVISION_COMMIT_PROGRESS) return;
+                var count = entry.GetData<LoreRevisionCommitProgressEventDataFFI>().Count;
+                progress(new("commit", count.FileCount, count.DiscoveryComplete ? count.FileTotal : 0, count.BytesTransferred));
+            }).WaitAsync();
         }
         report("Commit completed");
         try
         {
-            await Push(request, report, committed: true);
+            await Push(request, report, committed: true, progress: progress);
         }
         catch (CompanionException error) when (error.InnerException is LoreError inner && BehindTheServer(inner.Message))
         {
+            progress?.Invoke(new("sync"));
             report("Someone changed the same files meanwhile; merging with the server");
             OperationOutcome merged;
             try
@@ -343,6 +355,7 @@ public static class LoreOperations
             return new OperationOutcome("Revision created, merged with the changes others sent meanwhile, and sent to the server."
                 + (merged.Warning && merged.Summary is { } note ? " " + note : ""), merged.Warning);
         }
+        progress?.Invoke(new("sync"));
         return await CatchUp(request, report);
     }
 
@@ -390,16 +403,22 @@ public static class LoreOperations
     // never see it. If someone pushed meanwhile, the server fast-forwards when the changes don't
     // overlap; otherwise the push fails, the commit stays local and Sync merges and sends it.
     // Returns whether anything was sent.
-    private static async Task<bool> Push(OperationRequest request, Action<string> report, bool committed = false)
+    private static async Task<bool> Push(OperationRequest request, Action<string> report, bool committed = false, Action<CommitProgress>? progress = null)
     {
-        using var globals = Globals(request);
+        using var globals = Globals(request, eventIntervalMs: progress is null ? 0u : 250u);
         using var args = new LoreBranchPushArgs { FastForwardMerge = true };
+        progress?.Invoke(new("push"));
         var alreadyPushed = false;
         try
         {
             await Lore.BranchPush(globals, args).Callback((loreEvent, _) =>
             {
                 LogCallback(report)(loreEvent, _);
+                if (progress is not null && loreEvent.Tag == LoreEventTag.BRANCH_PUSH_FRAGMENT_PROGRESS)
+                {
+                    var data = loreEvent.GetData<LoreBranchPushFragmentProgressEventDataFFI>();
+                    progress(new("push", data.Complete, data.Count, data.BytesTransferred));
+                }
                 if (loreEvent.Tag == LoreEventTag.BRANCH_PUSH && loreEvent.GetData<LoreBranchPushEventDataFFI>().FlagAlreadyPushed) alreadyPushed = true;
             }).WaitAsync();
         }
@@ -912,10 +931,11 @@ public static class LoreOperations
 
     private static string SelectedIdentity(OperationRequest request) => ClientSettings.Load().SelectedAccount(request.ServerKey());
 
-    private static LoreGlobalArgs Globals(OperationRequest request) => new()
+    private static LoreGlobalArgs Globals(OperationRequest request, uint eventIntervalMs = 0) => new()
     {
         RepositoryPath = request.RepositoryRoot(),
         Identity = SelectedIdentity(request),
+        EventIntervalMs = eventIntervalMs,
     };
 
     private static LoreCallback LogCallback(Action<string> report) => (loreEvent, _) =>

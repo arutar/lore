@@ -446,7 +446,8 @@ internal sealed class WebViewOperationWindow : Window
         {
             request.Validate();
             running = true;
-            var outcome = await LoreOperations.ExecuteAsync(request, progress.Report, CancellationToken.None);
+            var outcome = await LoreOperations.ExecuteAsync(request, progress.Report, CancellationToken.None,
+                update => Send(new { type = "commit-progress", update }));
             Send(new { type = "complete", text = outcome.Summary ?? CompletionText(), warning = outcome.Warning });
         }
         catch (ChoiceRequired question)

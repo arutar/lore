@@ -133,3 +133,6 @@ span.caret { cursor: inherit; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 10px; }
 .legend > span { display: flex; align-items: center; gap: 5px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+
+.commit-activity { display: grid; gap: 8px; }
+.commit-activity progress { width: 100%; accent-color: var(--accent); }

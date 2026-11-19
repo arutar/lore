@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import cloneIcon from "../../shared/svg/clone.svg?url";
 import commitIcon from "../../shared/svg/commit.svg?url";
 import errorIcon from "../../shared/svg/error.svg?url";
@@ -42,7 +42,9 @@ type Change = { path: string; change: "added" | "deleted" | "modified"; staged: 
 type ChangeFolder = { path: string; name: string; depth: number; files: number; added: number; modified: number; deleted: number; locked: number; selected: number };
 type ChangeSummary = { total: number; selected: number; eligible: number; folders: ChangeFolder[]; whole: boolean };
 type ChangePage = { folder: string; filter: string; offset: number; total: number; selected: number; items: Change[] };
+type CommitProgress = { phase: "prepare" | "commit" | "push" | "sync"; complete: number; total: number; bytes: number };
 type HostMessage = InitMessage
+  | { type: "commit-progress"; update: CommitProgress }
   | ({ type: "changes"; items?: Change[] | null; error?: string } & Partial<ChangeSummary>)
   | ({ type: "changes-page" } & Partial<ChangePage>)
   | ({ type: "selection" } & Partial<ChangeSummary>)
@@ -103,6 +105,19 @@ const pageSize = 200;
 const folderOf = (path: string) => path.split(/[\\/]/).slice(0, -1).join("\\");
 const nameOf = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
+function CommitActivity({ update, selected }: { update: CommitProgress | null; selected: number }) {
+  const phase = update?.phase ?? "prepare";
+  const label = { prepare: "Preparing files", commit: "Creating revision", push: "Sending revision", sync: "Synchronizing with server" }[phase];
+  const percent = update && update.total > 0 ? Math.min(100, Math.floor(100 * update.complete / update.total)) : null;
+  return <section className="commit-activity" aria-label="Commit progress">
+    <div className="summary">{selected.toLocaleString()} selected {selected === 1 ? "file" : "files"}</div>
+    <strong>{label}{percent !== null && ` \u00b7 ${percent}%`}</strong>
+    {percent !== null && <progress aria-label={label} max={100} value={percent} />}
+    {phase === "commit" && update && update.complete > 0 && <span>{update.complete.toLocaleString()} files processed</span>}
+    {update && update.bytes > 0 && <span>{(update.bytes / 1048576).toLocaleString(undefined, { maximumFractionDigits: 1 })} MiB {phase === "push" ? "sent" : "processed"}</span>}
+  </section>;
+}
+
 function groupPages(items: Change[] | null): Record<string, ChangePage> {
   const grouped: Record<string, ChangePage> = Object.create(null);
   for (const item of items ?? []) {
@@ -121,7 +136,7 @@ function groupPages(items: Change[] | null): Record<string, ChangePage> {
 // then one page of files per folder as it opens, so a working copy with hundreds of thousands of
 // changes costs the page a few rows at a time. Files someone else has locked can't be committed,
 // so their boxes are off and disabled.
-function ChangeList({ summary, items, disabled, onSelected }: {
+const ChangeList = memo(function ChangeList({ summary, items, disabled, onSelected }: {
   summary: ChangeSummary;
   items: Change[] | null;
   disabled: boolean;
@@ -314,7 +329,7 @@ function ChangeList({ summary, items, disabled, onSelected }: {
     <div className="legend">{(Object.keys(changeMark) as Change["change"][]).filter((kind) => folders.some((folder) => folder[kind] > 0)).map((kind) =>
       <span key={kind}><i className={`dot ${kind}`} />{changeMark[kind].title.toLowerCase()}</span>)}</div>
   </div>;
-}
+});
 
 // Takes a file in or out of the pages at hand, so its box answers at once.
 function mark(pages: Record<string, ChangePage>, path: string, on: boolean): Record<string, ChangePage> {
@@ -396,11 +411,13 @@ export default function App() {
   // Commit: null while the files are being looked up; then the tree and a count of what is ticked.
   const [changes, setChanges] = useState<ChangeSummary | null>(null);
   const [changeItems, setChangeItems] = useState<Change[] | null>(null);
+  const [commitProgress, setCommitProgress] = useState<CommitProgress | null>(null);
   const [changesError, setChangesError] = useState("");
   const [selected, setSelected] = useState(0);
 
   const start = (current: InitMessage, answer?: { choice: Choice | ""; files: string[] }) => {
     setRunning(true);
+    setCommitProgress(answer?.choice ? { phase: "sync", complete: 0, total: 0, bytes: 0 } : null);
     setQuestion(null);
     setConfirmation(null);
     setLogs([]);
@@ -442,6 +459,8 @@ export default function App() {
         setTheme(data.theme);
       } else if (data.type === "accounts") {
         setAccounts(data.items);
+      } else if (data.type === "commit-progress") {
+        setCommitProgress(data.update);
       } else if (data.type === "progress") {
         // The host batches the lines Lore reports per file, so one message can hold many of them;
         // the log keeps the tail, which is what the window shows anyway.
@@ -577,7 +596,7 @@ export default function App() {
     <main className="dialog">
       <header className="header">
         <img className="operation-icon" src={current.icon} alt="" />
-        <div><h1>{current.title}</h1><p>{current.subtitle}</p></div>
+        <div><h1>{current.title}</h1>{!(config.operation === Operation.Commit && running) && <p>{current.subtitle}</p>}</div>
       </header>
       <form onSubmit={submit}>
         {config.operation === Operation.Clone ? <>
@@ -592,12 +611,12 @@ export default function App() {
         {config.operation === Operation.Sync && !question && <div className="summary">If files are staged, or changed both here and on the server, Sync asks what to do before it changes them.</div>}
         {config.operation === Operation.Revert && !question && <div className="summary">Your changes to the selected files are deleted and can't be restored. You'll be asked to confirm. New files the server doesn't have yet are left in place.</div>}
         {config.operation === Operation.Resolve && !question && <div className="summary">Choose your version or the server's for the selected files. When no conflict is left, the merge is committed and sent to the server.</div>}
-        {config.operation === Operation.Commit && !question && !success && (changes === null
+        {config.operation === Operation.Commit && !question && !success && <div hidden={running}>{changes === null
           ? <div className="summary">{changesError ? `The list of changes isn't available (${changesError}). Commit records the selected paths.` : "Looking for changes…"}</div>
-          : changes.total > 0 ? <ChangeList summary={{ ...changes, selected }} items={changeItems} disabled={running} onSelected={setSelected} />
-          : <div className="summary">{changesError ? `The list of changes isn't available (${changesError}). Commit records the selected paths.` : "No changes in the selected paths. Commit sends earlier commits that weren't sent yet, if there are any."}</div>)}
+          : changes.total > 0 ? <ChangeList summary={changes} items={changeItems} disabled={running} onSelected={setSelected} />
+          : <div className="summary">{changesError ? `The list of changes isn't available (${changesError}). Commit records the selected paths.` : "No changes in the selected paths. Commit sends earlier commits that weren't sent yet, if there are any."}</div>}</div>}
         {hasPaths && config.operation !== Operation.Commit && !question && <label><span>Selected paths · {config.paths.length}</span><ul className="path-list">{config.paths.map((path) => <li key={path}>{path}</li>)}</ul></label>}
-        {config.operation === Operation.Commit && !question && <label><span>Commit message (optional)</span><textarea disabled={running} value={message}
+        {config.operation === Operation.Commit && !question && !running && !success && <label><span>Commit message (optional)</span><textarea disabled={running} value={message}
           onChange={(event) => setMessage(event.target.value)} placeholder="Describe the changes" /></label>}
         {(config.operation === Operation.Stage || config.operation === Operation.Unstage || config.operation === Operation.Lock || config.operation === Operation.Unlock)
           && <div className="summary">Only the selected paths will be changed. This operation does not create a revision.</div>}
@@ -623,10 +642,12 @@ export default function App() {
               <strong>{option.label}{option.danger ? "…" : ""}</strong><span>{option.hint}</span></button>)}</div>
           {question.merged && <div className="summary">If you cancel, these files stay in conflict: Sync and Commit wait until you choose (Lore &gt; Resolve conflicts).</div>}
         </div>}
-        {running && <div className="progress" role="progressbar" aria-label="Running operation"><span /></div>}
+        {running && config.operation === Operation.Commit && <CommitActivity update={commitProgress} selected={selected} />}
+        {running && config.operation !== Operation.Commit && <div className="progress" role="progressbar" aria-label="Running operation"><span /></div>}
         {error && <div className="alert error" role="alert"><img src={errorIcon} alt="" /><div className="alert-content"><span>{error}</span>{accessDenied && <button className="button secondary error-action" type="button" onClick={() => post({ type: "accounts-open" })}>Sign in with another account</button>}</div></div>}
         {success && <div className={`alert ${warning ? "warning" : "success"}`} role="status"><img src={warning ? warningIcon : successIcon} alt="" /><span>{success}</span></div>}
-        {logs.length > 0 && config.operation !== Operation.History && <pre className="output" aria-live="polite">{logs.join("\n")}</pre>}
+        {config.operation === Operation.Commit && error && logs.length > 0 && <details><summary>Operation log</summary><pre className="output">{logs.join("\n")}</pre></details>}
+        {logs.length > 0 && config.operation !== Operation.Commit && config.operation !== Operation.History && <pre className="output" aria-live="polite">{logs.join("\n")}</pre>}
 
         <footer className="actions">
           {question && !running ? <button className="button secondary" type="button" autoFocus onClick={() => post({ type: "cancel" })}>Cancel</button>
