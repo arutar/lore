@@ -92,7 +92,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	var repositories httpapi.RepositoryCreator
+	var repositories httpapi.RepositoryManager
 	var content httpapi.RepositoryContent
 	if settings.LoreRepositoryAddress != "" {
 		oauth := clientcredentials.Config{

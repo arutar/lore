@@ -19,6 +19,11 @@ internal sealed class WebViewOperationWindow : Window
     private bool userSized;
     private double fittedHeight;
     private bool running;
+    private CommitList? changes;
+    // The files a ChoiceRequired question is about; the page shows the first few and answers by
+    // choice alone.
+    private string[] pendingChoice = [];
+    private const int FileListShown = 200;
     private WebViewOperationWindow? accountsWindow;
 
     public WebViewOperationWindow(OperationRequest request)
@@ -30,6 +35,10 @@ internal sealed class WebViewOperationWindow : Window
         Height = 360; // until the page reports its height
         MinWidth = 480;
         MinHeight = 220;
+        // A long list must never push the buttons off the screen: the window stops at the work area
+        // and the list itself scrolls.
+        MaxWidth = Math.Max(MinWidth, SystemParameters.WorkArea.Width - 40);
+        MaxHeight = Math.Max(MinHeight, SystemParameters.WorkArea.Height - 40);
         SizeChanged += (_, _) =>
         {
             if (fitted && Math.Abs(ActualHeight - fittedHeight) > 2) userSized = true;
@@ -60,6 +69,22 @@ internal sealed class WebViewOperationWindow : Window
         DwmSetWindowAttribute(new WindowInteropHelper(this).Handle, 20, ref dark, sizeof(int));
     }
 
+    // Keeps a trace of what the page reported: a script error would otherwise just leave a blank
+    // dialog with nothing to go on.
+    private static void Log(string text)
+    {
+        try
+        {
+            var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Lore");
+            Directory.CreateDirectory(folder);
+            File.AppendAllText(Path.Combine(folder, "companion.log"), $"{DateTime.Now:HH:mm:ss} {text}\n");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            // Logging must never break the dialog.
+        }
+    }
+
     public static bool IsRuntimeAvailable()
     {
         try { return !string.IsNullOrWhiteSpace(CoreWebView2Environment.GetAvailableBrowserVersionString()); }
@@ -70,6 +95,7 @@ internal sealed class WebViewOperationWindow : Window
     {
         try
         {
+            Log($"initializing, base={AppContext.BaseDirectory}");
             var profile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Lore", "WebView2");
             Directory.CreateDirectory(profile);
             var environment = await CoreWebView2Environment.CreateAsync(null, profile);
@@ -81,10 +107,15 @@ internal sealed class WebViewOperationWindow : Window
             core.Settings.IsZoomControlEnabled = false;
             core.NavigationStarting += (_, args) =>
             {
+                Log($"navigate: {args.Uri}");
                 args.Cancel = !Uri.TryCreate(args.Uri, UriKind.Absolute, out var uri)
                     || uri.Scheme != Uri.UriSchemeHttps || !uri.Host.Equals("lore.client", StringComparison.OrdinalIgnoreCase);
+                if (args.Cancel) Log($"navigation cancelled: {args.Uri}");
             };
+            core.NavigationCompleted += (_, args) => Log($"navigation completed: {args.IsSuccess} {args.WebErrorStatus}");
             core.NewWindowRequested += (_, args) => args.Handled = true;
+            // The page's own errors would otherwise leave a blank window with no trace anywhere.
+            core.ProcessFailed += (_, args) => Log($"web view failed: {args.ProcessFailedKind}");
             core.WebMessageReceived += async (_, args) => await Receive(args.WebMessageAsJson);
             var root = Path.Combine(AppContext.BaseDirectory, "Web");
             if (!File.Exists(Path.Combine(root, "index.html"))) throw new FileNotFoundException("Lore Companion Web UI is missing.");
@@ -186,6 +217,9 @@ internal sealed class WebViewOperationWindow : Window
                 case "size":
                     FitHeight(root.GetProperty("height").GetDouble());
                     break;
+                case "log":
+                    Log(root.TryGetProperty("text", out var logged) ? logged.GetString() ?? "" : "");
+                    break;
                 case "theme-set":
                     settings.SetTheme(root.GetProperty("theme").GetString() ?? "");
                     ApplyWindowTheme();
@@ -194,13 +228,57 @@ internal sealed class WebViewOperationWindow : Window
                 case "cancel":
                     Close();
                     break;
+                case "changes-page":
+                    if (changes is null) break;
+                    var pageFolder = root.TryGetProperty("folder", out var pageFolderValue) ? pageFolderValue.GetString() ?? "" : "";
+                    var pageFilter = root.TryGetProperty("filter", out var pageFilterValue) ? pageFilterValue.GetString() ?? "" : "";
+                    var pageOffset = root.TryGetProperty("offset", out var pageOffsetValue) && pageOffsetValue.TryGetInt32(out var from) ? from : 0;
+                    var pageLimit = root.TryGetProperty("limit", out var pageLimitValue) && pageLimitValue.TryGetInt32(out var size) ? size : CommitList.PageSize;
+                    // A filter searches the whole list; without one the page is a folder's own files.
+                    var searching = root.TryGetProperty("search", out var search) && search.ValueKind == JsonValueKind.True;
+                    SendPage(searching ? changes.Search(pageFilter, pageOffset, pageLimit) : changes.Page(pageFolder, pageFilter, pageOffset, pageLimit));
+                    break;
+                case "changes-select":
+                    if (changes is null) break;
+                    var on = root.TryGetProperty("on", out var wanted) && wanted.ValueKind == JsonValueKind.True;
+                    var path = root.TryGetProperty("path", out var target) ? target.GetString() ?? "" : "";
+                    switch (root.TryGetProperty("scope", out var scope) ? scope.GetString() : "")
+                    {
+                        case "all": changes.SelectAll(on); break;
+                        case "folder": changes.SelectFolder(path, on); break;
+                        default: changes.SelectFile(path, on); break;
+                    }
+                    SendSelection();
+                    break;
                 case "run":
                     if (!running)
                     {
                         var choice = root.TryGetProperty("choice", out var chosen) ? chosen.GetString() ?? "" : "";
                         var files = root.TryGetProperty("files", out var listed) && listed.ValueKind == JsonValueKind.Array
                             ? listed.EnumerateArray().Select(file => file.GetString() ?? "").ToArray() : [];
-                        await Run(root.GetProperty("repositoryUrl").GetString(), root.GetProperty("targetPath").GetString(), root.GetProperty("message").GetString(), choice, files);
+                        // The Commit window keeps the selection on this side: a large one never fits a
+                        // page message, so the operation takes it from the model.
+                        var all = false;
+                        string[]? excluded = null;
+                        if (choice.Length == 0 && request.Operation == CompanionOperation.Commit && changes is not null)
+                        {
+                            // Naming the ticked files takes a message per hundred thousand; when only a
+                            // few are left out, staging the paths and taking those out is cheaper.
+                            if (changes.Total > 0 && changes.Selected == 0)
+                                throw new InvalidOperationException("Select at least one file to commit.");
+                            if (changes.MostlySelected)
+                            {
+                                files = [];
+                                all = true;
+                                excluded = changes.ExcludedFiles();
+                            }
+                            else
+                            {
+                                files = changes.ResultFiles() ?? [];
+                                all = changes.All;
+                            }
+                        }
+                        await Run(root.GetProperty("repositoryUrl").GetString(), root.GetProperty("targetPath").GetString(), root.GetProperty("message").GetString(), choice, files, all, excluded);
                     }
                     break;
             }
@@ -208,28 +286,63 @@ internal sealed class WebViewOperationWindow : Window
         catch (Exception exception)
         {
             running = false;
+            Log($"message failed: {exception}");
             Send(new { type = "error", text = OperationError.UserMessage(exception, request.Operation), accessDenied = OperationError.IsAccessDenied(exception, request.Operation) });
         }
     }
 
-    // The files the commit would record, each with a box to leave it out. A failure leaves the
-    // window able to commit the selection as it is, and says why the list is missing.
+    // The files the commit would record, folded into folders. The page gets the folder tree and the
+    // files themselves for a small list; a large one gets pages as folders open, so the window
+    // never waits for hundreds of thousands of rows to travel to it. A failure leaves the window
+    // able to commit the selection as it is, and says why the list is missing.
     private async Task SendCommitCandidates()
     {
         try
         {
-            var files = await LoreOperations.CommitCandidates(request);
+            var candidates = await LoreOperations.CommitCandidates(request);
+            var list = new CommitList(candidates);
+            changes = list;
+            var whole = list.Total <= CommitList.WholeListFrom;
             Send(new
             {
                 type = "changes",
-                items = files.Select(file => new { path = file.Path, change = file.Change, staged = file.Staged, lockedBy = file.LockedBy }),
+                total = list.Total,
+                selected = list.Selected,
+                eligible = list.Eligible,
+                whole,
+                folders = list.Folders(),
+                items = whole ? list.AllFiles().Select(Item) : null,
             });
         }
         catch (Exception exception)
         {
+            changes = null;
             Send(new { type = "changes", items = Array.Empty<object>(), error = OperationError.UserMessage(exception, request.Operation) });
         }
     }
+
+    private object Item(CommitCandidate file) =>
+        new { path = file.Path, change = file.Change, staged = file.Staged, lockedBy = file.LockedBy, selected = changes?.IsSelected(file.Path) ?? true };
+
+    private void SendPage(CommitPage page) => Send(new
+    {
+        type = "changes-page",
+        folder = page.Folder,
+        filter = page.Filter,
+        offset = page.Offset,
+        total = page.Total,
+        selected = page.Selected,
+        items = page.Items.Select(Item),
+    });
+
+    private void SendSelection() => Send(new
+    {
+        type = "selection",
+        total = changes!.Total,
+        selected = changes.Selected,
+        eligible = changes.Eligible,
+        folders = changes.Folders(),
+    });
 
     private async Task SendAccounts()
     {
@@ -274,26 +387,82 @@ internal sealed class WebViewOperationWindow : Window
         // Content that arrives later (the Commit window's file list) makes it taller: keep its
         // bottom, and the buttons there, above the taskbar.
         else if (Top + target > area.Bottom) Top = Math.Max(area.Top, area.Bottom - target);
+        // Whatever the content asked for, the window stays on the screen, buttons and all.
+        if (!double.IsNaN(Left)) Left = Math.Clamp(Left, area.Left, Math.Max(area.Left, area.Right - Width));
+        if (!double.IsNaN(Top)) Top = Math.Clamp(Top, area.Top, Math.Max(area.Top, area.Bottom - Height));
     }
 
-    private async Task Run(string? repositoryUrl, string? targetPath, string? message, string choice, string[] files)
+    /// <summary>Lore reports progress for every file it touches. Pushing one message per file
+    /// starves the page's renderer, and dropping the extra lines would lose the revision list the
+    /// History window is built from: the lines are batched instead, and the page reads each one.</summary>
+    private sealed class Throttled(Action<object> send)
+    {
+        private readonly System.Text.StringBuilder pending = new();
+        private long last;
+
+        public void Report(string text)
+        {
+            lock (pending)
+            {
+                pending.Append(text).Append('\n');
+                var now = Environment.TickCount64;
+                if (now - last < 150) return;
+                last = now;
+                Flush();
+            }
+        }
+
+        public void Flush()
+        {
+            string text;
+            lock (pending)
+            {
+                if (pending.Length == 0) return;
+                text = pending.ToString().TrimEnd('\n');
+                pending.Clear();
+            }
+            send(new { type = "progress", text });
+        }
+    }
+
+    private async Task Run(string? repositoryUrl, string? targetPath, string? message, string choice, string[] files, bool all = false, string[]? excluded = null)
     {
         request.RepositoryUrl = repositoryUrl?.Trim() ?? "";
         request.TargetPath = targetPath?.Trim() ?? "";
         request.Message = message?.Trim() ?? "";
         request.Choice = choice;
+        // A question's answer names the files it was asked about; the page does not send them back,
+        // because a large working copy would not fit one message.
+        if (files.Length == 0 && choice.Length > 0 && pendingChoice.Length > 0) files = pendingChoice;
+        pendingChoice = [];
         request.Files = files;
+        request.DisplayedPaths = all && changes is not null
+            ? changes.AllFiles().Select(file => file.Path).ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : null;
+        request.All = all;
+        request.Excluded = excluded ?? [];
+        var progress = new Throttled(Send);
         try
         {
             request.Validate();
             running = true;
-            var outcome = await LoreOperations.ExecuteAsync(request, text => Send(new { type = "progress", text }), CancellationToken.None);
+            var outcome = await LoreOperations.ExecuteAsync(request, progress.Report, CancellationToken.None);
             Send(new { type = "complete", text = outcome.Summary ?? CompletionText(), warning = outcome.Warning });
         }
         catch (ChoiceRequired question)
         {
             // Nothing the question is about was changed; the page shows the files and the ways forward.
-            Send(new { type = "choice", kind = question.Kind, files = question.Files, text = question.Message, merged = question.Merged });
+            // The list can be a whole working copy, so the page gets the first of them and the count.
+            pendingChoice = question.Files.ToArray();
+            Send(new
+            {
+                type = "choice",
+                kind = question.Kind,
+                files = pendingChoice.Take(FileListShown).ToArray(),
+                total = pendingChoice.Length,
+                text = question.Message,
+                merged = question.Merged,
+            });
         }
         catch (Exception exception)
         {
@@ -301,6 +470,7 @@ internal sealed class WebViewOperationWindow : Window
         }
         finally
         {
+            progress.Flush();
             running = false;
         }
     }
@@ -328,8 +498,11 @@ internal sealed class WebViewOperationWindow : Window
             Dispatcher.BeginInvoke(() => Send(message));
             return;
         }
-        webView.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(message));
+        // camelCase: the page reads the folder rows as { path, name, files, ... }.
+        webView.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(message, SerializerOptions));
     }
+
+    private static readonly JsonSerializerOptions SerializerOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {

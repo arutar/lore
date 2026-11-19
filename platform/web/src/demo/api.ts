@@ -99,6 +99,7 @@ export const demoApi: Api = {
   usersExportUrl: () => notice("the list of users as CSV"),
   repositories: (q = "") => reply(page(data.repositories.filter((repository) => matches(q, repository.name, repository.description)))),
   createRepository: readOnly,
+  deleteRepository: readOnly,
   updateRepository: readOnly,
   settings: () => reply(loadSettings()),
   saveSettings: (settings) => {

@@ -32,6 +32,18 @@ public sealed class OperationRequest
     /// <summary>The files the user saw when choosing (relative to the repository root). A choice
     /// applies only to these: a file that turned up since is asked about again.</summary>
     public string[] Files { get; set; } = [];
+    /// <summary>Everything under <see cref="Paths"/> goes in, so <see cref="Files"/> stays empty:
+    /// the Commit window sets it when every change is ticked, which keeps a working copy with
+    /// hundreds of thousands of changes out of the request.</summary>
+    public bool All { get; set; }
+    /// <summary>Files under <see cref="Paths"/> the user left out; with <see cref="All"/> set they
+    /// are unstaged after the paths are staged. Naming the few unticked files beats naming every
+    /// ticked one when a working copy holds hundreds of thousands of changes.</summary>
+    public string[] Excluded { get; set; } = [];
+
+    // The host captures the displayed paths before running a bulk commit. This never crosses the WebView bridge.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlySet<string>? DisplayedPaths { get; set; }
 
     public static OperationRequest Parse(string json)
     {
@@ -62,7 +74,10 @@ public sealed class OperationRequest
         {
             throw new InvalidDataException("Choice isn't supported");
         }
-        if (Files.Length > 100_000 || Files.Any(file => string.IsNullOrWhiteSpace(file) || file.Length > 32_768 || Path.IsPathRooted(file) || file.Split('\\', '/').Contains("..")))
+        // A request written by the Explorer integration is capped tightly; a selection the Commit
+        // window made can hold every file of a large working copy.
+        var maximumFiles = forExecution ? 5_000_000 : 100_000;
+        if (Files.Length > maximumFiles || Excluded.Length > maximumFiles || Files.Concat(Excluded).Any(file => string.IsNullOrWhiteSpace(file) || file.Length > 32_768 || Path.IsPathRooted(file) || file.Split('\\', '/').Contains("..")))
         {
             throw new InvalidDataException("Request contains an invalid file");
         }

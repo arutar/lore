@@ -17,6 +17,7 @@ type repositoryServer struct {
 	repositoryv1.UnimplementedRepositoryServiceServer
 	request *repositoryv1.RepositoryCreateRequest
 	token   string
+	deleted []byte
 }
 
 func (s *repositoryServer) RepositoryCreate(ctx context.Context, request *repositoryv1.RepositoryCreateRequest) (*repositoryv1.RepositoryCreateResponse, error) {
@@ -26,6 +27,12 @@ func (s *repositoryServer) RepositoryCreate(ctx context.Context, request *reposi
 		s.token = values[0]
 	}
 	return &repositoryv1.RepositoryCreateResponse{}, nil
+}
+
+func (s *repositoryServer) RepositoryDelete(ctx context.Context, request *repositoryv1.RepositoryDeleteRequest) (*repositoryv1.RepositoryDeleteResponse, error) {
+	s.deleted = request.Id
+	s.token = metadata.ValueFromIncomingContext(ctx, "authorization")[0]
+	return &repositoryv1.RepositoryDeleteResponse{}, nil
 }
 
 func TestCreateRepositoryRPC(t *testing.T) {
@@ -56,5 +63,11 @@ func TestCreateRepositoryRPC(t *testing.T) {
 	}
 	if got := defaultBranchID(id); string(got) != string(backend.request.DefaultBranchId) {
 		t.Fatal("default branch ID isn't deterministic")
+	}
+	if err := client.DeleteRepository(t.Context(), id, "admin-scoped"); err != nil {
+		t.Fatal(err)
+	}
+	if string(backend.deleted) != string(backend.request.Id) || backend.token != "Bearer admin-scoped" {
+		t.Fatal("delete did not forward the repository ID and administrator token")
 	}
 }

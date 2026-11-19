@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link, NavLink, useParams } from "react-router-dom";
+import { Link, NavLink, useNavigate, useParams } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { useApp } from "../App";
 import { useLocale } from "../i18n";
@@ -68,7 +68,7 @@ export function RepositoryPage() {
     {tab === "history" && <HistoryTab id={id} />}
     {tab === "locks" && <LocksTab id={id} />}
     {tab === "access" && canManage && <AccessTab repository={repository} onChanged={() => void load()} />}
-    {tab === "settings" && isAdmin && <SettingsTab repository={repository} onSaved={setRepository} />}
+    {tab === "settings" && isAdmin && <SettingsTab key={repository.id} repository={repository} onSaved={setRepository} />}
   </>;
 }
 
@@ -201,6 +201,26 @@ function SettingsTab({ repository, onSaved }: { repository: Repository; onSaved:
   const { t, error } = useLocale();
   const { refreshRepositories } = useApp();
   const toast = useToast();
+  const navigate = useNavigate();
+  const [confirming, setConfirming] = useState(false);
+  const [confirmation, setConfirmation] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const closeDelete = useCallback(() => { if (!deleting) setConfirming(false); }, [deleting]);
+  const remove = async () => {
+    if (confirmation !== repository.name || deleting) return;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await api.deleteRepository(repository.id, confirmation);
+      refreshRepositories();
+      navigate("/", { replace: true });
+      toast(t("repoSettings.deleted", { name: repository.name }));
+    } catch (cause) {
+      setDeleteError(error(cause));
+      setDeleting(false);
+    }
+  };
   const [name, setName] = useState(repository.name);
   const [description, setDescription] = useState(repository.description);
   const [saving, setSaving] = useState(false);
@@ -221,7 +241,7 @@ function SettingsTab({ repository, onSaved }: { repository: Repository; onSaved:
       setSaving(false);
     }
   };
-  return <form className="card narrow" onSubmit={(event) => void save(event)}>
+  return <div className="stack"><form className="card narrow" onSubmit={(event) => void save(event)}>
     <div className="card-head"><h2 className="grow">{t("repoSettings.main")}</h2></div>
     <div className="form">
       <ErrorNote message={problem} />
@@ -229,5 +249,19 @@ function SettingsTab({ repository, onSaved }: { repository: Repository; onSaved:
       <label className="field">{t("repoSettings.description")}<input className="input" value={description} onChange={(event) => setDescription(event.target.value)} /></label>
       <div><button className="btn primary" disabled={saving || (name === repository.name && description === repository.description)}>{t("common.save")}</button></div>
     </div>
-  </form>;
+  </form>
+    <section className="card narrow danger-zone">
+      <div className="card-head"><h2>{t("repoSettings.danger")}</h2></div>
+      <div className="setting-row"><div className="grow"><h3>{t("repoSettings.remove")}</h3><p>{t("repoSettings.consequence")}</p></div>
+        <button className="btn danger" disabled={saving} onClick={() => { setConfirmation(""); setDeleteError(""); setConfirming(true); }}>{t("repoSettings.remove")}</button></div>
+    </section>
+    {confirming && <Dialog title={t("repoSettings.confirmTitle", { name: repository.name })} onClose={closeDelete} footer={<>
+      <button className="btn" disabled={deleting} onClick={closeDelete}>{t("common.cancel")}</button>
+      <button className="btn danger solid" disabled={deleting || confirmation !== repository.name} onClick={() => void remove()}>{t("repoSettings.remove")}</button>
+    </>}>
+      <ErrorNote message={deleteError} />
+      <p>{t("repoSettings.consequence")}</p>
+      <label className="field">{t("repoSettings.typeName", { name: repository.name })}<input className="input mono" value={confirmation} disabled={deleting} onChange={event => setConfirmation(event.target.value)} autoComplete="off" /></label>
+    </Dialog>}
+  </div>;
 }

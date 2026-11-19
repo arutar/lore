@@ -77,6 +77,7 @@ const serverApi = {
   usersExportUrl: (csv: boolean) => `/web/v1/admin/users/export${csv ? "?format=csv" : ""}`,
   repositories: (q = "", cursor = "") => request<Page<Repository>>(`/admin/repositories?${query({ pageSize: 50, q, cursor })}`),
   createRepository: (input: { id?: string; name: string; description: string; public: boolean }) => request<Repository>("/admin/repositories", { method: "POST", body: JSON.stringify(input) }),
+  deleteRepository: (id: string, name: string) => request<void>(`/admin/repositories/${id}`, { method: "DELETE", body: JSON.stringify({ name }) }),
   updateRepository: (id: string, input: { name: string; description: string; public?: boolean }) => request<Repository>(`/admin/repositories/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
   settings: () => request<GlobalSettings>("/admin/settings"),
   // The server replaces all settings at once: always send the complete object.
