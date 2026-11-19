@@ -79,7 +79,10 @@ func postExchange(t *testing.T, handler http.Handler, form url.Values) (int, str
 	return status, token
 }
 
-type countingCreator struct{ calls int }
+type countingCreator struct {
+	fakeRepositoryCreator
+	calls int
+}
 
 func (c *countingCreator) CreateRepository(context.Context, model.Repository) error {
 	c.calls++

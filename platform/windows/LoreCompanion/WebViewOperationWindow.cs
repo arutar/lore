@@ -260,10 +260,12 @@ internal sealed class WebViewOperationWindow : Window
                         // page message, so the operation takes it from the model.
                         var all = false;
                         string[]? excluded = null;
-                        if (request.Operation == CompanionOperation.Commit && changes is not null)
+                        if (choice.Length == 0 && request.Operation == CompanionOperation.Commit && changes is not null)
                         {
                             // Naming the ticked files takes a message per hundred thousand; when only a
                             // few are left out, staging the paths and taking those out is cheaper.
+                            if (changes.Total > 0 && changes.Selected == 0)
+                                throw new InvalidOperationException("Select at least one file to commit.");
                             if (changes.MostlySelected)
                             {
                                 files = [];
@@ -434,6 +436,9 @@ internal sealed class WebViewOperationWindow : Window
         if (files.Length == 0 && choice.Length > 0 && pendingChoice.Length > 0) files = pendingChoice;
         pendingChoice = [];
         request.Files = files;
+        request.DisplayedPaths = all && changes is not null
+            ? changes.AllFiles().Select(file => file.Path).ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : null;
         request.All = all;
         request.Excluded = excluded ?? [];
         var progress = new Throttled(Send);

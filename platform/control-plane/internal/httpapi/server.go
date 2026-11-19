@@ -15,8 +15,9 @@ import (
 	"github.com/arutar/lore/platform/control-plane/internal/store"
 )
 
-type RepositoryCreator interface {
+type RepositoryManager interface {
 	CreateRepository(ctx context.Context, repository model.Repository) error
+	DeleteRepository(ctx context.Context, id, token string) error
 }
 
 type RepositoryContent interface {
@@ -37,7 +38,7 @@ type GroupCatalog interface {
 }
 
 type Config struct {
-	Repositories        RepositoryCreator
+	Repositories        RepositoryManager
 	Directory           GroupCatalog
 	Content             RepositoryContent
 	TokenExchange       *TokenExchange
@@ -123,6 +124,7 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 			router.Get("/repositories", server.repositories)
 			router.With(requireCSRF).Post("/repositories", server.createRepository)
 			router.With(requireCSRF).Patch("/repositories/{id}", server.updateRepository)
+			router.With(requireCSRF).Delete("/repositories/{id}", server.deleteRepository)
 			router.Get("/settings", server.settings)
 			router.With(requireCSRF).Patch("/settings", server.updateSettings)
 			router.Get("/audit", server.audit)

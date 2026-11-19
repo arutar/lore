@@ -27,6 +27,8 @@ public sealed class CommitList
     // starts with.
     private readonly HashSet<string> excluded = new(StringComparer.OrdinalIgnoreCase);
 
+    private readonly HashSet<string> lockedPaths = new(StringComparer.OrdinalIgnoreCase);
+
     private sealed class Node(string path, string name, int depth)
     {
         public string Path { get; set; } = path;
@@ -48,6 +50,7 @@ public sealed class CommitList
         var nodes = new Dictionary<string, Node>(StringComparer.OrdinalIgnoreCase) { [""] = root };
         for (var index = 0; index < files.Count; index++)
         {
+            if (files[index].LockedBy.Length > 0) excluded.Add(files[index].Path);
             var parts = files[index].Path.Split('\\', '/', StringSplitOptions.RemoveEmptyEntries);
             var node = root;
             for (var depth = 0; depth < parts.Length - 1; depth++)
@@ -63,6 +66,7 @@ public sealed class CommitList
             }
             node.Files.Add(index);
         }
+        lockedPaths.UnionWith(excluded);
         Fold(root);
         Compact(root);
     }
@@ -109,9 +113,9 @@ public sealed class CommitList
     public int Total => files.Count;
 
     /// <summary>Files that may be committed: everything but what someone else has locked.</summary>
-    public int Eligible => files.Count - files.Count(file => file.LockedBy.Length > 0);
+    public int Eligible => files.Count - root.Locked;
 
-    public int Selected => Eligible - excluded.Count;
+    public int Selected => files.Count - excluded.Count;
 
     public bool All => excluded.Count == 0;
 
@@ -205,7 +209,7 @@ public sealed class CommitList
 
     public void SelectAll(bool on)
     {
-        if (on) excluded.Clear();
+        if (on) excluded.RemoveWhere(path => !lockedPaths.Contains(path));
         else foreach (var file in files) if (file.LockedBy.Length == 0) excluded.Add(file.Path);
         Recount(root);
     }

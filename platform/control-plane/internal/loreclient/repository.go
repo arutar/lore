@@ -70,6 +70,20 @@ func (c *Client) CreateRepository(ctx context.Context, repository model.Reposito
 	return err
 }
 
+// Forward the signed-in administrator's scoped token so Lore authorizes and audits that actor.
+func (c *Client) DeleteRepository(ctx context.Context, repositoryID, token string) error {
+	id, err := decodeUUID(repositoryID)
+	if err != nil {
+		return err
+	}
+	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
+	_, err = c.repositories.RepositoryDelete(ctx, &repositoryv1.RepositoryDeleteRequest{Id: id})
+	if err == nil {
+		c.lastChanges.Delete(repositoryID)
+	}
+	return err
+}
+
 func defaultBranchID(repositoryID string) []byte {
 	digest := sha256.Sum256([]byte(repositoryID + ":main"))
 	id := append([]byte(nil), digest[:16]...)

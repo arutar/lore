@@ -41,6 +41,10 @@ public sealed class OperationRequest
     /// ticked one when a working copy holds hundreds of thousands of changes.</summary>
     public string[] Excluded { get; set; } = [];
 
+    // The host captures the displayed paths before running a bulk commit. This never crosses the WebView bridge.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlySet<string>? DisplayedPaths { get; set; }
+
     public static OperationRequest Parse(string json)
     {
         if (json.Length > 1_048_576)

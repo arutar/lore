@@ -258,8 +258,16 @@ public static class LoreOperations
     /// Locks are looked up on the server; without it the files are listed without them.</summary>
     public static async Task<List<CommitCandidate>> CommitCandidates(OperationRequest request)
     {
-        var files = (await ReadStatus(request, scan: true))
-            .Where(file => !file.Conflicted && (file.Staged || Selected(request, file.Path)))
+        List<FileState> status;
+        try
+        {
+            status = await ReadStatus(request, scan: true);
+        }
+        catch (LoreError error) when (error.ReturnCode == 80) // Lore AddressNotFound: a cold clone can lack metadata blocks.
+        {
+            status = await ReadStatus(request, scan: true, offline: false);
+        }
+        var files = status.Where(file => !file.Conflicted && (file.Staged || Selected(request, file.Path)))
             .ToList();
         var locks = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         try
@@ -296,26 +304,7 @@ public static class LoreOperations
     // theirs and sends the result, asking first where both changed the same file.
     private static async Task<OperationOutcome> Commit(OperationRequest request, Action<string> report)
     {
-        var before = await ReadStatus(request);
-        var unresolved = before.Where(file => file.Conflicted).Select(file => file.Path).ToList();
-        if (unresolved.Count > 0) throw MergeConflict(unresolved);
-        if (request.All || request.Files.Length == 0)
-        {
-            // Everything under the selected paths goes in: staging the paths themselves spares
-            // listing hundreds of thousands of files one by one.
-            await Stage(request, report);
-            if (request.Excluded.Length > 0)
-            {
-                // The boxes the user cleared: staged with everything else, then taken back out.
-                await UnstagePaths(request, request.Excluded.Select(file => FullPath(request, file)).ToArray(), report);
-                report($"{Count(request.Excluded.Length, "file")} left out");
-            }
-        }
-        else
-        {
-            await StageExactly(request, before, request.Files, report);
-        }
-        var staged = (await ReadStatus(request)).Where(file => file.Staged).Select(file => file.Path).ToList();
+        var staged = await PrepareCommit(request, report);
         if (staged.Count == 0)
         {
             if (await Push(request, report)) return new OperationOutcome("Nothing new to commit; your earlier commits were sent to the server.");
@@ -446,6 +435,45 @@ public static class LoreOperations
         using var args = new LoreFileStageArgs { Paths = request.Paths, Scan = true };
         await Lore.FileStage(globals, args).Callback(LogCallback(report)).WaitAsync();
         report("Selected paths staged");
+    }
+
+    internal static async Task<List<string>> PrepareCommit(OperationRequest request, Action<string> report)
+    {
+        var before = await ReadStatus(request);
+        var unresolved = before.Where(file => file.Conflicted).Select(file => file.Path).ToList();
+        if (unresolved.Count > 0) throw MergeConflict(unresolved);
+        if (request.DisplayedPaths is { } displayed && before.Any(file => file.Staged && !displayed.Contains(file.Path)))
+            throw new CompanionException("Another file was staged. Reopen Commit to review the selection.");
+        if (request.All || request.Files.Length == 0)
+        {
+            // Everything under the selected paths goes in: staging the paths themselves spares
+            // listing hundreds of thousands of files one by one.
+            if (request.DisplayedPaths?.Count != 0) await Stage(request, report);
+        }
+        else
+        {
+            await StageExactly(request, before, request.Files, report);
+        }
+        var staged = (await ReadStatus(request)).Where(file => file.Staged).Select(file => file.Path).ToList();
+        if (request.All)
+        {
+            var outside = BulkCommitExclusions(request, staged);
+            if (outside.Length > 0)
+            {
+                await UnstagePaths(request, outside.Select(file => FullPath(request, file)).ToArray(), report);
+                report($"{Count(outside.Length, "file")} left out");
+                staged = (await ReadStatus(request)).Where(file => file.Staged).Select(file => file.Path).ToList();
+                if (BulkCommitExclusions(request, staged).Length > 0)
+                    throw new CompanionException("The staged selection changed. Reopen Commit to review it.");
+            }
+        }
+        return staged;
+    }
+
+    private static string[] BulkCommitExclusions(OperationRequest request, IEnumerable<string> staged)
+    {
+        var excluded = request.Excluded.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return staged.Where(path => excluded.Contains(path) || request.DisplayedPaths?.Contains(path) == false).ToArray();
     }
 
     // The files the user ticked in the Commit window become exactly what is staged: they are
@@ -589,11 +617,11 @@ public static class LoreOperations
 
     /// <summary>The working copy's changed, staged and conflicted files (paths relative to the
     /// root). Offline: it reads only local state.</summary>
-    public static async Task<List<FileState>> ReadStatus(OperationRequest request, bool scan = false)
+    public static async Task<List<FileState>> ReadStatus(OperationRequest request, bool scan = false, bool offline = true)
     {
         var root = request.RepositoryRoot();
         var files = new List<FileState>();
-        using var globals = new LoreGlobalArgs { RepositoryPath = root, Offline = true };
+        using var globals = new LoreGlobalArgs { RepositoryPath = root, Offline = offline, Identity = SelectedIdentity(request) };
         using var args = new LoreRepositoryStatusArgs { Staged = true, Scan = scan, CheckDirty = !scan };
         await Lore.RepositoryStatus(globals, args).Callback((loreEvent, _) =>
         {

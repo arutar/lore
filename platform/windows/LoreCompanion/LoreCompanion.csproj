@@ -12,6 +12,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Using Include="System.IO" />
+    <InternalsVisibleTo Include="LoreCompanion.Tests" />
     <Resource Include="../shared/ico/*.ico" Link="%(Filename)%(Extension)" />
   </ItemGroup>
   <ItemGroup>

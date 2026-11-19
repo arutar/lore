@@ -96,6 +96,9 @@ public sealed class CommitListTests
         var list = List(File("a\\mine.txt"), File("a\\theirs.txt", lockedBy: "Someone"));
 
         Assert.AreEqual(1, list.Selected);
+        Assert.IsFalse(list.IsSelected(@"a\theirs.txt"));
+        Assert.AreEqual(1, list.Folders().Single().Selected);
+        CollectionAssert.Contains(list.ExcludedFiles(), @"a\theirs.txt");
         list.SelectFolder("a", false);
         Assert.AreEqual(0, list.Selected);
         list.SelectFolder("a", true);

@@ -388,8 +388,13 @@ func TestWebSessionEndsWhenTheAccountIsDisabledInTheDirectory(t *testing.T) {
 		t.Fatal("session isn't authenticated")
 	}
 	f.directory.set(aliceGUID, directory.Account{User: directory.User{ID: aliceGUID, Username: "alice"}, Disabled: true})
-	if authenticated() {
-		t.Fatal("the web session survived disabling the account in AD")
+	// A one-nanosecond refresh interval can still span multiple requests on Windows.
+	deadline := time.Now().Add(time.Second)
+	for authenticated() {
+		if time.Now().After(deadline) {
+			t.Fatal("the web session survived disabling the account in AD")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

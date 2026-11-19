@@ -164,7 +164,7 @@ You need a host with Docker (Docker Engine with Compose v2 on Linux, Docker Desk
 
 ```sh
 # 1. Unpack the bundle
-tar -xzf lore-platform-server-0.2.3.tar.gz && cd lore-platform-server-0.2.3
+tar -xzf lore-platform-server-0.2.4.tar.gz && cd lore-platform-server-0.2.4
 
 # 2. Run setup with the name your users will type; keep the data outside the bundle
 LORE_DATA_ROOT=/srv/lore-data LORE_PUBLIC_HOST=lore.corp.local sh setup.sh
@@ -186,8 +186,8 @@ In PowerShell, as the user that runs Docker Desktop:
 
 ```powershell
 # 1. Unpack the bundle
-Expand-Archive lore-platform-server-0.2.3.zip -DestinationPath C:\lore
-cd C:\lore\lore-platform-server-0.2.3
+Expand-Archive lore-platform-server-0.2.4.zip -DestinationPath C:\lore
+cd C:\lore\lore-platform-server-0.2.4
 
 # 2. Run setup with the name your users will type; keep the data outside the bundle
 $env:LORE_DATA_ROOT = "D:\lore-data"
@@ -291,6 +291,18 @@ Data: **50,000 repositories, 50,000 users, 151,000 permissions, 1,000 AD groups*
 | Session check (every request) | 0.2 ms | 0.2 ms |
 
 Expired sign-in sessions are removed as new ones are created, so the session table stays small.
+
+### Windows Commit window with 700,000 changes
+
+On Windows, the Release build of the Companion model was measured with 700,000 generated changed paths spread across 1, 1,200 and 50,000 folders. Each range covers one run per layout.
+
+| Operation | Observed time |
+|---|---:|
+| Build the folder tree from the change list | 115?223 ms |
+| Search for a common filename substring and return the first page | 43?48 ms |
+| Toggle one file and update the selection counts in the model | 35?77 ms |
+
+In a separate headless Edge test with 50,000 top-level folders and a simulated WebView bridge, the first 200 folder rows appeared in 118 ms. Rendering all 50,000 rows in the original implementation took 3.17 s on the same machine. These measurements start after the change list is available. For comparison, an actual LAN clone of 703,009 files (2.17 GiB) took 171 s, including transfer and writing the working copy.
 
 ## Repository layout
 

@@ -35,7 +35,7 @@ type InitMessage = {
 type ChoiceMessage = { type: "choice"; kind: "staged" | "both"; files: string[]; total?: number; text: string; merged: boolean };
 type Choice = "commit" | "unstage" | "mine" | "theirs";
 // A step that deletes the user's changes waits for this confirmation.
-type Confirmation = { files: string[]; text: string; action: string; run: () => void };
+type Confirmation = { files: string[]; total?: number; text: string; action: string; run: () => void };
 // What Commit would record (LoreOperations.CommitCandidates); the user ticks what goes in.
 type Change = { path: string; change: "added" | "deleted" | "modified"; staged: boolean; lockedBy: string; selected?: boolean };
 // One folder row of the Commit list: everything below it, split by kind, and what is ticked.
@@ -104,7 +104,7 @@ const folderOf = (path: string) => path.split(/[\\/]/).slice(0, -1).join("\\");
 const nameOf = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
 function groupPages(items: Change[] | null): Record<string, ChangePage> {
-  const grouped: Record<string, ChangePage> = {};
+  const grouped: Record<string, ChangePage> = Object.create(null);
   for (const item of items ?? []) {
     const folder = folderOf(item.path);
     const page = grouped[folder] ?? { folder, filter: "", offset: 0, total: 0, selected: 0, items: [] };
@@ -128,25 +128,30 @@ function ChangeList({ summary, items, disabled, onSelected }: {
   onSelected: (selected: number) => void;
 }) {
   const [folders, setFolders] = useState<ChangeFolder[]>(summary.folders);
+  const [folderLimit, setFolderLimit] = useState(summary.whole ? Infinity : pageSize);
   const [open, setOpen] = useState<Set<string>>(() => new Set(summary.whole ? summary.folders.map((folder) => folder.path) : []));
   const [pages, setPages] = useState<Record<string, ChangePage>>(() => groupPages(items));
   const [filter, setFilter] = useState("");
   const [found, setFound] = useState<ChangePage | null>(null);
   const [waiting, setWaiting] = useState<Set<string>>(new Set());
   const scope = useRef<"all" | "folder" | "file">("file");
+  const activeFilter = useRef("");
   const pagesRef = useRef(pages);
   pagesRef.current = pages;
 
   const merge = (current: ChangePage | undefined, page: ChangePage): ChangePage => {
     if (!current || page.offset === 0) return page;
-    const merged = [...current.items];
-    for (const item of page.items) if (!merged.some((known) => known.path === item.path)) merged.push(item);
-    return { ...page, items: merged };
+    if (page.offset !== current.items.length) return current;
+    return { ...page, items: current.items.concat(page.items) };
   };
 
   const request = (folder: string, offset: number, limit = pageSize, search = "") => {
     post({ type: "changes-page", folder, filter: search, offset, limit, search: Boolean(search) });
   };
+
+  useEffect(() => {
+    if (!summary.whole) request("", 0);
+  }, [summary.whole]);
 
   useEffect(() => {
     const bridge = window.chrome?.webview;
@@ -156,7 +161,7 @@ function ChangeList({ summary, items, disabled, onSelected }: {
       if (data.type === "changes-page") {
         const page = data as ChangePage;
         if (page.filter) {
-          setFound(page);
+          if (page.filter === activeFilter.current) setFound(current => merge(current ?? undefined, page));
           return;
         }
         setPages((current) => ({ ...current, [page.folder]: merge(current[page.folder], page) }));
@@ -172,7 +177,7 @@ function ChangeList({ summary, items, disabled, onSelected }: {
         // A folder's box changes counts the rows at hand cannot work out: ask for the pages that are
         // open again. A single file's box is already right here.
         if (scope.current !== "file") {
-          for (const folder of open) request(folder, 0, Math.max(pageSize, pagesRef.current[folder]?.items.length ?? 0));
+          for (const folder of Object.keys(pagesRef.current)) request(folder, 0, Math.max(pageSize, pagesRef.current[folder]?.items.length ?? 0));
           if (found) request("", 0, Math.max(pageSize, found.items.length), filter);
         }
       }
@@ -214,6 +219,8 @@ function ChangeList({ summary, items, disabled, onSelected }: {
   };
 
   const search = (needle: string) => {
+    activeFilter.current = needle.trim();
+    setFound(null);
     setFilter(needle);
     if (!needle.trim()) {
       setFound(null);
@@ -255,8 +262,18 @@ function ChangeList({ summary, items, disabled, onSelected }: {
   } else {
     const top = pages[""];
     if (top) rows.push(...top.items.map((change) => fileRow(change, 0, "")));
+    if (top && top.items.length < top.total) rows.push(<li key="more-root" className="more">
+      <button type="button" className="button secondary" disabled={disabled}
+        onClick={() => request("", top.items.length)}>Show more � {top.items.length} of {top.total}</button></li>);
+    let displayed = 0;
     for (const folder of folders) {
       if (!visible(folder)) continue;
+      if (displayed === folderLimit) {
+        rows.push(<li key="more-folders" className="more"><button type="button" className="button secondary"
+          onClick={() => setFolderLimit(limit => limit + pageSize)}>Show more folders</button></li>);
+        break;
+      }
+      displayed++;
       const isOpen = open.has(folder.path);
       const allowed = folder.files - folder.locked;
       rows.push(<li key={`folder:${folder.path}`} className="folder-row" title={folder.path}>
@@ -540,7 +557,7 @@ export default function App() {
   // because a working copy's worth of paths would not fit a message.
   const answer = (choice: Choice, files: string[], danger?: boolean) => {
     const run = () => start({ ...config, repositoryUrl, targetPath, message }, { choice, files: [] });
-    if (danger) setConfirmation({ files, text: discardText, action: "Discard and take the server's version", run });
+    if (danger) setConfirmation({ files, total: question?.total, text: discardText, action: "Discard and take the server's version", run });
     else run();
   };
 
@@ -548,7 +565,7 @@ export default function App() {
     <header className="header"><img className="operation-icon" src={warningIcon} alt="" /><div><h1>Discard your changes?</h1><p>{current.title}</p></div></header>
     <div className="form">
       <div className="alert danger" role="alert"><img src={errorIcon} alt="" /><span>{confirmation.text}</span></div>
-      <label><span>Files · {confirmation.files.length}</span><ul className="path-list">{confirmation.files.map((path) => <li key={path}>{path}</li>)}</ul></label>
+      <label><span>Files · {confirmation.total ?? confirmation.files.length}</span><ul className="path-list">{confirmation.files.map((path) => <li key={path}>{path}</li>)}</ul></label>
       <footer className="actions">
         <button className="button secondary" type="button" autoFocus onClick={() => setConfirmation(null)}>Cancel</button>
         <button className="button danger solid" type="button" onClick={confirmation.run}>{confirmation.action}</button>

@@ -215,6 +215,20 @@ func (t *TokenExchange) exchange(w http.ResponseWriter, r *http.Request) {
 	if user != nil {
 		subject, username = user.ID, user.Username
 	}
+	token, err := t.signRepositoryToken(repository.ID, subject, username, permissions)
+	if err != nil {
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "Couldn't sign token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"access_token":      token,
+		"issued_token_type": accessTokenType,
+		"token_type":        "Bearer",
+		"expires_in":        300,
+	})
+}
+
+func (t *TokenExchange) signRepositoryToken(repositoryID, subject, username string, permissions []string) (string, error) {
 	now := time.Now().UTC()
 	claims := map[string]any{
 		"iss":                t.issuer,
@@ -225,29 +239,17 @@ func (t *TokenExchange) exchange(w http.ResponseWriter, r *http.Request) {
 		"preferred_username": username,
 		"root_domains":       []string{t.rootDomain},
 		"client_id":          t.clientID,
-		"lore_access":        []map[string]any{{"resource_id": "lore-" + strings.ReplaceAll(repository.ID, "-", ""), "permission": permissions}},
+		"lore_access":        []map[string]any{{"resource_id": "lore-" + strings.ReplaceAll(repositoryID, "-", ""), "permission": permissions}},
 	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
-		writeOAuthError(w, http.StatusInternalServerError, "server_error", "Couldn't encode token")
-		return
+		return "", err
 	}
 	signature, err := t.signer.Sign(payload)
 	if err != nil {
-		writeOAuthError(w, http.StatusInternalServerError, "server_error", "Couldn't sign token")
-		return
+		return "", err
 	}
-	token, err := signature.CompactSerialize()
-	if err != nil {
-		writeOAuthError(w, http.StatusInternalServerError, "server_error", "Couldn't serialize token")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"access_token":      token,
-		"issued_token_type": accessTokenType,
-		"token_type":        "Bearer",
-		"expires_in":        300,
-	})
+	return signature.CompactSerialize()
 }
 
 func (t *TokenExchange) repositoryForResource(ctx context.Context, resource string, anonymous bool) (model.Repository, error) {

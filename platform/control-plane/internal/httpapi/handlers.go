@@ -561,6 +561,50 @@ func (s *Server) createRepository(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, repository)
 }
 
+func (s *Server) deleteRepository(w http.ResponseWriter, r *http.Request) {
+	actor, _ := currentUser(r.Context())
+	repo, err := s.store.GetRepository(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	var confirmation struct {
+		Name string `json:"name"`
+	}
+	if !decodeJSON(w, r, &confirmation) {
+		return
+	}
+	if confirmation.Name != repo.Name {
+		writeError(w, http.StatusConflict, "confirmation_mismatch", "Repository name does not match")
+		return
+	}
+	if s.config.Repositories == nil || s.config.TokenExchange == nil {
+		writeError(w, http.StatusServiceUnavailable, "lore_unavailable", "Lore deletion is unavailable")
+		return
+	}
+	token, err := s.config.TokenExchange.signRepositoryToken(repo.ID, actor.ID, actor.Username, []string{"read", "write", "owner"})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "token_failed", "Could not authorize deletion")
+		return
+	}
+	err = s.config.Repositories.DeleteRepository(r.Context(), repo.ID, token)
+	if err != nil && status.Code(err) != codes.NotFound {
+		if status.Code(err) == codes.PermissionDenied {
+			writeError(w, http.StatusForbidden, "forbidden", "Lore refused deletion")
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "lore_unavailable", "Could not delete repository in Lore")
+		return
+	}
+	// Native deletion normally unregisters the repository through the registry callback.
+	// The store operation is idempotent when the callback has already removed it.
+	if err = s.store.DeleteRepository(r.Context(), actor.ID, repo.ID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) updateRepository(w http.ResponseWriter, r *http.Request) {
 	actor, _ := currentUser(r.Context())
 	existing, err := s.store.GetRepository(r.Context(), chi.URLParam(r, "id"))
