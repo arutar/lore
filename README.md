@@ -302,35 +302,24 @@ On Windows, the Release build of the Companion model was measured with 700,000 g
 | Search for a common filename substring and return the first page | 43 to 48 ms |
 | Toggle one file and update the selection counts in the model | 35 to 77 ms |
 
-In a separate headless Edge test with 50,000 top-level folders and a simulated WebView bridge, the first 200 folder rows appeared in 118 ms. Rendering all 50,000 rows in the original implementation took 3.17 s on the same machine. These measurements start after the change list is available.
+In a separate headless Edge test with 50,000 top-level folders and a simulated WebView bridge, the first 200 folder rows appeared in 118 ms. These measurements start after the change list is available.
 
-### First upload of 703,009 files over a LAN
+### First upload of 703,009 files over a LAN (0.2.5)
 
-On a Windows PC with a Ryzen 9 3900X and a 1 Gbit/s Ethernet link, the Windows Commit dialog and the CLI each uploaded 703,009 new files to a separate empty Lore repository. Each file contained 3,314 bytes of pseudorandom data (2.17 GiB total). The two runs used the same directory layout and different random seeds. File generation and verification are outside the timings.
+The Windows Commit dialog and CLI from the published 0.2.5 release each uploaded 703,009 new files to a separate empty LAN repository. The Windows PC used a Ryzen 9 3900X and 1 Gbit/s Ethernet. Both runs used the same directory layout and 3,314 bytes of pseudorandom data per file (2.17 GiB total), with a different seed for each run.
 
-| Measured interval | Windows Commit dialog (0.2.4) | CLI |
+| Measured interval | Windows Commit dialog | Windows CLI |
 |---|---:|---:|
-| Open window, scan changes and display the selection | 57.62 s | Preview skipped |
-| Stage files (`stage --scan`) | Included in combined timing | 2.85 s |
-| Create revision (`commit`) | Included in combined timing | 311.80 s |
-| Finish upload (`push`) | Included in combined timing | 14.18 s |
-| **Stage, commit and push** | **5 min 28.03 s** | **5 min 28.83 s** |
-| **Total including preview** | **6 min 25.65 s** | **5 min 28.83 s** |
+| Open window, scan changes and display the selection | 36.29 s | No preview |
+| Stage files (`stage --scan`) | Included in combined timing | 3.02 s |
+| Create revision (`commit`) | Included in combined timing | 307.02 s |
+| Finish upload (`push`) | Included in combined timing | 6.57 s |
+| **Stage, commit and push** | **5 min 17.55 s** | **5 min 16.61 s** |
+| **Total from start to success** | **5 min 53.84 s** | **5 min 16.61 s** |
 
-The CLI stages, commits and pushes in three separately timed commands. Lore can upload fragments during commit, so the network transfer spans more than the final push command. The GUI figure starts at the Commit click and ends at the success confirmation. The GUI list had been opened once before the timed run. Each path was timed once; the 0.80 s difference after selection is within the precision of this comparison.
+Each client was timed once. After one warm-up opening, the GUI timer ran from window launch until all 703,009 files were selected and Commit was enabled, then from the click until the success dialog appeared. The CLI total is the sum of its three commands. Lore can transfer file data during commit, so the final push accounts for only part of the upload.
 
-In a separate download test, cloning a 703,009-file repository (2.17 GiB) took 171 s, including the transfer and writing the Windows working copy.
-
-### Opening the Windows Commit dialog with 703,009 changed files
-
-Version 0.2.5 resolves the Explorer selection once when the Commit dialog opens. We timed the interval from launching the dialog until it showed all 703,009 files selected and enabled the Commit button. Both builds used the same Windows working copy, with a warm-up before timing.
-
-| Windows client | Run 1 | Run 2 | Mean |
-|---|---:|---:|---:|
-| Before the selection change | 97.44 s | 96.72 s | 97.08 s |
-| 0.2.5 Release build | 72.09 s | 71.71 s | 71.90 s |
-
-The selection change saved **25.18 s (26%)** on this working copy. The interval includes the Lore status scan. The first-upload benchmark above used a different working copy and also timed the subsequent commit and push.
+After each upload, a fresh CLI clone downloaded the repository and wrote the working copy to disk. Cloning took 108.38 s for the GUI upload and 140.04 s for the CLI upload. A separate byte-for-byte check matched all 703,009 files in each clone to its original data.
 
 ## Repository layout
 
