@@ -3473,13 +3473,20 @@ mod fuse_remote_tests {
                     prefetch_options(TreePrefetch::Off, Some(recording.path())),
                 )
                 .await;
-                clone.store.hold();
+                // Hold the recorded file's content. Publishing the revision can read
+                // metadata synchronously before the background prefetch starts.
+                let recorded = clone
+                    .served_state
+                    .find_node(clone.served_repository.clone(), "keep/k1.txt")
+                    .await
+                    .expect("recorded file exists");
+                clone.store.hold_hashes(vec![recorded.address.hash]);
                 tokio::time::timeout(
                     Duration::from_secs(10),
                     clone_materialize_hold(&clone.context),
                 )
                 .await
-                .expect("the clone returns while the remote holds every fetch")
+                .expect("the clone returns while the remote holds the recorded content")
                 .expect("the clone publishes");
                 assert!(
                     clone.filesystem.prefetch_running(),

@@ -147,9 +147,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # basetemp-arg puts the pytest working data on the tmpfs that the
-          # "Grow /dev/shm" step below resizes.
-          - { name: linux-x86_64, os: ubuntu-latest, basetemp-arg: "--basetemp=/dev/shm/lore-smoke" }
+          - { name: linux-x86_64, os: ubuntu-latest, basetemp-arg: "--basetemp=/mnt/lore-smoke" }
           # TODO: re-enable. Only linux-x86_64 runs while this workflow is still
           # being changed.
           # - { name: linux-aarch64, os: ubuntu-24.04-arm, basetemp-arg: "--basetemp=/dev/shm/lore-smoke" }
@@ -199,14 +197,11 @@ jobs:
           --features lore-server/failure_generator
           --bin lore --bin loreserver
 
-      # The suite writes about 10 GB of server stores and per-test repositories,
-      # and pytest keeps all of it for the session. Holding that on tmpfs instead
-      # of the runner disk speeds up these I/O-bound tests. /dev/shm defaults to
-      # 8 GB, which the suite exceeds, so raise it to 12 GB. The runners have
-      # 16 GB of RAM, and tmpfs only uses RAM for the data written to it.
-      - name: Grow /dev/shm for smoke test data (tmpfs)
+      # FUSE smoke tests run as the runner user and mount inside their working copies.
+      # Put those copies on the writable build volume, outside the /dev hierarchy.
+      - name: Prepare smoke test directory
         if: runner.os == 'Linux'
-        run: sudo mount -o remount,size=12G /dev/shm
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" /mnt/lore-smoke
 
       # `uv run` installs the test dependencies from uv.lock.
       - name: Smoke tests
