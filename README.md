@@ -164,7 +164,7 @@ You need a host with Docker (Docker Engine with Compose v2 on Linux, Docker Desk
 
 ```sh
 # 1. Unpack the bundle
-tar -xzf lore-platform-server-0.2.4.tar.gz && cd lore-platform-server-0.2.4
+tar -xzf lore-platform-server-0.2.5.tar.gz && cd lore-platform-server-0.2.5
 
 # 2. Run setup with the name your users will type; keep the data outside the bundle
 LORE_DATA_ROOT=/srv/lore-data LORE_PUBLIC_HOST=lore.corp.local sh setup.sh
@@ -186,8 +186,8 @@ In PowerShell, as the user that runs Docker Desktop:
 
 ```powershell
 # 1. Unpack the bundle
-Expand-Archive lore-platform-server-0.2.4.zip -DestinationPath C:\lore
-cd C:\lore\lore-platform-server-0.2.4
+Expand-Archive lore-platform-server-0.2.5.zip -DestinationPath C:\lore
+cd C:\lore\lore-platform-server-0.2.5
 
 # 2. Run setup with the name your users will type; keep the data outside the bundle
 $env:LORE_DATA_ROOT = "D:\lore-data"
@@ -320,6 +320,17 @@ On a Windows PC with a Ryzen 9 3900X and a 1 Gbit/s Ethernet link, the Windows C
 The CLI stages, commits and pushes in three separately timed commands. Lore can upload fragments during commit, so the network transfer spans more than the final push command. The GUI figure starts at the Commit click and ends at the success confirmation. The GUI list had been opened once before the timed run. Each path was timed once; the 0.80 s difference after selection is within the precision of this comparison.
 
 In a separate download test, cloning a 703,009-file repository (2.17 GiB) took 171 s, including the transfer and writing the Windows working copy.
+
+### Opening the Windows Commit dialog with 703,009 changed files
+
+Version 0.2.5 resolves the Explorer selection once when the Commit dialog opens. We timed the interval from launching the dialog until it showed all 703,009 files selected and enabled the Commit button. Both builds used the same Windows working copy, with a warm-up before timing.
+
+| Windows client | Run 1 | Run 2 | Mean |
+|---|---:|---:|---:|
+| Before the selection change | 97.44 s | 96.72 s | 97.08 s |
+| 0.2.5 Release build | 72.09 s | 71.71 s | 71.90 s |
+
+The selection change saved **25.18 s (26%)** on this working copy. The interval includes the Lore status scan. The first-upload benchmark above used a different working copy and also timed the subsequent commit and push.
 
 ## Repository layout
 

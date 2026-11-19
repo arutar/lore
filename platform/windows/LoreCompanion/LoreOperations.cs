@@ -269,7 +269,8 @@ public static class LoreOperations
         {
             status = await ReadStatus(request, scan: true, offline: false);
         }
-        var files = status.Where(file => !file.Conflicted && (file.Staged || Selected(request, file.Path)))
+        var isSelected = StatusPathSelection(request);
+        var files = status.Where(file => !file.Conflicted && (file.Staged || isSelected(file.Path)))
             .ToList();
         var locks = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         try
@@ -529,7 +530,8 @@ public static class LoreOperations
     // names it, so nobody thinks it was deleted.
     private static async Task<OperationOutcome> Revert(OperationRequest request, Action<string> report)
     {
-        var selected = (await ReadStatus(request, scan: true)).Where(file => !file.Conflicted && Selected(request, file.Path)).ToList();
+        var isSelected = StatusPathSelection(request);
+        var selected = (await ReadStatus(request, scan: true)).Where(file => !file.Conflicted && isSelected(file.Path)).ToList();
         if (selected.Count == 0) return new OperationOutcome("There is nothing to revert: the selected files have no changes.");
         var added = selected.Where(file => file.Added).ToList();
         var changed = selected.Where(file => !file.Added).Select(file => file.Path).ToList();
@@ -562,7 +564,8 @@ public static class LoreOperations
     // when no conflict is left.
     private static async Task<OperationOutcome> Resolve(OperationRequest request, Action<string> report)
     {
-        var conflicts = (await ReadStatus(request)).Where(file => file.Conflicted && Selected(request, file.Path)).Select(file => file.Path).ToList();
+        var isSelected = StatusPathSelection(request);
+        var conflicts = (await ReadStatus(request)).Where(file => file.Conflicted && isSelected(file.Path)).Select(file => file.Path).ToList();
         if (conflicts.Count == 0) return new OperationOutcome("There are no conflicts in the selected files.");
         var result = await KeepVersion(request, conflicts, request.Message != "theirs", report);
         var remaining = (await ReadStatus(request)).Where(file => file.Conflicted).Select(file => file.Path).ToList();
@@ -759,16 +762,22 @@ public static class LoreOperations
     private static string FullPath(OperationRequest request, string relative) =>
         Path.IsPathRooted(relative) ? relative : Path.GetFullPath(Path.Combine(request.RepositoryRoot(), relative));
 
-    // Whether a status path is one of the selected paths or inside a selected folder.
-    private static bool Selected(OperationRequest request, string relative)
+    // ReadStatus supplies paths from this repository. Resolve the Explorer selection once per scan.
+    private static Func<string, bool> StatusPathSelection(OperationRequest request)
     {
-        var full = FullPath(request, relative);
-        return request.Paths.Any(selected =>
+        var root = request.RepositoryRoot();
+        var selected = request.Paths.Select(path => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (selected.Contains(Path.TrimEndingDirectorySeparator(root))) return _ => true;
+
+        return relative =>
         {
-            var normalized = Path.GetFullPath(selected).TrimEnd('\\');
-            return full.Equals(normalized, StringComparison.OrdinalIgnoreCase)
-                || full.StartsWith(normalized + "\\", StringComparison.OrdinalIgnoreCase);
-        });
+            for (string? path = Path.GetFullPath(relative, root); path != null; path = Path.GetDirectoryName(path))
+            {
+                if (selected.Contains(path)) return true;
+            }
+            return false;
+        };
     }
 
     // The working copy's .lore folder, hidden as Lore's own data rather than the user's files.
