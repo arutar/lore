@@ -147,7 +147,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-x86_64, os: ubuntu-latest, basetemp-arg: "--basetemp=/mnt/lore-smoke" }
+          - { name: linux-x86_64, os: ubuntu-latest, basetemp-arg: "--basetemp=/mnt/lore-smoke/tests" }
           # TODO: re-enable. Only linux-x86_64 runs while this workflow is still
           # being changed.
           # - { name: linux-aarch64, os: ubuntu-24.04-arm, basetemp-arg: "--basetemp=/dev/shm/lore-smoke" }

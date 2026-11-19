@@ -570,7 +570,7 @@ async fn connect_impl(
                 Err(error) if error.is_not_authenticated() => {
                     lore_debug!(
                         "No stored identity for {auth_endpoint}; trying anonymous repository access"
-                    )
+                    );
                 }
                 Err(error) => {
                     return Err(error).forward::<ProtocolError>("resolving a stored identity");
