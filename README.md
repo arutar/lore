@@ -302,7 +302,7 @@ On Windows, the Release build of the Companion model was measured with 700,000 g
 | Search for a common filename substring and return the first page | 43 to 48 ms |
 | Toggle one file and update the selection counts in the model | 35 to 77 ms |
 
-In a separate headless Edge test with 50,000 top-level folders and a simulated WebView bridge, the first 200 folder rows appeared in 118 ms. Rendering all 50,000 rows in the original implementation took 3.17 s on the same machine. These measurements start after the change list is available. For comparison, an actual LAN clone of 703,009 files (2.17 GiB) took 171 s, including transfer and writing the working copy.
+In a separate headless Edge test with 50,000 top-level folders and a simulated WebView bridge, the first 200 folder rows appeared in 118 ms. Rendering all 50,000 rows in the original implementation took 3.17 s on the same machine. These measurements start after the change list is available. A Windows client downloaded 703,009 files (2.17 GiB) from a Lore server over the LAN and wrote the working copy to disk in 171 s. In a separate commit-and-push test on that copy, the client uploaded one selected file. A second clone confirmed that the revision contained only that file. Upload time for the full dataset was not measured.
 
 ## Repository layout
 
