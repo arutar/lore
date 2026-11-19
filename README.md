@@ -310,11 +310,14 @@ On a Windows PC with a Ryzen 9 3900X and a 1 Gbit/s Ethernet link, the Windows C
 
 | Measured interval | Windows Commit dialog (0.2.4) | CLI |
 |---|---:|---:|
-| Open dialog, scan working copy and display the selection | 57.62 s | No preview requested |
-| Prepare changes, create the revision and push it | 328.03 s | 328.83 s |
-| Total, including the GUI preview | 385.65 s | 328.83 s |
+| Open window, scan changes and display the selection | 57.62 s | Preview skipped |
+| Stage files (`stage --scan`) | Included in combined timing | 2.85 s |
+| Create revision (`commit`) | Included in combined timing | 311.80 s |
+| Finish upload (`push`) | Included in combined timing | 14.18 s |
+| **Stage, commit and push** | **5 min 28.03 s** | **5 min 28.83 s** |
+| **Total including preview** | **6 min 25.65 s** | **5 min 28.83 s** |
 
-The CLI spent 2.85 s in `stage --scan`, 311.80 s in `commit` and 14.18 s in `push`. Lore can upload fragments during commit, so the network transfer spans more than the final push command. The GUI figure starts at the Commit click and ends at the success confirmation. The GUI list had been opened once before the timed run. Each path was timed once; the 0.80 s difference after selection is within the precision of this comparison.
+The CLI stages, commits and pushes in three separately timed commands. Lore can upload fragments during commit, so the network transfer spans more than the final push command. The GUI figure starts at the Commit click and ends at the success confirmation. The GUI list had been opened once before the timed run. Each path was timed once; the 0.80 s difference after selection is within the precision of this comparison.
 
 In a separate download test, cloning a 703,009-file repository (2.17 GiB) took 171 s, including the transfer and writing the Windows working copy.
 
