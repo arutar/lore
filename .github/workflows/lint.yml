@@ -4,13 +4,14 @@
 name: Lint
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  push:
+    tags: ["platform-v*"]
+  workflow_dispatch:
 
 permissions: {}
 
 concurrency:
-  group: lint-${{ github.event.pull_request.number }}
+  group: lint-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

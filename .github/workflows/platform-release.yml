@@ -35,6 +35,18 @@ jobs:
           fi
           echo "version=${REF_NAME#platform-v}" >> "$GITHUB_OUTPUT"
 
+  server-checks:
+    needs: version
+    permissions:
+      contents: read
+    uses: ./.github/workflows/platform-server.yml
+
+  end-to-end:
+    needs: version
+    permissions:
+      contents: read
+    uses: ./.github/workflows/platform-e2e.yml
+
   windows:
     name: Windows client
     needs: version
@@ -107,7 +119,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: [version, windows, linux-cli, server-bundle]
+    needs: [version, server-checks, end-to-end, windows, linux-cli, server-bundle]
     runs-on: ubuntu-latest
     environment: platform-release
     permissions:

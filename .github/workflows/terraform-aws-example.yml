@@ -1,15 +1,7 @@
 name: Validate AWS Example
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - contrib/aws/**
-      - .github/workflows/terraform-aws-example.yml
-  pull_request:
-    paths:
-      - contrib/aws/**
-      - .github/workflows/terraform-aws-example.yml
+  workflow_dispatch:
 
 permissions:
   contents: read

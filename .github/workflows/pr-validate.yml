@@ -7,13 +7,14 @@
 name: PR Validate
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  push:
+    tags: ["platform-v*"]
+  workflow_dispatch:
 
 permissions: {}
 
 concurrency:
-  group: pr-validate-${{ github.event.pull_request.number }}
+  group: pr-validate-${{ github.ref }}
   cancel-in-progress: true
 
 env:

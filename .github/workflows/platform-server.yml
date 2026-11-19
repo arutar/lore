@@ -3,14 +3,7 @@
 name: Platform Server
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/platform-server.yml"
-      - "platform/control-plane/**"
-      - "platform/web/**"
-      - "platform/deploy/**"
-  push:
-    branches: [main]
+  workflow_call:
   workflow_dispatch:
 
 permissions: {}

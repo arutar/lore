@@ -4,12 +4,6 @@
 name: Windows Client
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/windows-client.yml"
-      - "platform/windows/**"
-  push:
-    branches: [main]
   workflow_dispatch:
   # platform-release.yml calls this for platform-v* tags and publishes the MSI with the
   # rest of the release.

@@ -2,18 +2,11 @@
 
 # Installs the whole platform with Docker Compose on a clean runner and runs
 # platform/deploy/test/e2e.sh: setup, sign-in through Keycloak, repository, grants on the
-# WebUI's Access tab in headless Chrome, backup, changes, restore. Building the Lore server takes a while, so this runs on
-# changes to the deployment and on demand rather than on every commit.
+# WebUI's Access tab in headless Chrome, backup, changes, restore. The platform release calls this check before publication.
 name: Platform End-to-End
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/platform-e2e.yml"
-      - "platform/deploy/**"
-      - "platform/control-plane/internal/httpapi/**"
-      - "platform/control-plane/internal/store/**"
-      - "platform/web/src/**"
+  workflow_call:
   workflow_dispatch:
 
 permissions: {}

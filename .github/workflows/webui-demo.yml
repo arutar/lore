@@ -6,10 +6,7 @@ name: WebUI demo on GitHub Pages
 
 on:
   push:
-    branches: [main]
-    paths:
-      - ".github/workflows/webui-demo.yml"
-      - "platform/web/**"
+    tags: ["platform-v*"]
   workflow_dispatch:
 
 permissions: {}
