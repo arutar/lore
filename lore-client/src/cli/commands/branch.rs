@@ -931,11 +931,30 @@ pub fn handle_branch_push(globals: LoreGlobalArgs, args: &BranchPushArgs) -> u8 
             LoreEvent::BranchPushRevisionPushBegin(data)
                 if data.local_revision != data.remote_revision => {
                     println!(
-                        "Waiting for the server to verify {} for branch {}",
+                        "Pushing {} to branch {}",
                         data.local_revision,
                         name_of(data.repository, data.branch)
                     );
                 }
+            LoreEvent::BranchPushServerProgress(data) => {
+                let step = match data.phase {
+                    1 => "preparing",
+                    2 => "verifying fragments",
+                    3 => "merging",
+                    4 => "updating the branch",
+                    5 => "running server hooks",
+                    _ => "working",
+                };
+                let restarts = if data.restarts > 0 {
+                    format!(", restarted {} times", data.restarts)
+                } else {
+                    String::new()
+                };
+                println!(
+                    "Server is verifying {}: {step}, {} checks done{restarts}",
+                    data.revision, data.checked
+                );
+            }
             LoreEvent::BranchPushRevisionPushUpdate(data) => {
                 println!(
                     "Revision assigned number {} and rewritten to {}",

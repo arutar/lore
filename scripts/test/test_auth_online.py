@@ -838,12 +838,13 @@ def test_every_partition_scoped_service_enforces_partition_access(auth_env, make
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# The protos of the six partition-scoped services, and the service in each.
+# The protos of the seven partition-scoped services, and the service in each.
 PARTITION_SCOPED_SERVICES = (
     ("lore-server/src/legacy/proto/storage.proto", "StorageService"),
     ("lore-proto/proto/lore/storage/v1/storage.proto", "StorageService"),
     ("lore-server/src/legacy/proto/revision.proto", "RevisionService"),
     ("lore-proto/proto/lore/revision/v1/revision.proto", "RevisionService"),
+    ("lore-proto/proto/lore/platform/v1/push_operation.proto", "BranchPushOperationService"),
     ("lore-proto/proto/lore/thin_client/v1/thin_client.proto", "ThinClientService"),
     ("lore-proto/proto/lock.proto", "LockService"),
 )
@@ -905,6 +906,8 @@ RPC_ACTIONS = {
     "/lore.thin_client.v1.ThinClientService/RevisionInfo": ("read",),
     "/lore.thin_client.v1.ThinClientService/RevisionDiff": ("read",),
     "/lore.thin_client.v1.ThinClientService/RevisionTree": ("read",),
+    "/lore.platform.v1.BranchPushOperationService/Start": ("write", "push-protected"),
+    "/lore.platform.v1.BranchPushOperationService/Get": ("write", "push-protected"),
     "/urc.lock.LockService/Lock": ("write",),
     "/urc.lock.LockService/Query": ("read",),
     "/urc.lock.LockService/Status": ("read",),

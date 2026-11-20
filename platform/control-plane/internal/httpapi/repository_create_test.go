@@ -2,13 +2,16 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/arutar/lore/platform/control-plane/internal/deletions"
 	"github.com/arutar/lore/platform/control-plane/internal/model"
 	"github.com/arutar/lore/platform/control-plane/internal/store"
 )
@@ -17,6 +20,8 @@ type fakeRepositoryCreator struct {
 	deleted      string
 	repositories []model.Repository
 	err          error
+	// onDelete stands in for what Lore does during a deletion, such as unregistering.
+	onDelete func(ctx context.Context, id string)
 }
 
 func (f *fakeRepositoryCreator) CreateRepository(_ context.Context, repository model.Repository) error {
@@ -24,11 +29,14 @@ func (f *fakeRepositoryCreator) CreateRepository(_ context.Context, repository m
 	return f.err
 }
 
-func (f *fakeRepositoryCreator) DeleteRepository(_ context.Context, id, token string) error {
+func (f *fakeRepositoryCreator) DeleteRepository(ctx context.Context, id, token string) error {
 	if token == "" {
 		return status.Error(codes.Unauthenticated, "missing token")
 	}
 	f.deleted = id
+	if f.onDelete != nil {
+		f.onDelete(ctx, id)
+	}
 	return f.err
 }
 
@@ -113,5 +121,56 @@ func TestDeleteRepositoryRequiresConfirmationAndSuccessfulLoreDelete(t *testing.
 	}
 	if _, err := storage.GetRepository(t.Context(), id); err != store.ErrNotFound {
 		t.Fatalf("after deletion: %v", err)
+	}
+}
+
+// Lore unregisters the repository and then fails part way: the row stays for the deletion to be
+// repeated, the error says what Lore answered, and a later deletion completes.
+func TestFailedLoreDeletionKeepsTheRepositoryListed(t *testing.T) {
+	storage := store.NewMemory()
+	actor := model.User{ID: "admin", Username: "admin", Role: model.RoleAdmin}
+	tracker := &deletions.Tracker{}
+	native := &fakeRepositoryCreator{}
+	native.onDelete = func(ctx context.Context, id string) {
+		if !tracker.Active(id) {
+			t.Error("Lore is called while the deletion isn't tracked")
+		}
+		if ctx.Err() != nil {
+			t.Errorf("the deletion runs under a cancelled context: %v", ctx.Err())
+		}
+		// What RepositoryUnregister does for a repository that isn't being deleted here.
+		if !tracker.Active(id) {
+			_ = storage.DeleteRepository(context.Background(), actor.ID, id)
+		}
+	}
+	auth, _ := NewAuthenticator(t.Context(), storage, AuthConfig{SessionTTL: time.Hour})
+	exchange, err := NewTokenExchange(storage, fakeBearerAuth{user: actor}, "http://localhost/web/v1/lore-oidc", "lore-native")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &testClient{t: t, handler: NewServer(storage, auth, Config{DevAuth: true, DevUser: actor, Repositories: native, TokenExchange: exchange, Deletions: tracker})}
+	client.login()
+	const id = "123e4567-e89b-42d3-a456-426614174001"
+	if code, _ := client.request(http.MethodPost, "/web/v1/admin/repositories", map[string]string{"id": id, "name": "halfway"}, true); code != 201 {
+		t.Fatalf("create %d", code)
+	}
+	native.err = status.Error(codes.Internal, "Failed to delete repository metadata")
+	code, body := client.request(http.MethodDelete, "/web/v1/admin/repositories/"+id, map[string]string{"name": "halfway"}, true)
+	failure, _ := body["error"].(map[string]any)
+	if code != http.StatusBadGateway || failure["code"] != "lore_delete_failed" || !strings.Contains(fmt.Sprint(failure["message"]), "metadata") {
+		t.Fatalf("failed deletion %d %s", code, body)
+	}
+	if _, err := storage.GetRepository(t.Context(), id); err != nil {
+		t.Fatalf("the repository must stay listed: %v", err)
+	}
+	native.err = nil
+	if code, _ = client.request(http.MethodDelete, "/web/v1/admin/repositories/"+id, map[string]string{"name": "halfway"}, true); code != 204 {
+		t.Fatalf("repeated deletion %d", code)
+	}
+	if _, err := storage.GetRepository(t.Context(), id); err != store.ErrNotFound {
+		t.Fatalf("after deletion: %v", err)
+	}
+	if tracker.Active(id) {
+		t.Fatal("the deletion is still tracked")
 	}
 }

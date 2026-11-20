@@ -64,9 +64,15 @@ public static class OperationError
         if (operation == CompanionOperation.Clone && Contains(exception.Message, "repository", "not found")) return true;
         var message = exception.Message;
         return Contains(message, "not authenticated") || Contains(message, "missing token") || Contains(message, "missingtoken")
-            || Contains(message, "401") || Contains(message, "403") || Contains(message, "forbidden") || Contains(message, "permission denied")
+            || HttpDenial.IsMatch(message) || Contains(message, "forbidden") || Contains(message, "permission denied")
             || Contains(message, "not authorized") || Contains(message, "access_denied") || Contains(message, "access denied");
     }
+
+    // An HTTP 401 or 403 as a status, not the digits anywhere: a fragment address or a file name in
+    // the message can hold them too.
+    private static readonly System.Text.RegularExpressions.Regex HttpDenial = new(
+        @"\b(?:status|http|code)\W{0,3}40[13]\b|\b40[13]\s+(?:unauthorized|forbidden)\b",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
     private static bool Contains(string message, params string[] parts) =>
         parts.All(part => message.Contains(part, StringComparison.OrdinalIgnoreCase));

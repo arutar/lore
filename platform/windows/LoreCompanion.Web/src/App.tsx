@@ -42,10 +42,14 @@ type Change = { path: string; change: "added" | "deleted" | "modified"; staged: 
 type ChangeFolder = { path: string; name: string; depth: number; files: number; added: number; modified: number; deleted: number; locked: number; selected: number };
 type ChangeSummary = { total: number; selected: number; eligible: number; folders: ChangeFolder[]; whole: boolean };
 type ChangePage = { folder: string; filter: string; offset: number; total: number; selected: number; items: Change[] };
-type CommitProgress = { phase: "prepare" | "commit" | "push" | "verify" | "sync"; complete: number; total: number; bytes: number };
+// In the "verify" phase, complete counts the server's checks, step names what it is doing and
+// restarts how often it restarted the verification.
+type CommitProgress = { phase: "prepare" | "commit" | "push" | "verify" | "sync"; complete: number; total: number; bytes: number; step?: string; restarts?: number };
 type HostMessage = InitMessage
   | { type: "commit-progress"; update: CommitProgress }
-  | ({ type: "changes"; items?: Change[] | null; error?: string } & Partial<ChangeSummary>)
+  | ({ type: "changes"; items?: Change[] | null; error?: string; locksPending?: boolean } & Partial<ChangeSummary>)
+  // The locks other users hold, which arrive after the list: they mark files that can't be committed.
+  | ({ type: "locks"; items?: Change[] | null; error?: string } & Partial<ChangeSummary>)
   | ({ type: "changes-page" } & Partial<ChangePage>)
   | ({ type: "selection" } & Partial<ChangeSummary>)
   | { type: "progress"; text: string }
@@ -107,13 +111,15 @@ const nameOf = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
 function CommitActivity({ update, selected }: { update: CommitProgress | null; selected: number }) {
   const phase = update?.phase ?? "prepare";
-  const label = { prepare: "Preparing files", commit: "Creating revision", push: "Sending revision", verify: "Waiting for the server to verify the revision", sync: "Synchronizing with server" }[phase];
+  const label = { prepare: "Preparing files", commit: "Creating revision", push: "Sending revision", verify: "Server is verifying the revision", sync: "Synchronizing with server" }[phase];
   const percent = update && update.total > 0 ? Math.min(100, Math.floor(100 * update.complete / update.total)) : null;
   return <section className="commit-activity" aria-label="Commit progress">
     <div className="summary">{selected.toLocaleString()} selected {selected === 1 ? "file" : "files"}</div>
     <strong>{label}{percent !== null && ` \u00b7 ${percent}%`}</strong>
     {percent !== null && <progress aria-label={label} max={100} value={percent} />}
     {phase === "commit" && update && update.complete > 0 && <span>{update.complete.toLocaleString()} files processed</span>}
+    {phase === "verify" && update && (update.step || update.complete > 0) && <span>{[update.step, update.complete > 0 && `${update.complete.toLocaleString()} checks done`].filter(Boolean).join(" \u00b7 ")}</span>}
+    {phase === "verify" && update && (update.restarts ?? 0) > 0 && <span>The server restarted the check {update.restarts} {update.restarts === 1 ? "time" : "times"} after it stalled; it keeps going.</span>}
     {update && update.bytes > 0 && <span>{(update.bytes / 1048576).toLocaleString(undefined, { maximumFractionDigits: 1 })} MiB {phase === "push" ? "sent" : "processed"}</span>}
   </section>;
 }
@@ -185,6 +191,12 @@ const ChangeList = memo(function ChangeList({ summary, items, disabled, onSelect
           next.delete(page.folder);
           return next;
         });
+      } else if (data.type === "locks") {
+        // Locked files are now marked on the host: the rows at hand show them once fetched again.
+        const next = data as Partial<ChangeSummary>;
+        if (next.folders) setFolders(next.folders);
+        for (const folder of Object.keys(pagesRef.current)) request(folder, 0, Math.max(pageSize, pagesRef.current[folder]?.items.length ?? 0));
+        if (found) request("", 0, Math.max(pageSize, found.items.length), filter);
       } else if (data.type === "selection") {
         const next = data as Partial<ChangeSummary>;
         if (next.folders) setFolders(next.folders);
@@ -279,7 +291,7 @@ const ChangeList = memo(function ChangeList({ summary, items, disabled, onSelect
     if (top) rows.push(...top.items.map((change) => fileRow(change, 0, "")));
     if (top && top.items.length < top.total) rows.push(<li key="more-root" className="more">
       <button type="button" className="button secondary" disabled={disabled}
-        onClick={() => request("", top.items.length)}>Show more � {top.items.length} of {top.total}</button></li>);
+        onClick={() => request("", top.items.length)}>Show more · {top.items.length} of {top.total}</button></li>);
     let displayed = 0;
     for (const folder of folders) {
       if (!visible(folder)) continue;
@@ -411,6 +423,7 @@ export default function App() {
   // Commit: null while the files are being looked up; then the tree and a count of what is ticked.
   const [changes, setChanges] = useState<ChangeSummary | null>(null);
   const [changeItems, setChangeItems] = useState<Change[] | null>(null);
+  const [locks, setLocks] = useState({ pending: false, error: "" });
   const [commitProgress, setCommitProgress] = useState<CommitProgress | null>(null);
   const [changesError, setChangesError] = useState("");
   const [selected, setSelected] = useState(0);
@@ -451,6 +464,12 @@ export default function App() {
         setChanges(typeof data.total === "number"
           ? { total: data.total, selected: data.selected ?? 0, eligible: data.eligible ?? 0, folders: data.folders ?? [], whole: Boolean(data.whole) }
           : null);
+        setLocks({ pending: Boolean(data.locksPending), error: "" });
+      } else if (data.type === "locks") {
+        setLocks({ pending: false, error: data.error ?? "" });
+        if (data.items) setChangeItems(data.items);
+        setSelected(data.selected ?? 0);
+        setChanges((current) => current ? { ...current, selected: data.selected ?? current.selected, eligible: data.eligible ?? current.eligible, folders: data.folders ?? current.folders } : current);
       } else if (data.type === "selection") {
         setSelected(data.selected ?? 0);
         setChanges((current) => current ? { ...current, selected: data.selected ?? current.selected, folders: data.folders ?? current.folders } : current);
@@ -613,7 +632,11 @@ export default function App() {
         {config.operation === Operation.Resolve && !question && <div className="summary">Choose your version or the server's for the selected files. When no conflict is left, the merge is committed and sent to the server.</div>}
         {config.operation === Operation.Commit && !question && !success && <div hidden={running}>{changes === null
           ? <div className="summary">{changesError ? `The list of changes isn't available (${changesError}). Commit records the selected paths.` : "Looking for changes…"}</div>
-          : changes.total > 0 ? <ChangeList summary={changes} items={changeItems} disabled={running} onSelected={setSelected} />
+          : changes.total > 0 ? <>
+            <ChangeList summary={changes} items={changeItems} disabled={running} onSelected={setSelected} />
+            {locks.pending && <div className="summary">Checking the server for files other people have locked…</div>}
+            {locks.error && <div className="summary">Couldn't check locks ({locks.error}). The server still refuses a commit of a file someone else has locked.</div>}
+          </>
           : <div className="summary">{changesError ? `The list of changes isn't available (${changesError}). Commit records the selected paths.` : "No changes in the selected paths. Commit sends earlier commits that weren't sent yet, if there are any."}</div>}</div>}
         {hasPaths && config.operation !== Operation.Commit && !question && <label><span>Selected paths · {config.paths.length}</span><ul className="path-list">{config.paths.map((path) => <li key={path}>{path}</li>)}</ul></label>}
         {config.operation === Operation.Commit && !question && !running && !success && <label><span>Commit message (optional)</span><textarea disabled={running} value={message}
@@ -658,7 +681,7 @@ export default function App() {
               <button className="button primary" type="button" disabled={running} onClick={() => resolve("mine")}>{running ? "Working…" : "Keep my version"}</button>
             </> : config.operation === Operation.Revert && !error
               ? <button className="button danger solid" type="button" disabled={running} onClick={() => setConfirmation({ files: config.paths, text: discardText, action: "Discard changes", run: () => start({ ...config, repositoryUrl, targetPath, message }) })}>{running ? "Working…" : current.action}</button>
-              : <button className="button primary" type="submit" disabled={running || config.operation === Operation.Commit && (changes === null || changes.total > 0 && selected === 0)}>{running ? "Working…" : error ? "Retry" : current.action}</button>}
+              : <button className="button primary" type="submit" disabled={running || config.operation === Operation.Commit && (changes === null && !changesError || changes !== null && changes.total > 0 && selected === 0)}>{running ? "Working…" : error ? "Retry" : current.action}</button>}
           </>}
         </footer>
       </form>

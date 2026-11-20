@@ -11,8 +11,9 @@ use lore_base::types::Context;
 use lore_base::types::Hash;
 use lore_base::types::RepositoryId;
 use lore_proto::lore::model::v1 as model_v1;
+use lore_proto::lore::platform::v1 as platform_v1;
+use lore_proto::lore::platform::v1::branch_push_operation_service_client::BranchPushOperationServiceClient;
 use lore_proto::lore::revision::v1 as revision_v1;
-use lore_proto::lore::revision::v1::branch_push_operation_service_client::BranchPushOperationServiceClient;
 use lore_proto::lore::revision::v1::revision_service_client::RevisionServiceClient;
 use tokio_stream::StreamExt;
 
@@ -29,6 +30,7 @@ use crate::types::BranchListResponse;
 use crate::types::BranchPushResponse;
 use crate::types::BranchQueryResponse;
 use crate::types::MetadataSetResult;
+use crate::types::PushVerifyProgress;
 use crate::types::RevisionItem;
 use crate::types::RevisionListResponse;
 use crate::types::RevisionListStart;
@@ -246,6 +248,7 @@ impl RevisionService {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn branch_push(
         &self,
         operation_id: Context,
@@ -254,6 +257,7 @@ impl RevisionService {
         revision: Hash,
         force: bool,
         fast_forward_merge: bool,
+        progress: &(dyn Fn(PushVerifyProgress) + Send + Sync),
     ) -> Result<BranchPushResponse, ProtocolError> {
         lore_debug!("Pushing branch: {} at {}", branch, revision);
         let _ = RequestScopedCounter::new(self.request_inflight.clone());
@@ -265,7 +269,7 @@ impl RevisionService {
             fast_forward_merge,
         };
         let mut operations = self.operations.clone();
-        let start = revision_v1::StartBranchPushRequest {
+        let start = platform_v1::StartBranchPushRequest {
             operation_id: operation_id.into(),
             push: Some(request.clone()),
         };
@@ -286,8 +290,9 @@ impl RevisionService {
                 allow_legacy.store(false, std::sync::atomic::Ordering::Relaxed);
                 let mut operation = operation.into_inner();
                 let mut interval = std::time::Duration::from_millis(40);
+                let mut reported = None;
                 loop {
-                    use revision_v1::branch_push_operation::State;
+                    use platform_v1::branch_push_operation::State;
                     match operation.state {
                         Some(State::Accepted(result)) => break result,
                         Some(State::Rejected(error)) => {
@@ -298,16 +303,32 @@ impl RevisionService {
                             );
                             return Err(status.into());
                         }
-                        Some(State::Processing(_)) => {
+                        Some(State::Processing(state)) => {
+                            let now = PushVerifyProgress {
+                                phase: u32::try_from(state.phase).unwrap_or_default(),
+                                checked: state.checked,
+                                restarts: state.restarts,
+                            };
+                            // The server bounds the operation: it restarts a stalled verification and
+                            // rejects one that keeps stalling, so the client waits for its answer.
+                            if reported != Some(now) {
+                                reported = Some(now);
+                                progress(now);
+                            }
                             tokio::time::sleep(interval).await;
                             interval = (interval * 2).min(std::time::Duration::from_secs(1));
                             operation = match operations
-                                .get(revision_v1::GetBranchPushOperationRequest {
+                                .get(platform_v1::GetBranchPushOperationRequest {
                                     operation_id: operation_id.into(),
                                 })
                                 .await
                             {
-                                Ok(reply) => reply.into_inner(),
+                                Ok(reply) => {
+                                    // Each failure run gets the whole retry budget: a long push
+                                    // may meet several short outages.
+                                    retry = grpc_retry();
+                                    reply.into_inner()
+                                }
                                 Err(status)
                                     if retryable_push_operation(&status) && retry.wait().await =>
                                 {

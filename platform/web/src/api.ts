@@ -14,12 +14,21 @@ export class ApiError extends Error {
   }
 }
 
+let unauthorized: (() => void) | null = null;
+
+/** Called when the server answers that the session is gone, as after a long absence: the WebUI
+ * then asks to sign in again instead of showing each page's failure. */
+export function onUnauthorized(handler: (() => void) | null) {
+  unauthorized = handler;
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   if (init.method && !["GET", "HEAD"].includes(init.method)) headers.set("X-CSRF-Token", csrfToken);
   const response = await fetch(`/web/v1${path}`, { ...init, headers, credentials: "same-origin" });
   if (!response.ok) {
+    if (response.status === 401 && path !== "/session") unauthorized?.();
     let message = `Request failed (${response.status})`;
     let code = "http_" + response.status;
     try {

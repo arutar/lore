@@ -34,7 +34,35 @@ public sealed record FileState(string Path, bool Staged, bool Conflicted, bool M
 /// "modified"; <paramref name="LockedBy"/> names someone else holding a lock on it, or is empty.</summary>
 public sealed record CommitCandidate(string Path, string Change, bool Staged, string LockedBy);
 
-public sealed record CommitProgress(string Phase, ulong Complete = 0, ulong Total = 0, ulong Bytes = 0);
+// Step and Restarts describe the server's verification in the "verify" phase, where Complete
+// counts the checks it has done.
+public sealed record CommitProgress(string Phase, ulong Complete = 0, ulong Total = 0, ulong Bytes = 0, string Step = "", uint Restarts = 0);
+
+// The server's progress verifying a push: lore_branch_push_server_progress_event_data_t, an event
+// this fork's lorelib adds after every event the LoreVcs package knows. The package hands out the
+// data only for the events it knows, so this reads it from the native event the package holds,
+// at the layout lore.h gives. If a package update moves that field, progress is just not shown.
+internal static class ServerProgressEvent
+{
+    public const LoreEventTag Tag = (LoreEventTag)243;
+    private static readonly System.Reflection.FieldInfo? Native = typeof(LoreEventFFI).GetField(
+        "loreEvent", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+
+    public static CommitProgress? Read(LoreEventFFI loreEvent)
+    {
+        if (loreEvent.Tag != Tag || Native?.GetValue(loreEvent) is not System.Reflection.Pointer pointer) return null;
+        IntPtr data;
+        unsafe { data = (IntPtr)System.Reflection.Pointer.Unbox(pointer); }
+        if (data == IntPtr.Zero) return null;
+        // The tag, padding, then the data: repository (16 bytes), branch (16), revision (32),
+        // phase, restarts, checked.
+        var phase = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(data, 8 + 64);
+        var restarts = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(data, 8 + 68);
+        var checkedCount = (ulong)System.Runtime.InteropServices.Marshal.ReadInt64(data, 8 + 72);
+        var step = phase switch { 1 => "preparing", 2 => "checking fragments", 3 => "merging", 4 => "updating the branch", 5 => "running server hooks", _ => "" };
+        return new CommitProgress("verify", checkedCount, Step: step, Restarts: restarts);
+    }
+}
 
 public static class LoreOperations
 {
@@ -229,7 +257,8 @@ public static class LoreOperations
     /// <summary>What a commit of the selection would record, for the Commit window to list: the
     /// changed files under the selected paths and the files staged anywhere (a commit records every
     /// staged file). Conflicted files are left out, as Commit refuses them until they're resolved.
-    /// Locks are looked up on the server; without it the files are listed without them.</summary>
+    /// It reads only the working copy; the window asks the server for locks separately
+    /// (<see cref="LockedByOthers"/>) and marks them when they arrive.</summary>
     public static async Task<List<CommitCandidate>> CommitCandidates(OperationRequest request)
     {
         List<FileState> status;
@@ -242,30 +271,9 @@ public static class LoreOperations
             status = await ReadStatus(request, scan: true, offline: false);
         }
         var isSelected = StatusPathSelection(request);
-        var files = status.Where(file => !file.Conflicted && (file.Staged || isSelected(file.Path)))
-            .ToList();
-        var locks = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        try
-        {
-            // A server that cannot answer (an expired sign-in, no network) must not hold the window
-            // hostage: past this wait the files are listed without their locks, and Commit still
-            // refuses a locked file on the server's own check.
-            var held = LockedByOthers(request, files.Select(file => file.Path).ToList());
-            if (await Task.WhenAny(held, Task.Delay(TimeSpan.FromSeconds(20))) == held)
-            {
-                foreach (var file in await held)
-                {
-                    locks[RelativePath(request, file.Path)] = file.Owner;
-                }
-            }
-        }
-        catch (LoreError)
-        {
-            // Offline or not signed in: Commit itself still refuses files someone else has locked.
-        }
-        return files
+        return status.Where(file => !file.Conflicted && (file.Staged || isSelected(file.Path)))
             .OrderBy(file => file.Path, StringComparer.OrdinalIgnoreCase)
-            .Select(file => new CommitCandidate(file.Path, file.Added ? "added" : file.Deleted ? "deleted" : "modified", file.Staged, locks.GetValueOrDefault(file.Path, "")))
+            .Select(file => new CommitCandidate(file.Path, file.Added ? "added" : file.Deleted ? "deleted" : "modified", file.Staged, ""))
             .ToList();
     }
 
@@ -280,17 +288,31 @@ public static class LoreOperations
     private static async Task<OperationOutcome> Commit(OperationRequest request, Action<string> report, Action<CommitProgress>? progress)
     {
         progress?.Invoke(new("prepare"));
-        var staged = await PrepareCommit(request, report);
+        var stagedBefore = new List<string>();
+        var staged = await PrepareCommit(request, report, stagedBefore);
         if (staged.Count == 0)
         {
             if (await Push(request, report, progress: progress)) return new OperationOutcome("Nothing new to commit; your earlier commits were sent to the server.");
             throw new CompanionException("There is nothing to commit: the selected files have no changes.");
         }
 
-        var blocked = await LockedByOthers(request, staged);
+        // A check ahead of the server's own, which refuses the push of a file someone else has
+        // locked: it spares a local commit that can't be sent. It is only a convenience, so a server
+        // slow to answer doesn't hold the commit; the server's check still applies.
+        var lookup = LockedByOthers(request, staged);
+        var blocked = new List<(string Path, string Owner, DateTime? Since)>();
+        try
+        {
+            if (await Task.WhenAny(lookup, Task.Delay(LockCheckWait)) == lookup) blocked = await lookup;
+            else report("The server didn't list locks in time; it checks them when the commit is sent");
+        }
+        catch (LoreError error) when (!RequiresAuthentication(error))
+        {
+            report($"Couldn't check locks ({error.Message.Split('\n')[0]}); the server checks them when the commit is sent");
+        }
         if (blocked.Count > 0)
         {
-            try { await UnstagePaths(request, request.Paths, report); } catch (LoreError) { /* the refusal below matters more */ }
+            try { await RestoreStage(request, stagedBefore, report); } catch (LoreError) { /* the refusal below matters more */ }
             throw new CompanionException($"Nothing was committed: {LockList(blocked)}. Ask them to release the lock, or leave these files out of the commit.");
         }
 
@@ -388,6 +410,7 @@ public static class LoreOperations
             {
                 LogCallback(report)(loreEvent, _);
                 if (loreEvent.Tag == LoreEventTag.BRANCH_PUSH_REVISION_PUSH_BEGIN) progress?.Invoke(new("verify"));
+                if (progress is not null && ServerProgressEvent.Read(loreEvent) is { } server) progress(server);
                 if (progress is not null && loreEvent.Tag == LoreEventTag.BRANCH_PUSH_FRAGMENT_PROGRESS)
                 {
                     var data = loreEvent.GetData<LoreBranchPushFragmentProgressEventDataFFI>();
@@ -430,13 +453,49 @@ public static class LoreOperations
         report("Selected paths staged");
     }
 
-    internal static async Task<List<string>> PrepareCommit(OperationRequest request, Action<string> report)
+    /// <summary>Stages what the commit records and returns it. A refusal puts the stage back as it
+    /// was, so the user finds their own staged files untouched. <paramref name="stagedBefore"/>, when
+    /// given, receives what was staged before, for a caller that refuses later.</summary>
+    internal static async Task<List<string>> PrepareCommit(OperationRequest request, Action<string> report, List<string>? stagedBefore = null)
     {
         var before = await ReadStatus(request);
         var unresolved = before.Where(file => file.Conflicted).Select(file => file.Path).ToList();
         if (unresolved.Count > 0) throw MergeConflict(unresolved);
         if (request.DisplayedPaths is { } displayed && before.Any(file => file.Staged && !displayed.Contains(file.Path)))
             throw new CompanionException("Another file was staged. Reopen Commit to review the selection.");
+        var original = before.Where(file => file.Staged).Select(file => file.Path).ToList();
+        stagedBefore?.AddRange(original);
+        try
+        {
+            return await StageSelection(request, before, report);
+        }
+        catch (CompanionException)
+        {
+            try { await RestoreStage(request, original, report); } catch (LoreError) { /* the refusal matters more */ }
+            throw;
+        }
+    }
+
+    /// <summary>Puts the stage back to exactly <paramref name="staged"/>: what the commit staged is
+    /// unstaged, what it unstaged is staged again. File contents are never touched.</summary>
+    internal static async Task RestoreStage(OperationRequest request, IReadOnlyCollection<string> staged, Action<string> report)
+    {
+        var wanted = new HashSet<string>(staged, StringComparer.OrdinalIgnoreCase);
+        var now = (await ReadStatus(request)).Where(file => file.Staged).Select(file => file.Path).ToList();
+        var extra = now.Where(path => !wanted.Contains(path)).Select(path => FullPath(request, path)).ToArray();
+        if (extra.Length > 0) await UnstagePaths(request, extra, report);
+        var missing = wanted.Except(now, StringComparer.OrdinalIgnoreCase).Select(path => FullPath(request, path)).ToArray();
+        if (missing.Length > 0)
+        {
+            using var globals = Globals(request);
+            using var args = new LoreFileStageArgs { Paths = missing, Scan = true };
+            await Lore.FileStage(globals, args).Callback(LogCallback(report)).WaitAsync();
+        }
+        if (extra.Length > 0 || missing.Length > 0) report("The staged files are as they were before");
+    }
+
+    private static async Task<List<string>> StageSelection(OperationRequest request, List<FileState> before, Action<string> report)
+    {
         if (request.All || request.Files.Length == 0)
         {
             // Everything under the selected paths goes in: staging the paths themselves spares
@@ -633,18 +692,21 @@ public static class LoreOperations
         return files;
     }
 
-    /// <summary>Locks other users hold on <paramref name="paths"/> (relative to the root), with the
-    /// holder's display name where the server knows it. Every lock on the branch arrives in one
-    /// answer and is intersected here: asking about hundreds of thousands of paths a hundred at a
-    /// time kept the Commit window busy for minutes on a large working copy.</summary>
+    /// <summary>Locks other users hold on <paramref name="paths"/> (relative to the root) on the
+    /// current branch, with the holder's display name where the server knows it. A lock on another
+    /// branch doesn't stop a commit here: the server checks only the branch pushed to. Every lock on
+    /// the branch arrives in one answer and is intersected here: asking about hundreds of thousands
+    /// of paths a hundred at a time kept the Commit window busy for minutes on a large working
+    /// copy.</summary>
     public static async Task<List<(string Path, string Owner, DateTime? Since)>> LockedByOthers(OperationRequest request, IReadOnlyCollection<string> paths)
     {
         if (paths.Count == 0) return [];
         var me = await CurrentUserId(request);
         var wanted = new HashSet<string>(paths.Select(path => Normalize(RelativePath(request, path))), StringComparer.OrdinalIgnoreCase);
         var held = new List<(string Path, string Owner, ulong LockedAt)>();
+        var branch = await CurrentBranchName(request);
         using (var globals = Globals(request))
-        using (var args = new LoreLockFileQueryArgs())
+        using (var args = new LoreLockFileQueryArgs { Branch = branch })
         {
             await Lore.LockFileQuery(globals, args).Callback((loreEvent, _) =>
             {
@@ -661,7 +723,29 @@ public static class LoreOperations
             lock_.LockedAt > 0 ? (DateTime?)DateTimeOffset.FromUnixTimeMilliseconds((long)lock_.LockedAt).LocalDateTime : null)).ToList();
     }
 
+    private static readonly TimeSpan LockCheckWait = TimeSpan.FromSeconds(20);
+
     private static string Normalize(string path) => path.Replace('/', '\\').Trim('\\');
+
+    /// <summary>The working copy's branch, read locally. Empty when unknown, which asks for the locks
+    /// of every branch: the cautious answer.</summary>
+    private static async Task<string> CurrentBranchName(OperationRequest request)
+    {
+        var name = "";
+        using var globals = new LoreGlobalArgs { RepositoryPath = request.RepositoryRoot(), Offline = true, Identity = SelectedIdentity(request) };
+        using var args = new LoreRepositoryStatusArgs { RevisionOnly = true };
+        try
+        {
+            await Lore.RepositoryStatus(globals, args).Callback((loreEvent, _) =>
+            {
+                if (loreEvent.Tag == LoreEventTag.REPOSITORY_STATUS_REVISION) name = loreEvent.GetData<LoreRepositoryStatusRevisionEventDataFFI>().BranchName;
+            }).WaitAsync();
+        }
+        catch (LoreError)
+        {
+        }
+        return name;
+    }
 
     private static async Task<string> CurrentUserId(OperationRequest request)
     {

@@ -4544,23 +4544,20 @@ pub async fn gc(repository: Arc<RepositoryContext>) -> Result<(), RepositoryErro
 }
 
 // TODO(vri): Upgrade and return connection
+/// Finds repository `name` on `remote_url` as `identity`, and anonymously when that identity is
+/// refused or doesn't see it, as a public repository allows. Finding it anonymously changes no
+/// identity: the caller connects to it as `identity` still. An empty identity would let the
+/// connection pick any stored identity authorized for the repository, so a clone asked for as one
+/// user could be set up, and commit, as another.
 pub async fn resolve_by_name(
     remote_url: &str,
     name: &str,
     identity: &str,
 ) -> Result<RepositoryData, RepositoryError> {
-    Ok(resolve_with_identity(remote_url, name, identity).await?.0)
-}
-
-async fn resolve_with_identity<'a>(
-    remote_url: &str,
-    name: &str,
-    identity: &'a str,
-) -> Result<(RepositoryData, &'a str), RepositoryError> {
     match resolve_by_name_authenticated(remote_url, name, identity).await {
-        Ok(repository) => Ok((repository, identity)),
+        Ok(repository) => Ok(repository),
         Err(error) if lore_base::error::is_refusal(&error) || error.is_not_found() => {
-            Ok((resolve_by_name_anonymous(remote_url, name).await?, ""))
+            resolve_by_name_anonymous(remote_url, name).await
         }
         Err(error) => Err(error),
     }

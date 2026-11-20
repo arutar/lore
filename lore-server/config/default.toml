@@ -178,3 +178,10 @@ history_step_size = 100
 
 # Branches a v1 BranchList request loads from the store at once. Must be at least 1.
 # branch_list_concurrency = 100
+
+# Seconds a push may go without progress (no store request completed, no phase change) before the
+# server restarts its verification. Bounds one step of a push, never the whole push.
+# push_operation_stall_seconds = 300
+
+# Days a finished push operation stays in the journal for clients to query.
+# push_operation_retention_days = 7

@@ -137,6 +137,15 @@ impl LoreRevisionV1Service {
         }
     }
 
+    /// Replaces the default push operation settings (`[feature] push_operation_*`).
+    pub fn with_push_operations(
+        mut self,
+        settings: super::push_operation::PushOperationSettings,
+    ) -> Self {
+        self.push_workers = Arc::new(super::push_operation::Workers::new(settings));
+        self
+    }
+
     pub fn immutable_store(&self) -> &Arc<dyn lore_storage::ImmutableStore> {
         &self.immutable_store
     }

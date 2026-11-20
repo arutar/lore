@@ -87,6 +87,10 @@ pub async fn handler(
                 .extensions()
                 .get::<super::push_operation::Receipt>()
                 .cloned();
+            if let Some(operation) = &report.operation {
+                // The operation's watchdog reads the verification's store requests as progress.
+                report.store_requests = operation.progress.store_requests.clone();
+            }
             let access = PushAccess::of(&authorizer, request.extensions(), repository_id).await?;
 
             let client_ip: Option<String> = extract_client_ip(&request).map(|ip| ip.to_string());

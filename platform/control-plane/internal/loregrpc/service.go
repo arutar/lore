@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	userv1 "github.com/arutar/lore/platform/control-plane/gen/lore/user/v1"
+	"github.com/arutar/lore/platform/control-plane/internal/deletions"
 	"github.com/arutar/lore/platform/control-plane/internal/model"
 	"github.com/arutar/lore/platform/control-plane/internal/policy"
 	"github.com/arutar/lore/platform/control-plane/internal/store"
@@ -29,17 +30,25 @@ type Authenticator interface {
 type Service struct {
 	userv1.UnimplementedUserServiceServer
 	userv1.UnimplementedRepositoryRegistryServiceServer
-	store store.Store
-	auth  Authenticator
+	store     store.Store
+	auth      Authenticator
+	deletions *deletions.Tracker
 }
 
 func New(storage store.Store, auth Authenticator) *Service {
 	return &Service{store: storage, auth: auth}
 }
 
-func NewServer(storage store.Store, auth Authenticator) *grpc.Server {
+// WithDeletions shares the WebUI's deletions in progress, whose rows RepositoryUnregister leaves
+// for the WebUI to remove once Lore confirms.
+func (s *Service) WithDeletions(tracker *deletions.Tracker) *Service {
+	s.deletions = tracker
+	return s
+}
+
+func NewServer(storage store.Store, auth Authenticator, tracker *deletions.Tracker) *grpc.Server {
 	server := grpc.NewServer()
-	New(storage, auth).Register(server)
+	New(storage, auth).WithDeletions(tracker).Register(server)
 	return server
 }
 
@@ -200,6 +209,10 @@ func (s *Service) RepositoryUnregister(ctx context.Context, request *userv1.Repo
 	}
 	if !policy.CanManage(&user, grants) {
 		return nil, status.Error(codes.PermissionDenied, "repository owner access is required")
+	}
+	if s.deletions.Active(id) {
+		// The WebUI removes the row itself once Lore has deleted the repository.
+		return &userv1.RepositoryUnregisterResponse{}, nil
 	}
 	if err := s.store.DeleteRepository(ctx, user.ID, id); err != nil {
 		return nil, status.Error(codes.Internal, "repository unregistration failed")

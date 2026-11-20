@@ -71,6 +71,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let metadata_tag = Regex::new(r"(?s)enum lore_metadata_tag_t \{.*?\n\};\n")
         .expect("Failed to create regex to drop the synthesised metadata tag enum");
     let contents = metadata_tag.replace(contents.as_str(), "").to_string();
+    // The push journal key type is internal to the server: no C API call may name it.
+    let push_journal = Regex::new(r"(?m)^(  //.*\n)*  LORE_KEY_TYPE_PUSH_JOURNAL = \d+,\n")
+        .expect("Failed to create regex to drop the internal push journal key type");
+    let contents = push_journal.replace(contents.as_str(), "").to_string();
     // Fill out empty structs with a dummy field
     let contents = contents.replace("{\n\n} lore_", "{\n  int _unused;\n} lore_");
 

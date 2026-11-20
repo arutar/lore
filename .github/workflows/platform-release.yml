@@ -5,7 +5,8 @@
 #   - Linux CLI built from this fork (the HTTP and sign-in changes live in the client)
 #   - server bundle: the deploy directory with compose.yaml pointing at this version's images
 #   - SHA256SUMS over everything
-# The container images themselves are published by platform-images.yml on the same tag.
+# Nothing is published until the Rust tests (pr-validate.yml), lint (lint.yml) and the platform
+# checks pass; the container images (platform-images.yml) follow the same checks.
 name: Platform Release
 
 on:
@@ -34,6 +35,20 @@ jobs:
             echo "::error::Release tags must look like platform-v1.2.3"; exit 1
           fi
           echo "version=${REF_NAME#platform-v}" >> "$GITHUB_OUTPUT"
+
+  validate:
+    name: Rust tests
+    needs: version
+    permissions:
+      contents: read
+    uses: ./.github/workflows/pr-validate.yml
+
+  lint:
+    name: Lint
+    needs: version
+    permissions:
+      contents: read
+    uses: ./.github/workflows/lint.yml
 
   server-checks:
     needs: version
@@ -117,9 +132,19 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  images:
+    name: Container images
+    needs: [version, validate, lint, server-checks, end-to-end]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/platform-images.yml
+    with:
+      tag: ${{ needs.version.outputs.version }}
+
   release:
     name: Publish release
-    needs: [version, server-checks, end-to-end, windows, linux-cli, server-bundle]
+    needs: [version, validate, lint, server-checks, end-to-end, windows, linux-cli, server-bundle, images]
     runs-on: ubuntu-latest
     environment: platform-release
     permissions:

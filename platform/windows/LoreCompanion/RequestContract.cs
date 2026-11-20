@@ -77,7 +77,11 @@ public sealed class OperationRequest
         // A request written by the Explorer integration is capped tightly; a selection the Commit
         // window made can hold every file of a large working copy.
         var maximumFiles = forExecution ? 5_000_000 : 100_000;
-        if (Files.Length > maximumFiles || Excluded.Length > maximumFiles || Files.Concat(Excluded).Any(file => string.IsNullOrWhiteSpace(file) || file.Length > 32_768 || Path.IsPathRooted(file) || file.Split('\\', '/').Contains("..")))
+        if (Files.Length > maximumFiles || Excluded.Length > maximumFiles)
+        {
+            throw new InvalidDataException($"The request names more than {maximumFiles:N0} files. Select their folders instead.");
+        }
+        if (Files.Concat(Excluded).Any(file => string.IsNullOrWhiteSpace(file) || file.Length > 32_768 || Path.IsPathRooted(file) || file.Split('\\', '/').Contains("..")))
         {
             throw new InvalidDataException("Request contains an invalid file");
         }

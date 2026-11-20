@@ -1063,10 +1063,9 @@ pub async fn clone(
     let mut dot_directory_guard = RepositoryCloneGuard::new(&existing_dot_dir, call.dry_run());
 
     // Resolve the repository name
-    let (repository_data, identity) =
-        repository::resolve_with_identity(&remote_url, &name, identity)
-            .await
-            .forward::<CloneError>("Failed to resolve repository")?;
+    let repository_data = repository::resolve_by_name(&remote_url, &name, identity)
+        .await
+        .forward::<CloneError>("Failed to resolve repository")?;
 
     // Spin up connection to actual repository
     // TODO(mjansson): Make use of the initial connection for repository resolve

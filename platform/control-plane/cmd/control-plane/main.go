@@ -14,6 +14,7 @@ import (
 	"golang.org/x/oauth2/clientcredentials"
 
 	"github.com/arutar/lore/platform/control-plane/internal/config"
+	"github.com/arutar/lore/platform/control-plane/internal/deletions"
 	"github.com/arutar/lore/platform/control-plane/internal/directory"
 	"github.com/arutar/lore/platform/control-plane/internal/httpapi"
 	"github.com/arutar/lore/platform/control-plane/internal/loreclient"
@@ -118,7 +119,9 @@ func run() error {
 			log.Print("token exchange uses an ephemeral development signing key")
 		}
 	}
+	deleting := &deletions.Tracker{}
 	handler := httpapi.NewServer(storage, auth, httpapi.Config{
+		Deletions:           deleting,
 		Repositories:        repositories,
 		Directory:           groupCatalog,
 		Content:             content,
@@ -146,7 +149,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	grpcServer := loregrpc.NewServer(storage, auth)
+	grpcServer := loregrpc.NewServer(storage, auth, deleting)
 	serveError := make(chan error, 2)
 	go func() {
 		log.Printf("HTTP listening on %s", settings.Address)

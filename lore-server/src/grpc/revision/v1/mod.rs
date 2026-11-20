@@ -9,6 +9,6 @@ pub mod branch_metadata_get;
 pub mod branch_metadata_set;
 pub mod branch_push;
 mod branch_record;
-pub(crate) mod push_operation;
+pub mod push_operation;
 pub mod revision_list;
 pub mod service;

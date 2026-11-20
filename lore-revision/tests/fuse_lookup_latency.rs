@@ -657,6 +657,8 @@ async fn lookups_under_writers(label: &str, writers: [(&str, Writes); 4], budget
 /// same directory and two in others: every LOOKUP finds its file and the writes run throughout.
 /// On a quiet machine the LOOKUPs keep to p50 < 20 µs and p99 < 100 µs.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "task 14 diagnostic: run through lore-fuse/bench/m2/latency.sh; on a CI runner it hung \
+            the unit job for six hours (writers blocked in the kernel are waited for without bound)"]
 async fn warm_lookups_under_concurrent_writes_stay_within_budget() {
     skip_without_fuse!();
     lookups_under_writers(

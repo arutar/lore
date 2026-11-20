@@ -75,6 +75,35 @@ public sealed class CommitSnapshotTests
         }
     }
 
+    [TestMethod]
+    public async Task RestoreStagePutsBackWhatTheUserHadStaged()
+    {
+        var root = Directory.CreateTempSubdirectory("LoreCommitRestore-");
+        try
+        {
+            using var globals = new LoreGlobalArgs { RepositoryPath = root.FullName, Offline = true };
+            using var create = new LoreRepositoryCreateArgs { RepositoryUrl = "restore" };
+            await Lore.RepositoryCreate(globals, create).WaitAsync();
+            foreach (var name in new[] { "mine.txt", "commit.txt" }) File.WriteAllText(Path.Combine(root.FullName, name), name);
+            using (var stage = new LoreFileStageArgs { Paths = [Path.Combine(root.FullName, "mine.txt")], Scan = true })
+                await Lore.FileStage(globals, stage).WaitAsync();
+            var request = new OperationRequest { Operation = CompanionOperation.Commit, Paths = [root.FullName], Files = ["commit.txt"] };
+
+            // Committing exactly commit.txt unstages mine.txt; a refusal afterwards restores it.
+            var stagedBefore = new List<string>();
+            CollectionAssert.AreEqual(new[] { "commit.txt" }, await LoreOperations.PrepareCommit(request, _ => { }, stagedBefore));
+            CollectionAssert.AreEqual(new[] { "mine.txt" }, stagedBefore);
+            await LoreOperations.RestoreStage(request, stagedBefore, _ => { });
+
+            var staged = (await LoreOperations.ReadStatus(request)).Where(file => file.Staged).Select(file => file.Path).ToArray();
+            CollectionAssert.AreEqual(new[] { "mine.txt" }, staged);
+        }
+        finally
+        {
+            await ReleaseRepository(root);
+        }
+    }
+
     private static async Task ReleaseRepository(DirectoryInfo root)
     {
         using var globals = new LoreGlobalArgs { RepositoryPath = root.FullName, Offline = true };

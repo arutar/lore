@@ -239,6 +239,7 @@ include = [
 "LoreBranchPushRevisionPushEndEventData" = "lore_branch_push_revision_push_end_event_data_t"
 "LoreBranchPushStatsEventData" = "lore_branch_push_stats_event_data_t"
 "LoreBranchPushRevisionPushUpdateEventData" = "lore_branch_push_revision_push_update_event_data_t"
+"LoreBranchPushServerProgressEventData" = "lore_branch_push_server_progress_event_data_t"
 "LoreBranchPushRevisionUpdateBeginEventData" = "lore_branch_push_revision_update_begin_event_data_t"
 "LoreBranchPushRevisionUpdateEndEventData" = "lore_branch_push_revision_update_end_event_data_t"
 "LoreBranchResetArgs" = "lore_branch_reset_args_t"

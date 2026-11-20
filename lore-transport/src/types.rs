@@ -161,6 +161,17 @@ pub struct BranchPushResponse {
     pub message: Option<String>,
 }
 
+/// How far the server has got verifying a push, reported while it runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PushVerifyProgress {
+    /// The `lore.platform.v1.BranchPushOperation.Phase` the push is in.
+    pub phase: u32,
+    /// Store requests the verification has completed.
+    pub checked: u64,
+    /// Times the server restarted the verification.
+    pub restarts: u32,
+}
+
 pub struct BranchQueryResponse {
     /// Branch ID
     pub id: BranchId,

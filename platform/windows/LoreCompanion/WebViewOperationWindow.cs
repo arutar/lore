@@ -319,13 +319,48 @@ internal sealed class WebViewOperationWindow : Window
                 whole,
                 folders = list.Folders(),
                 items = whole ? list.AllFiles().Select(Item) : null,
+                locksPending = list.Total > 0,
             });
+            if (list.Total > 0) _ = SendLocks(list);
         }
         catch (Exception exception)
         {
             changes = null;
             Send(new { type = "changes", items = Array.Empty<object>(), error = OperationError.UserMessage(exception, request.Operation) });
         }
+    }
+
+    // Locks come from the server, which may be slow or unreachable: the list is already on screen,
+    // and they mark it when they arrive. Nothing waits on them; a commit of a locked file is refused
+    // by the server either way.
+    private async Task SendLocks(CommitList list)
+    {
+        string error = "";
+        var owners = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var held in await LoreOperations.LockedByOthers(request, list.AllFiles().Select(file => file.Path).ToList()))
+            {
+                owners[held.Path] = held.Owner;
+            }
+        }
+        catch (Exception exception) when (exception is LoreVcs.LoreError or CompanionException)
+        {
+            error = OperationError.UserMessage(exception, request.Operation);
+        }
+        // The user may have started the commit or closed the window meanwhile.
+        if (!ReferenceEquals(changes, list) || running) return;
+        list.ApplyLocks(owners);
+        Send(new
+        {
+            type = "locks",
+            error,
+            total = list.Total,
+            selected = list.Selected,
+            eligible = list.Eligible,
+            folders = list.Folders(),
+            items = list.Total <= CommitList.WholeListFrom ? list.AllFiles().Select(Item) : null,
+        });
     }
 
     private object Item(CommitCandidate file) =>

@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+// Services this fork adds on top of the upstream Lore protocol. They live in
+// their own package so that an upstream change to lore.revision.v1 can never
+// collide with them. See platform/docs/decisions/0001-push-operations.md.
+package lore.platform.v1;
+
+import "lore/revision/v1/revision.proto";
+
+// A branch push whose verification may outlast one request. The client
+// starts the operation, then polls it until it is accepted or rejected, so
+// no proxy or handler timeout bounds how long the server may verify.
+//
+// A client falls back to lore.revision.v1.RevisionService.BranchPush only
+// when Start returns UNIMPLEMENTED.
+service BranchPushOperationService {
+  // Returns once the operation is durably registered. Repeating the same
+  // request returns its current status. Reusing its id with a different
+  // push returns ALREADY_EXISTS. The verification outlives the request.
+  rpc Start(StartBranchPushRequest) returns (BranchPushOperation);
+  // Uses the same repository and caller scope as Start. A lost reply is not
+  // a rejection: the client asks again.
+  rpc Get(GetBranchPushOperationRequest) returns (BranchPushOperation);
+}
+
+message StartBranchPushRequest {
+  // Client-generated 16-byte operation id, kept across retries.
+  bytes operation_id = 1;
+  lore.revision.v1.BranchPushRequest push = 2;
+}
+
+message GetBranchPushOperationRequest {
+  bytes operation_id = 1;
+}
+
+message BranchPushOperation {
+  // The step a running push is in.
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    // Authorization, loading the branch and the incoming revision, the
+    // pre-push hooks.
+    PHASE_PREPARE = 1;
+    // Walking the incoming revision and checking that the fragments it adds
+    // are stored.
+    PHASE_VERIFY = 2;
+    // Merging onto a branch that moved since the client branched.
+    PHASE_MERGE = 3;
+    // Moving the branch.
+    PHASE_COMMIT = 4;
+    // Running the post-push hooks.
+    PHASE_RESPOND = 5;
+  }
+  message Processing {
+    Phase phase = 1;
+    // Store requests the verification has completed so far. It only grows
+    // while the verification makes progress; clients show it as such.
+    uint64 checked = 2;
+    // Times the server restarted the verification after it stopped making
+    // progress or hit a transient storage failure.
+    uint32 restarts = 3;
+  }
+  message Rejected {
+    // Canonical gRPC status, including the binary details used for missing
+    // fragments so existing client-side recovery can handle the refusal.
+    int32 code = 1;
+    string message = 2;
+    bytes details = 3;
+  }
+  oneof state {
+    Processing processing = 1;
+    lore.revision.v1.BranchPushResponse accepted = 2;
+    Rejected rejected = 3;
+  }
+}

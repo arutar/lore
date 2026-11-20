@@ -6,6 +6,7 @@ pub mod notification;
 
 pub mod environment;
 pub mod model;
+pub mod platform;
 pub mod repository;
 pub mod revision;
 pub mod storage;

@@ -206,6 +206,27 @@ pub struct LoreBranchPushRevisionPushBeginEventData {
     pub local_revision: Hash,
 }
 
+/// Data for the event sent while the remote verifies a pushed revision, each time it reports
+/// further progress.
+#[repr(C)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[serde(rename_all = "camelCase")]
+pub struct LoreBranchPushServerProgressEventData {
+    /// The repository being pushed.
+    pub repository: RepositoryId,
+    /// The branch being pushed to.
+    pub branch: BranchId,
+    /// The revision the remote is verifying.
+    pub revision: Hash,
+    /// The step the remote is in: 1 preparing, 2 verifying fragments, 3 merging onto a branch
+    /// that moved, 4 moving the branch, 5 running the post-push hooks, 0 unknown.
+    pub phase: u32,
+    /// Times the remote restarted the verification after it stalled or hit a transient failure.
+    pub restarts: u32,
+    /// Store requests the remote's verification has completed so far.
+    pub checked: u64,
+}
+
 /// Data for the event sent when the remote assigns a pushed revision a new identity.
 #[repr(C)]
 #[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
@@ -1981,8 +2002,19 @@ async fn offer_revision(
     fast_forward_merge: bool,
     recover: impl AsyncFnOnce() -> Result<(), PushError>,
 ) -> Result<BranchPushResponse, PushError> {
+    let progress = |progress: lore_transport::types::PushVerifyProgress| {
+        event::LoreEvent::BranchPushServerProgress(LoreBranchPushServerProgressEventData {
+            repository,
+            branch,
+            revision,
+            phase: progress.phase,
+            restarts: progress.restarts,
+            checked: progress.checked,
+        })
+        .send();
+    };
     let mut answer = revision_protocol
-        .branch_push(branch, revision, force, fast_forward_merge)
+        .branch_push_observed(branch, revision, force, fast_forward_merge, &progress)
         .await;
     if let Err(ProtocolError::NotFound(_)) = answer {
         lore_debug!("Branch push returned NotFound, recreating branch on server");
@@ -2007,7 +2039,7 @@ async fn offer_revision(
         })
         .send();
         answer = revision_protocol
-            .branch_push(branch, revision, force, fast_forward_merge)
+            .branch_push_observed(branch, revision, force, fast_forward_merge, &progress)
             .await;
     }
     if let Err(ProtocolError::AddressNotFound(missing)) = &answer {
@@ -2017,7 +2049,7 @@ async fn offer_revision(
         );
         recover().await?;
         answer = revision_protocol
-            .branch_push(branch, revision, force, fast_forward_merge)
+            .branch_push_observed(branch, revision, force, fast_forward_merge, &progress)
             .await;
     }
     // The peer may have committed the head before the handler timed out.

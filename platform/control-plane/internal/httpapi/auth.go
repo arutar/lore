@@ -26,6 +26,8 @@ const (
 	stateCookie    = "lore_oidc_state"
 	nonceCookie    = "lore_oidc_nonce"
 	verifierCookie = "lore_oidc_verifier"
+	// returnCookie holds the WebUI page a sign-in started from, to return to after it.
+	returnCookie = "lore_oidc_return"
 )
 
 type AuthConfig struct {
@@ -181,6 +183,19 @@ func currentUser(ctx context.Context) (*model.User, *model.Session) {
 	return &user, &session
 }
 
+// returnPath is where a sign-in may return to: a path of this WebUI, never another site. Anything
+// else, such as "//host" or a full URL, returns to the start page.
+func returnPath(value string) string {
+	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") || strings.HasPrefix(value, "/\\") ||
+		strings.ContainsAny(value, "\r\n\\") || strings.HasPrefix(value, "/web/v1/") {
+		return "/"
+	}
+	if parsed, err := url.Parse(value); err != nil || parsed.Scheme != "" || parsed.Host != "" {
+		return "/"
+	}
+	return value
+}
+
 func (a *Authenticator) login(w http.ResponseWriter, r *http.Request) {
 	if a.provider == nil {
 		writeError(w, http.StatusServiceUnavailable, "oidc_not_configured", "OIDC isn't configured")
@@ -204,6 +219,9 @@ func (a *Authenticator) login(w http.ResponseWriter, r *http.Request) {
 	setCookie(w, stateCookie, state, 600, a.config.SecureCookies)
 	setCookie(w, nonceCookie, nonce, 600, a.config.SecureCookies)
 	setCookie(w, verifierCookie, verifier, 600, a.config.SecureCookies)
+	if back := returnPath(r.URL.Query().Get("return")); back != "/" {
+		setCookie(w, returnCookie, url.QueryEscape(back), 600, a.config.SecureCookies)
+	}
 	http.Redirect(w, r, a.oauth.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier)), http.StatusFound)
 }
 
@@ -277,7 +295,14 @@ func (a *Authenticator) callback(w http.ResponseWriter, r *http.Request) {
 	clearCookie(w, stateCookie, a.config.SecureCookies)
 	clearCookie(w, nonceCookie, a.config.SecureCookies)
 	clearCookie(w, verifierCookie, a.config.SecureCookies)
-	http.Redirect(w, r, "/", http.StatusFound)
+	back := "/"
+	if cookie, err := r.Cookie(returnCookie); err == nil {
+		if value, err := url.QueryUnescape(cookie.Value); err == nil {
+			back = returnPath(value)
+		}
+		clearCookie(w, returnCookie, a.config.SecureCookies)
+	}
+	http.Redirect(w, r, back, http.StatusFound)
 }
 
 // LoginTokens authenticates only tokens that the identity provider issued at sign-in.

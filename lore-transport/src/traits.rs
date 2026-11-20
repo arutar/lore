@@ -283,6 +283,20 @@ pub trait Revision: Send + Sync {
         fast_forward_merge: bool,
     ) -> Result<BranchPushResponse, ProtocolError>;
 
+    /// [`Self::branch_push`], calling `progress` whenever the server reports how far its
+    /// verification has got. A peer that reports nothing never calls it.
+    async fn branch_push_observed(
+        &self,
+        branch: BranchId,
+        latest: Hash,
+        force: bool,
+        fast_forward_merge: bool,
+        _progress: &(dyn Fn(crate::types::PushVerifyProgress) + Send + Sync),
+    ) -> Result<BranchPushResponse, ProtocolError> {
+        self.branch_push(branch, latest, force, fast_forward_merge)
+            .await
+    }
+
     /// List all branches
     async fn branch_list(&self) -> Result<BranchListResponse, ProtocolError>;
 

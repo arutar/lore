@@ -216,10 +216,30 @@ pub struct FeatureSettings {
     /// Number of branches the v1 `BranchList` handler loads at once.
     /// Defaults to 100.
     pub branch_list_concurrency: Option<NonZeroUsize>,
+    /// Seconds a push operation may go without progress before the server restarts its
+    /// verification. Defaults to 300.
+    pub push_operation_stall_seconds: Option<u64>,
+    /// Days a decided push operation stays queryable. Defaults to 7.
+    pub push_operation_retention_days: Option<u64>,
 }
 
 impl FeatureSettings {
     /// The configured `branch_list_concurrency`, or its default when unset.
+    /// The push operation settings, with defaults for those unset.
+    pub fn push_operations(
+        &self,
+    ) -> crate::grpc::revision::v1::push_operation::PushOperationSettings {
+        let mut settings =
+            crate::grpc::revision::v1::push_operation::PushOperationSettings::default();
+        if let Some(seconds) = self.push_operation_stall_seconds {
+            settings.stall = Duration::from_secs(seconds.max(1));
+        }
+        if let Some(days) = self.push_operation_retention_days {
+            settings.retention = Duration::from_secs(days.max(1) * 24 * 3600);
+        }
+        settings
+    }
+
     pub fn branch_list_concurrency(&self) -> NonZeroUsize {
         self.branch_list_concurrency
             .unwrap_or(crate::grpc::revision::v1::branch_list::DEFAULT_BRANCH_LIST_CONCURRENCY)
@@ -772,7 +792,15 @@ impl GrpcServerBuilder<MaybeJwtVerifier> {
             self.0.forwarded_requests.clone(),
             rpc_timeout,
             self.0.feature.branch_list_concurrency(),
-        );
+        )
+        .with_push_operations(self.0.feature.push_operations());
+        if !self.0.mutable_store.supports_atomic_pair() {
+            warn!(
+                "This mutable store cannot move a branch and record a push outcome in one write, \
+                 so pushes are not run as operations: clients push synchronously, bounded by \
+                 request_handler_timeout_seconds. See platform/docs/decisions/0001-push-operations.md"
+            );
+        }
         let repository_svc = LoreRepositoryService::new(
             self.0.environment.clone(),
             repository_authorizer.clone(),
@@ -837,7 +865,7 @@ impl GrpcServerBuilder<MaybeJwtVerifier> {
                     authorization_timeout,
                 ))
                 .add_service(Self::partition_scoped(
-                    lore_proto::lore::revision::v1::branch_push_operation_service_server::BranchPushOperationServiceServer::new(revision_v1_svc.clone()),
+                    lore_proto::lore::platform::v1::branch_push_operation_service_server::BranchPushOperationServiceServer::new(revision_v1_svc.clone()),
                     &jwt_interceptor,
                     &repository_authorizer,
                     authorization_timeout,

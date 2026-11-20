@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	userv1 "github.com/arutar/lore/platform/control-plane/gen/lore/user/v1"
+	"github.com/arutar/lore/platform/control-plane/internal/deletions"
 	"github.com/arutar/lore/platform/control-plane/internal/model"
 	"github.com/arutar/lore/platform/control-plane/internal/store"
 )
@@ -78,6 +79,48 @@ func TestDirectoryAndRegistryRoundTrip(t *testing.T) {
 	}
 	if _, err := registry.RepositoryUnregister(ctx, &userv1.RepositoryUnregisterRequest{Id: id}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// While the WebUI deletes a repository, Lore's unregistration leaves the row: the WebUI removes it
+// once Lore confirms, and keeps it listed when Lore fails part way.
+func TestUnregisterLeavesARepositoryTheWebUIIsDeleting(t *testing.T) {
+	storage := store.NewMemory()
+	tracker := &deletions.Tracker{}
+	listener := bufconn.Listen(1024 * 1024)
+	server := grpc.NewServer()
+	New(storage, fakeAuth{user: model.User{ID: "user", Username: "alice", Role: model.RoleAdmin}}).WithDeletions(tracker).Register(server)
+	go server.Serve(listener)
+	t.Cleanup(server.Stop)
+	connection, err := grpc.NewClient("passthrough:///bufnet", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+		return listener.Dial()
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { connection.Close() })
+	ctx, cancel := context.WithTimeout(metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer valid"), 5*time.Second)
+	t.Cleanup(cancel)
+	registry := userv1.NewRepositoryRegistryServiceClient(connection)
+	id := make([]byte, 16)
+	id[15] = 9
+	const key = "00000000-0000-0000-0000-000000000009"
+	if _, err := registry.RepositoryRegister(ctx, &userv1.RepositoryRegisterRequest{Id: id, Name: "assets"}); err != nil {
+		t.Fatal(err)
+	}
+	done := tracker.Begin(key)
+	if _, err := registry.RepositoryUnregister(ctx, &userv1.RepositoryUnregisterRequest{Id: id}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.GetRepository(context.Background(), key); err != nil {
+		t.Fatalf("the row went while the WebUI deletes it: %v", err)
+	}
+	done()
+	if _, err := registry.RepositoryUnregister(ctx, &userv1.RepositoryUnregisterRequest{Id: id}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.GetRepository(context.Background(), key); err != store.ErrNotFound {
+		t.Fatalf("a deletion started elsewhere removes the row: %v", err)
 	}
 }
 

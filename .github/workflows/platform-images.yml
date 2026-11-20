@@ -4,9 +4,15 @@
 # compiling the Rust server: the control plane (Go API + WebUI) and the fork's Lore server.
 name: Platform Images
 
+# A release publishes its images through platform-release.yml, only after every check passed.
+# Run by hand to publish a tag such as "edge".
 on:
-  push:
-    tags: ["platform-v*"]
+  workflow_call:
+    inputs:
+      tag:
+        description: Image tag to publish.
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       tag:
@@ -24,6 +30,7 @@ jobs:
   publish:
     name: ${{ matrix.image }}
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write

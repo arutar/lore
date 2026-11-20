@@ -882,6 +882,7 @@ pub struct LoreBranchPushArgs {
 /// | [`LoreEvent::BranchPushFragmentEnd`](crate::interface::LoreEvent::BranchPushFragmentEnd) | Emitted when fragment upload completes |
 /// | [`LoreEvent::BranchPushRevisionPushBegin`](crate::interface::LoreEvent::BranchPushRevisionPushBegin) | Emitted when pushing a revision to the remote begins |
 /// | [`LoreEvent::BranchPushRevisionPushUpdate`](crate::interface::LoreEvent::BranchPushRevisionPushUpdate) | Emitted with progress updates during revision push |
+/// | [`LoreEvent::BranchPushServerProgress`](crate::interface::LoreEvent::BranchPushServerProgress) | Emitted while the server verifies the pushed revision, each time it reports progress |
 /// | [`LoreEvent::BranchPushRevisionPushEnd`](crate::interface::LoreEvent::BranchPushRevisionPushEnd) | Emitted when revision push completes |
 /// | [`LoreEvent::BranchPushStats`](crate::interface::LoreEvent::BranchPushStats) | Emitted once when the push finishes, with fragment dedup/copy/upload totals for the whole push. Requires `stats >= 1` on the global arguments |
 pub async fn push(

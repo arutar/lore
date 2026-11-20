@@ -310,7 +310,7 @@ pub struct PushReport {
     store_latest_attempts: u64,
     fast_forward_merge_changes: Option<u64>,
     /// The fragment lookups and metadata blob reads the verification's tree walk makes.
-    store_requests: Arc<StoreRequestTracker>,
+    pub(crate) store_requests: Arc<StoreRequestTracker>,
     collected_addresses: Option<u64>,
     concurrent_query_batches: Option<u64>,
     /// When the verification's tree walk started. It runs until the existence checks start.
@@ -395,6 +395,9 @@ impl PushReport {
         self.close_phase(now);
         self.phase = phase;
         self.phase_started = now;
+        if let Some(operation) = &self.operation {
+            operation.progress.enter(phase);
+        }
     }
 
     /// Runs `body` in `execution` with the report, and marks the push completed or errored by
@@ -1836,6 +1839,9 @@ async fn verify_fragments(
         while let Some(result) = tasks.join_next().await {
             let (mut batch, result) =
                 result.warn_map_err(|err| Status::internal(format!("Query task failed: {err}")))?;
+            if let (Some(operation), Ok(_)) = (&report.operation, &result) {
+                operation.progress.advance(batch.len() as u64);
+            }
             match result {
                 Ok(result) => {
                     if let Some(missing) = first_missing_fragment(&batch, &result) {

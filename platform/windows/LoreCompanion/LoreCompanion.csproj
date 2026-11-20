@@ -5,6 +5,8 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
+    <!-- ServerProgressEvent reads the native event the LoreVcs package holds. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>LoreCompanion</AssemblyName>
     <ApplicationIcon>../shared/ico/app.ico</ApplicationIcon>

@@ -290,9 +290,6 @@ typedef enum lore_key_type_t {
   // because this is the only one they operate on; a publish large enough to fragment falls
   // back to an ordinary mutable store write, which does carry it like any other type.
   LORE_KEY_TYPE_RESOLVE = 7,
-  // Internal push journal. Raw storage RPCs must never decode this type
-  // from an untrusted integer (see `TryFrom` below).
-  LORE_KEY_TYPE_PUSH_JOURNAL = 8,
 } lore_key_type_t;
 
 // The change staged on a node for the next revision. `None` is a node the
@@ -3462,6 +3459,24 @@ typedef struct lore_repository_instance_move_complete_event_data_t {
   struct lore_string_t target_path;
 } lore_repository_instance_move_complete_event_data_t;
 
+// Data for the event sent while the remote verifies a pushed revision, each time it reports
+// further progress.
+typedef struct lore_branch_push_server_progress_event_data_t {
+  // The repository being pushed.
+  lore_repository_id_t repository;
+  // The branch being pushed to.
+  lore_branch_id_t branch;
+  // The revision the remote is verifying.
+  struct lore_hash_t revision;
+  // The step the remote is in: 1 preparing, 2 verifying fragments, 3 merging onto a branch
+  // that moved, 4 moving the branch, 5 running the post-push hooks, 0 unknown.
+  uint32_t phase;
+  // Times the remote restarted the verification after it stalled or hit a transient failure.
+  uint32_t restarts;
+  // Store requests the remote's verification has completed so far.
+  uint64_t checked;
+} lore_branch_push_server_progress_event_data_t;
+
 // An event delivered to a callback. Each variant names a kind of event and
 // carries the data for that event.
 enum lore_event_id_t {
@@ -3953,6 +3968,9 @@ enum lore_event_id_t {
   LORE_EVENT_REPOSITORY_INSTANCE_MOVE_BEGIN,
   // The completion of an instance move operation.
   LORE_EVENT_REPOSITORY_INSTANCE_MOVE_COMPLETE,
+  // Progress of the remote's verification of a pushed revision. Added by this fork: it stays
+  // last so that the event ids SDKs already know keep their values.
+  LORE_EVENT_BRANCH_PUSH_SERVER_PROGRESS,
 };
 typedef uint32_t lore_event_tag_t;
 
@@ -4202,6 +4220,7 @@ typedef struct lore_event_t {
     struct lore_repository_instance_delete_complete_event_data_t repository_instance_delete_complete;
     struct lore_repository_instance_move_begin_event_data_t repository_instance_move_begin;
     struct lore_repository_instance_move_complete_event_data_t repository_instance_move_complete;
+    struct lore_branch_push_server_progress_event_data_t branch_push_server_progress;
   };
 } lore_event_t;
 

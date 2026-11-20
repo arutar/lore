@@ -110,6 +110,22 @@ public sealed class CommitList
         foreach (var child in node.Folders) Rebase(child, $"{path}\\{child.Name}");
     }
 
+    /// <summary>Marks the files someone else has locked, which arrive after the list is shown:
+    /// they are taken out of the commit and their boxes disabled. The rest of the selection stays as
+    /// the user left it.</summary>
+    public void ApplyLocks(IReadOnlyDictionary<string, string> owners)
+    {
+        if (owners.Count == 0) return;
+        for (var index = 0; index < files.Count; index++)
+        {
+            if (!owners.TryGetValue(files[index].Path, out var owner) || owner.Length == 0) continue;
+            files[index] = files[index] with { LockedBy = owner };
+            excluded.Add(files[index].Path);
+            lockedPaths.Add(files[index].Path);
+        }
+        Fold(root);
+    }
+
     public int Total => files.Count;
 
     /// <summary>Files that may be committed: everything but what someone else has locked.</summary>

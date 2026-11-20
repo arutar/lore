@@ -27,9 +27,11 @@ pub enum KeyType {
     /// because this is the only one they operate on; a publish large enough to fragment falls
     /// back to an ordinary mutable store write, which does carry it like any other type.
     Resolve = 7,
-    /// Internal push journal. Raw storage RPCs must never decode this type
-    /// from an untrusted integer (see `TryFrom` below).
-    PushJournal = 8,
+    /// The server's push operation journal, a type this fork adds (see
+    /// `platform/docs/decisions/0001-push-operations.md`). Its number sits far from the upstream
+    /// range so that a type upstream adds can never read or overwrite it. Neither `TryFrom` below
+    /// nor the C header names it, so no raw storage request can reach it.
+    PushJournal = 200,
 }
 
 impl TryFrom<u8> for KeyType {

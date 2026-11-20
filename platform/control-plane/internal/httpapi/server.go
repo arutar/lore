@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/arutar/lore/platform/control-plane/internal/deletions"
 	"github.com/arutar/lore/platform/control-plane/internal/directory"
 	"github.com/arutar/lore/platform/control-plane/internal/loreclient"
 	"github.com/arutar/lore/platform/control-plane/internal/model"
@@ -38,6 +39,9 @@ type GroupCatalog interface {
 }
 
 type Config struct {
+	// Deletions marks the repositories being deleted here, shared with the registry service so that
+	// Lore's unregistration leaves their rows until Lore confirms (see package deletions).
+	Deletions           *deletions.Tracker
 	Repositories        RepositoryManager
 	Directory           GroupCatalog
 	Content             RepositoryContent

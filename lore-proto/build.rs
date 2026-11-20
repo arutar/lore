@@ -104,7 +104,8 @@ fn main() -> Result<()> {
             &["./proto"],
         )?;
 
-    // lore.revision.v1 — baseline revision-graph service, references lore.model.v1
+    // lore.revision.v1 — baseline revision-graph service, and lore.platform.v1, references
+    // lore.model.v1
     let mut config = tonic_prost_build::Config::new();
     config.enable_type_names();
     config.bytes(["."]);
@@ -115,7 +116,13 @@ fn main() -> Result<()> {
         .protoc_arg("--experimental_allow_proto3_optional")
         .compile_with_config(
             config,
-            &["./proto/lore/revision/v1/revision.proto"],
+            // lore.platform.v1 holds the services this fork adds. It imports lore.revision.v1,
+            // and compiling a file also writes the services of the files it imports, so both
+            // are compiled at once: compiled apart, the second would overwrite the first.
+            &[
+                "./proto/lore/revision/v1/revision.proto",
+                "./proto/lore/platform/v1/push_operation.proto",
+            ],
             &["./proto"],
         )?;
 

@@ -3,9 +3,11 @@
 
 name: Lint
 
+# Runs on every push to main and before every platform release (platform-release.yml calls it).
 on:
   push:
-    tags: ["platform-v*"]
+    branches: [main]
+  workflow_call:
   workflow_dispatch:
 
 permissions: {}
@@ -18,6 +20,7 @@ jobs:
   pre-commit:
     name: pre-commit
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read # Check out the PR head to lint it
     steps:

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -561,6 +562,9 @@ func (s *Server) createRepository(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, repository)
 }
 
+// repositoryDeleteTimeout bounds Lore's deletion of a repository, which walks all its branches.
+const repositoryDeleteTimeout = 10 * time.Minute
+
 func (s *Server) deleteRepository(w http.ResponseWriter, r *http.Request) {
 	actor, _ := currentUser(r.Context())
 	repo, err := s.store.GetRepository(r.Context(), chi.URLParam(r, "id"))
@@ -587,18 +591,27 @@ func (s *Server) deleteRepository(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "token_failed", "Could not authorize deletion")
 		return
 	}
-	err = s.config.Repositories.DeleteRepository(r.Context(), repo.ID, token)
-	if err != nil && status.Code(err) != codes.NotFound {
-		if status.Code(err) == codes.PermissionDenied {
-			writeError(w, http.StatusForbidden, "forbidden", "Lore refused deletion")
-			return
-		}
-		writeError(w, http.StatusServiceUnavailable, "lore_unavailable", "Could not delete repository in Lore")
+	// The row stays until Lore confirms, so a deletion that fails leaves the repository listed to
+	// delete again (see package deletions). A closed browser tab doesn't stop the deletion half way.
+	done := s.config.Deletions.Begin(repo.ID)
+	defer done()
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), repositoryDeleteTimeout)
+	defer cancel()
+	err = s.config.Repositories.DeleteRepository(ctx, repo.ID, token)
+	switch status.Code(err) {
+	case codes.OK, codes.NotFound:
+		// NotFound: Lore has no such repository (any more), only the row is left.
+	case codes.PermissionDenied:
+		writeError(w, http.StatusForbidden, "forbidden", "Lore refused deletion")
+		return
+	case codes.Unavailable, codes.DeadlineExceeded, codes.Canceled:
+		writeError(w, http.StatusServiceUnavailable, "lore_unavailable", "Could not reach Lore to delete the repository")
+		return
+	default:
+		writeError(w, http.StatusBadGateway, "lore_delete_failed", "Lore couldn't delete the repository: "+status.Convert(err).Message())
 		return
 	}
-	// Native deletion normally unregisters the repository through the registry callback.
-	// The store operation is idempotent when the callback has already removed it.
-	if err = s.store.DeleteRepository(r.Context(), actor.ID, repo.ID); err != nil {
+	if err = s.store.DeleteRepository(ctx, actor.ID, repo.ID); err != nil {
 		writeStoreError(w, err)
 		return
 	}

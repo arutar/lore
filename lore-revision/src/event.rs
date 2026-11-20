@@ -60,6 +60,7 @@ use crate::branch::push::LoreBranchPushRevisionPushEndEventData;
 use crate::branch::push::LoreBranchPushRevisionPushUpdateEventData;
 use crate::branch::push::LoreBranchPushRevisionUpdateBeginEventData;
 use crate::branch::push::LoreBranchPushRevisionUpdateEndEventData;
+use crate::branch::push::LoreBranchPushServerProgressEventData;
 use crate::branch::push::LoreBranchPushStatsEventData;
 use crate::branch::reset::LoreBranchResetEventData;
 use crate::commit::LoreRevisionCommitBeginEventData;
@@ -1337,6 +1338,9 @@ pub enum LoreEvent {
     RepositoryInstanceMoveBegin(LoreRepositoryInstanceMoveBeginEventData),
     /// The completion of an instance move operation.
     RepositoryInstanceMoveComplete(LoreRepositoryInstanceMoveCompleteEventData),
+    /// Progress of the remote's verification of a pushed revision. Added by this fork: it stays
+    /// last so that the event ids SDKs already know keep their values.
+    BranchPushServerProgress(LoreBranchPushServerProgressEventData),
 }
 
 /// Encodes as the event it refers to, so that a sender can encode an event it only borrows.

@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { api, isDemo, setCSRFToken } from "./api";
+import { api, isDemo, onUnauthorized, setCSRFToken } from "./api";
 import { LocaleContext, makeLocale, useLocale } from "./i18n";
 import type { GlobalSettings, PublicConfig, Repository, Session } from "./types";
 import { CopyButton, Icon, RepoTile, Avatar, ToastProvider, TopBarContext, useToast } from "./ui";
@@ -31,6 +31,16 @@ export default function App() {
   const [session, setSession] = useState<Session>({ authenticated: false });
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [failed, setFailed] = useState(false);
+  // The session ended while the page was open: every request is now refused until a new sign-in.
+  const [expired, setExpired] = useState(false);
+  useEffect(() => {
+    onUnauthorized(() => {
+      setCSRFToken(undefined);
+      setSession({ authenticated: false });
+      setExpired(true);
+    });
+    return () => onUnauthorized(null);
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -54,7 +64,7 @@ export default function App() {
 
   return <LocaleContext.Provider value={locale}>
     <ToastProvider>
-      {config ? <Shell session={session} config={config} setConfig={setConfig} />
+      {config ? <Shell session={session} config={config} setConfig={setConfig} expired={expired} />
         : <div className="boot">{failed ? <><p>{locale.t("app.unavailable")}</p><button className="btn" onClick={() => void load()}>{locale.t("app.retry")}</button></> : <p>{locale.t("app.loading")}</p>}</div>}
     </ToastProvider>
   </LocaleContext.Provider>;
@@ -68,7 +78,7 @@ function repositoryUrlFor(config: PublicConfig, repository: Repository) {
   return `${url.toString().replace(/\/$/, "")}/${repository.name.split("/").map(encodeURIComponent).join("/")}`;
 }
 
-function Shell({ session, config, setConfig }: { session: Session; config: PublicConfig; setConfig: (config: PublicConfig) => void }) {
+function Shell({ session, config, setConfig, expired }: { session: Session; config: PublicConfig; setConfig: (config: PublicConfig) => void; expired: boolean }) {
   const { t } = useLocale();
   const location = useLocation();
   const [topBar, setTopBar] = useState<TopBarState>({});
@@ -136,7 +146,7 @@ function Shell({ session, config, setConfig }: { session: Session; config: Publi
             {signinProblem && (signinProblem === "no_access" || signinProblem === "disabled") && <div className="note warn signin-note" role="alert">
               <Icon name="lock" /><span className="grow">{t(`signin.${signinProblem}` as "signin.no_access")}</span>
               <button className="btn quiet icon sm" onClick={() => setSigninProblem(null)} aria-label={t("common.close")}><Icon name="x" /></button></div>}
-            <Routes>
+            {expired ? <SessionEnded config={config} /> : <Routes>
               <Route path="/" element={<Home />} />
               <Route path="/repositories/:id" element={<RepositoryPage />} />
               <Route path="/repositories/:id/:tab" element={<RepositoryPage />} />
@@ -144,7 +154,7 @@ function Shell({ session, config, setConfig }: { session: Session; config: Publi
               <Route path="/admin/audit" element={isAdmin ? <AuditPage /> : <Navigate to="/" />} />
               <Route path="/admin/settings" element={isAdmin ? <SettingsPage /> : <Navigate to="/" />} />
               <Route path="*" element={<Navigate to="/" />} />
-            </Routes>
+            </Routes>}
           </main>
         </div>
       </div>
@@ -175,13 +185,28 @@ function DemoBar() {
   </div>;
 }
 
+/** The sign-in address that comes back to the page open now. */
+function signInHref() {
+  const back = window.location.pathname + window.location.search;
+  return back === "/" ? "/web/v1/login" : `/web/v1/login?return=${encodeURIComponent(back)}`;
+}
+
+// Shown in place of the page once the session has ended: signing in again comes back here.
+function SessionEnded({ config }: { config: PublicConfig }) {
+  const { t } = useLocale();
+  return <div className="note warn" role="alert"><Icon name="lock" /><span className="grow">{t("session.ended")}</span>
+    {config.oidcEnabled && <a className="btn primary sm" href={signInHref()}>{t("session.signInAgain")}</a>}
+    {!config.oidcEnabled && config.devAuthEnabled && <button className="btn primary sm" onClick={() => void api.devLogin().then(() => window.location.reload())}>{t("session.signInAgain")}</button>}
+  </div>;
+}
+
 function Account({ session, config }: { session: Session; config: PublicConfig }) {
   const { t } = useLocale();
   const toast = useToast();
   if (!session.authenticated || !session.user) {
     return <div className="row">
       {config.devAuthEnabled && <button className="btn sm" onClick={() => void api.devLogin().then(() => window.location.reload())}>{t("app.devSignIn")}</button>}
-      {config.oidcEnabled && <a className="btn primary sm" href="/web/v1/login">{t("app.signIn")}</a>}
+      {config.oidcEnabled && <a className="btn primary sm" href={signInHref()}>{t("app.signIn")}</a>}
     </div>;
   }
   const user = session.user;

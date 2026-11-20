@@ -1494,6 +1494,18 @@ impl Revision for GRPCRevision {
         force: bool,
         fast_forward_merge: bool,
     ) -> Result<BranchPushResponse, ProtocolError> {
+        self.branch_push_observed(branch, latest, force, fast_forward_merge, &|_| ())
+            .await
+    }
+
+    async fn branch_push_observed(
+        &self,
+        branch: BranchId,
+        latest: Hash,
+        force: bool,
+        fast_forward_merge: bool,
+        progress: &(dyn Fn(crate::types::PushVerifyProgress) + Send + Sync),
+    ) -> Result<BranchPushResponse, ProtocolError> {
         let operation_id = Context::from(rand::random::<[u8; 16]>());
         let allow_legacy = std::sync::atomic::AtomicBool::new(true);
         with_reconnect(
@@ -1509,6 +1521,7 @@ impl Revision for GRPCRevision {
                         latest,
                         force,
                         fast_forward_merge,
+                        progress,
                     )
                     .await
             },

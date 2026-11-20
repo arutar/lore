@@ -6,8 +6,20 @@
 # from public container images.
 name: PR Validate
 
+# Runs on demand, on every push to main that changes Rust code or the protocol, and before every
+# platform release (platform-release.yml calls it and publishes nothing unless it passes).
 on:
   workflow_dispatch:
+  workflow_call:
+  push:
+    branches: [main]
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "lore-proto/proto/**"
+      - "scripts/test/**"
+      - ".github/workflows/pr-validate.yml"
 
 permissions: {}
 
@@ -25,6 +37,8 @@ jobs:
   unit:
     name: unit (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    # A hung test ends the job here rather than after the six-hour runner limit.
+    timeout-minutes: 120
     permissions:
       contents: read # Check out the PR head to test it
     strategy:
@@ -77,6 +91,7 @@ jobs:
   integration:
     name: integration (linux-x86_64)
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read # Check out the PR head to test it
     steps:
@@ -139,6 +154,7 @@ jobs:
   smoke:
     name: smoke (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     permissions:
       contents: read # Check out the PR head to test it
     strategy:
