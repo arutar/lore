@@ -521,6 +521,77 @@ impl MutableStoreTrait for AwsMutableStore {
         Ok(None)
     }
 
+    fn supports_atomic_pair(&self) -> bool {
+        true
+    }
+
+    async fn compare_and_swap_pair(
+        self: Arc<Self>,
+        partition: Partition,
+        writes: [lore_storage::mutable_store::ConditionalWrite; 2],
+    ) -> Result<bool, StoreError> {
+        use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
+        use aws_sdk_dynamodb::types::Put;
+        use aws_sdk_dynamodb::types::TransactWriteItem;
+        let mut items = Vec::with_capacity(2);
+        for write in writes {
+            let entry =
+                MutableStoreEntry::new(partition.into(), Self::typed_key(write.key, write.kind))
+                    .with_value(write.value);
+            let condition = CompareAndSwapCondition::new(write.expected)?;
+            let put = Put::builder()
+                .table_name(self.mutable_store_table_name.as_ref())
+                .set_item(Some(serde_dynamo::to_item(entry).map_err(|e| {
+                    StoreError::internal_with_context(e, "encoding transaction item")
+                })?))
+                .condition_expression(condition.condition_expression)
+                .set_expression_attribute_names(Some(condition.expression_names))
+                .set_expression_attribute_values(Some(condition.expression_values))
+                .build()
+                .map_err(|e| StoreError::internal_with_context(e, "building push transaction"))?;
+            items.push(TransactWriteItem::builder().put(put).build());
+        }
+        let mut retry = lore_base::retry::retry(20, 500, 8);
+        loop {
+            match self
+                .dynamodb
+                .transact_write_items(&self.mutable_store_table_name, items.clone())
+                .await
+            {
+                Ok(_) => return Ok(true),
+                Err(AwsError::AwsSdkError(error)) => {
+                    if let Some(TransactWriteItemsError::TransactionCanceledException(cancelled)) =
+                        error.as_service_error()
+                    {
+                        let reasons = cancelled.cancellation_reasons();
+                        if reasons
+                            .iter()
+                            .any(|reason| reason.code() == Some("ConditionalCheckFailed"))
+                        {
+                            return Ok(false);
+                        }
+                        if reasons
+                            .iter()
+                            .any(|reason| reason.code() == Some("TransactionConflict"))
+                            && retry.wait().await
+                        {
+                            continue;
+                        }
+                    }
+                    return Err(StoreError::internal_with_context(
+                        error,
+                        "DynamoDB push transaction failed",
+                    ));
+                }
+                Err(error) => {
+                    return Err(StoreError::internal(format!(
+                        "DynamoDB push transaction failed: {error}"
+                    )));
+                }
+            }
+        }
+    }
+
     #[lore_macro::lore_instrument]
     #[tracing::instrument(name= "AwsMutableStore::list" skip(self))]
     async fn list(

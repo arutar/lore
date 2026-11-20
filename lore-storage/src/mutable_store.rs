@@ -12,6 +12,15 @@ use crate::local::store_lock::StoreGuard;
 use crate::store_types::KeyType;
 use crate::store_types::KeyValueStream;
 
+/// One conditional update in a branch-head and operation-receipt transaction.
+#[derive(Clone, Copy, Debug)]
+pub struct ConditionalWrite {
+    pub key: Hash,
+    pub kind: KeyType,
+    pub expected: Hash,
+    pub value: Hash,
+}
+
 #[async_trait]
 pub trait MutableStore: Send + Sync {
     /// Claims this store for the span it is about to be used — a storage handle from
@@ -82,6 +91,22 @@ pub trait MutableStore: Send + Sync {
         value: Hash,
         key_type: KeyType,
     ) -> Result<Hash, StoreError>;
+
+    /// Whether this backend can finalize a push and its receipt together.
+    fn supports_atomic_pair(&self) -> bool {
+        false
+    }
+
+    /// Change both values only if both expectations match. The keys must share
+    /// their first two routing bytes, which keeps them in one local bucket at
+    /// every fan-out level. A conditional miss leaves both entries unchanged.
+    async fn compare_and_swap_pair(
+        self: Arc<Self>,
+        _partition: Partition,
+        _writes: [ConditionalWrite; 2],
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::internal("atomic pair writes are unavailable"))
+    }
 
     /// List all the key-value pairs of a given type for the given partition.
     /// If the partition is null, it must match all partitions the user have access to

@@ -118,8 +118,8 @@ Download `lore-platform-server-<version>.tar.gz` (or `.zip`) from the
 
 ```sh
 mkdir -p /opt && cd /opt
-tar -xzf ~/lore-platform-server-0.2.6.tar.gz
-cd lore-platform-server-0.2.6
+tar -xzf ~/lore-platform-server-0.2.7.tar.gz
+cd lore-platform-server-0.2.7
 ```
 
 The bundle contains only scripts and configuration; `setup` pulls the published images
@@ -303,7 +303,7 @@ From the [Releases](../../../../releases) page:
 - **Linux:** `lore-cli-<version>-<arch>.tar.gz`:
 
   ```sh
-  tar -xzf lore-cli-0.2.6-x86_64-unknown-linux-gnu.tar.gz
+  tar -xzf lore-cli-0.2.7-x86_64-unknown-linux-gnu.tar.gz
   install -m 0755 lore ~/.local/bin/lore
   ```
 
@@ -359,7 +359,7 @@ sh restore.sh backups/20261113-020000 --yes
 Schedule backups with cron or Task Scheduler, for example nightly at 02:00:
 
 ```cron
-0 2 * * * cd /opt/lore-platform-server-0.2.6 && sh backup.sh /mnt/backup >> /var/log/lore-backup.log 2>&1
+0 2 * * * cd /opt/lore-platform-server-0.2.7 && sh backup.sh /mnt/backup >> /var/log/lore-backup.log 2>&1
 ```
 
 ## 11. Upgrade

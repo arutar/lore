@@ -5,8 +5,10 @@ name: WebUI demo on GitHub Pages
 # from the README's "Live preview".
 
 on:
-  push:
-    tags: ["platform-v*"]
+  # Pages allows deployment from main. This event runs there after the tag release.
+  workflow_run:
+    workflows: ["Platform Release"]
+    types: [completed]
   workflow_dispatch:
 
 permissions: {}
@@ -17,12 +19,14 @@ concurrency:
 
 jobs:
   build:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read # Clone the repository
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:

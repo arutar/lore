@@ -12,6 +12,7 @@ use lore_base::types::Hash;
 use lore_base::types::RepositoryId;
 use lore_proto::lore::model::v1 as model_v1;
 use lore_proto::lore::revision::v1 as revision_v1;
+use lore_proto::lore::revision::v1::branch_push_operation_service_client::BranchPushOperationServiceClient;
 use lore_proto::lore::revision::v1::revision_service_client::RevisionServiceClient;
 use tokio_stream::StreamExt;
 
@@ -32,20 +33,41 @@ use crate::types::RevisionItem;
 use crate::types::RevisionListResponse;
 use crate::types::RevisionListStart;
 
+fn retryable_push_operation(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::ResourceExhausted | tonic::Code::DeadlineExceeded
+    ) || (status.code() == tonic::Code::Cancelled
+        && status.message() == "Request handler timeout exceeded")
+}
+
+// An expired status query says nothing about the branch head. Preserve the
+// legacy handler's timeout wording only on the synchronous fallback path.
+fn push_query_error(id: Context, status: tonic::Status) -> ProtocolError {
+    if status.code() == tonic::Code::Cancelled && retryable_push_operation(&status) {
+        tonic::Status::deadline_exceeded(format!("Timed out checking push operation {id}")).into()
+    } else {
+        status.into()
+    }
+}
+
 #[derive(Clone)]
 pub struct RevisionService {
     client: RevisionServiceClient<AuthorizedService>,
+    operations: BranchPushOperationServiceClient<AuthorizedService>,
     repository: RepositoryId,
     pub request_inflight: Arc<AtomicU64>,
 }
 
 impl RevisionService {
     pub fn new(channel: Channel, repository: RepositoryId, auth: GRPCAuthRef) -> Self {
-        let client =
-            RevisionServiceClient::with_interceptor(channel, AuthzInterceptor { repository, auth });
+        let interceptor = AuthzInterceptor { repository, auth };
+        let client = RevisionServiceClient::with_interceptor(channel.clone(), interceptor.clone());
+        let operations = BranchPushOperationServiceClient::with_interceptor(channel, interceptor);
 
         Self {
             client,
+            operations,
             repository,
             request_inflight: Arc::new(AtomicU64::new(0)),
         }
@@ -226,6 +248,8 @@ impl RevisionService {
 
     pub async fn branch_push(
         &self,
+        operation_id: Context,
+        allow_legacy: &std::sync::atomic::AtomicBool,
         branch: BranchId,
         revision: Hash,
         force: bool,
@@ -234,21 +258,88 @@ impl RevisionService {
         lore_debug!("Pushing branch: {} at {}", branch, revision);
         let _ = RequestScopedCounter::new(self.request_inflight.clone());
 
+        let request = revision_v1::BranchPushRequest {
+            id: branch.into(),
+            revision_signature: revision.into(),
+            force,
+            fast_forward_merge,
+        };
+        let mut operations = self.operations.clone();
+        let start = revision_v1::StartBranchPushRequest {
+            operation_id: operation_id.into(),
+            push: Some(request.clone()),
+        };
         let mut retry = grpc_retry();
-        let response = loop {
-            let request = revision_v1::BranchPushRequest {
-                id: branch.into(),
-                revision_signature: revision.into(),
-                force,
-                fast_forward_merge,
-            };
-
-            let mut client = self.client.clone();
-            match client.branch_push(request).await {
-                Ok(response) => {
-                    break response.into_inner();
+        let started = loop {
+            match operations.start(start.clone()).await {
+                Err(status) if retryable_push_operation(&status) => {
+                    allow_legacy.store(false, std::sync::atomic::Ordering::Relaxed);
+                    if !retry.wait().await {
+                        return Err(push_query_error(operation_id, status));
+                    }
                 }
-                Err(status) => handle_error(&mut retry, status).await?,
+                result => break result,
+            }
+        };
+        let response = match started {
+            Ok(operation) => {
+                allow_legacy.store(false, std::sync::atomic::Ordering::Relaxed);
+                let mut operation = operation.into_inner();
+                let mut interval = std::time::Duration::from_millis(40);
+                loop {
+                    use revision_v1::branch_push_operation::State;
+                    match operation.state {
+                        Some(State::Accepted(result)) => break result,
+                        Some(State::Rejected(error)) => {
+                            let status = tonic::Status::with_details(
+                                tonic::Code::from_i32(error.code),
+                                error.message,
+                                error.details,
+                            );
+                            return Err(status.into());
+                        }
+                        Some(State::Processing(_)) => {
+                            tokio::time::sleep(interval).await;
+                            interval = (interval * 2).min(std::time::Duration::from_secs(1));
+                            operation = match operations
+                                .get(revision_v1::GetBranchPushOperationRequest {
+                                    operation_id: operation_id.into(),
+                                })
+                                .await
+                            {
+                                Ok(reply) => reply.into_inner(),
+                                Err(status)
+                                    if retryable_push_operation(&status) && retry.wait().await =>
+                                {
+                                    continue;
+                                }
+                                Err(status) => return Err(push_query_error(operation_id, status)),
+                            };
+                        }
+                        None => {
+                            return Err(ProtocolError::internal(
+                                "Missing branch push operation state",
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(status)
+                if status.code() == tonic::Code::Unimplemented
+                    && allow_legacy.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                let mut retry = grpc_retry();
+                loop {
+                    match self.client.clone().branch_push(request.clone()).await {
+                        Ok(response) => break response.into_inner(),
+                        Err(status) => handle_error(&mut retry, status).await?,
+                    }
+                }
+            }
+            Err(status) => {
+                // A lost Start reply may already have registered the operation.
+                allow_legacy.store(false, std::sync::atomic::Ordering::Relaxed);
+                return Err(status.into());
             }
         };
 

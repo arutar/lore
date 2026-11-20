@@ -837,6 +837,12 @@ impl GrpcServerBuilder<MaybeJwtVerifier> {
                     authorization_timeout,
                 ))
                 .add_service(Self::partition_scoped(
+                    lore_proto::lore::revision::v1::branch_push_operation_service_server::BranchPushOperationServiceServer::new(revision_v1_svc.clone()),
+                    &jwt_interceptor,
+                    &repository_authorizer,
+                    authorization_timeout,
+                ))
+                .add_service(Self::partition_scoped(
                     revision_v1_server::RevisionServiceServer::new(revision_v1_svc),
                     &jwt_interceptor,
                     &repository_authorizer,

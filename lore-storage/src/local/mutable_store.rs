@@ -2239,6 +2239,64 @@ impl crate::mutable_store::MutableStore for LocalMutableStore {
         Ok(existing_value)
     }
 
+    fn supports_atomic_pair(&self) -> bool {
+        true
+    }
+
+    async fn compare_and_swap_pair(
+        self: Arc<Self>,
+        partition: Partition,
+        writes: [crate::mutable_store::ConditionalWrite; 2],
+    ) -> Result<bool, StoreError> {
+        let keys = writes.map(|w| Key::make_typed(w.key, w.kind).hash());
+        if keys[0] == keys[1] || keys[0].data()[..2] != keys[1].data()[..2] {
+            return Err(StoreError::internal(
+                "pair must contain two distinct co-located keys",
+            ));
+        }
+        let _hold = self.hold(Intent::Write).await?;
+        let group_index = keys[0].data()[0] as usize;
+        let group = &self.group[group_index];
+        let (bucket_index, mut bucket) = group.bucket_for_write(&keys[0]).await;
+        if !bucket.deserialized
+            && let Some(path) = &self.path
+        {
+            Box::pin(bucket.deserialize(
+                path.as_ref(),
+                group_index,
+                bucket_index,
+                false,
+                self.authoritative,
+            ))
+            .await
+            .map_err(|e| StoreError::internal_with_context(e, "reading paired mutable records"))?;
+        }
+        for (key, write) in keys.iter().zip(writes) {
+            if bucket.lookup(partition, *key).0 != write.expected {
+                return Ok(false);
+            }
+        }
+        for (key, write) in keys.into_iter().zip(writes) {
+            let (_, found, slot) = bucket.lookup(partition, key);
+            if found {
+                let index = bucket.sorted_index[slot] as usize;
+                bucket.entry[index].value = write.value;
+            } else {
+                let index = bucket.entry.len() as u32;
+                bucket.sorted_index.insert(slot, index);
+                bucket.entry.push(MutableStoreEntry {
+                    partition,
+                    key,
+                    value: write.value,
+                });
+            }
+        }
+        group.dirty[bucket_index].store(true, atomic::Ordering::Relaxed);
+        drop(bucket);
+        self.clone().flush(true).await?;
+        Ok(true)
+    }
+
     async fn list(
         self: Arc<Self>,
         partition: Partition,

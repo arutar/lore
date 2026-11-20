@@ -83,6 +83,10 @@ pub async fn handler(
 
     PushReport::new(PushHandler::V1, repository_id)
         .run(execution, async move |report| {
+            report.operation = request
+                .extensions()
+                .get::<super::push_operation::Receipt>()
+                .cloned();
             let access = PushAccess::of(&authorizer, request.extensions(), repository_id).await?;
 
             let client_ip: Option<String> = extract_client_ip(&request).map(|ip| ip.to_string());

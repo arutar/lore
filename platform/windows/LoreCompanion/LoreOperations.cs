@@ -387,6 +387,7 @@ public static class LoreOperations
             await Lore.BranchPush(globals, args).Callback((loreEvent, _) =>
             {
                 LogCallback(report)(loreEvent, _);
+                if (loreEvent.Tag == LoreEventTag.BRANCH_PUSH_REVISION_PUSH_BEGIN) progress?.Invoke(new("verify"));
                 if (progress is not null && loreEvent.Tag == LoreEventTag.BRANCH_PUSH_FRAGMENT_PROGRESS)
                 {
                     var data = loreEvent.GetData<LoreBranchPushFragmentProgressEventDataFFI>();

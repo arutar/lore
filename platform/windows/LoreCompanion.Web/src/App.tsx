@@ -42,7 +42,7 @@ type Change = { path: string; change: "added" | "deleted" | "modified"; staged: 
 type ChangeFolder = { path: string; name: string; depth: number; files: number; added: number; modified: number; deleted: number; locked: number; selected: number };
 type ChangeSummary = { total: number; selected: number; eligible: number; folders: ChangeFolder[]; whole: boolean };
 type ChangePage = { folder: string; filter: string; offset: number; total: number; selected: number; items: Change[] };
-type CommitProgress = { phase: "prepare" | "commit" | "push" | "sync"; complete: number; total: number; bytes: number };
+type CommitProgress = { phase: "prepare" | "commit" | "push" | "verify" | "sync"; complete: number; total: number; bytes: number };
 type HostMessage = InitMessage
   | { type: "commit-progress"; update: CommitProgress }
   | ({ type: "changes"; items?: Change[] | null; error?: string } & Partial<ChangeSummary>)
@@ -107,7 +107,7 @@ const nameOf = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
 function CommitActivity({ update, selected }: { update: CommitProgress | null; selected: number }) {
   const phase = update?.phase ?? "prepare";
-  const label = { prepare: "Preparing files", commit: "Creating revision", push: "Sending revision", sync: "Synchronizing with server" }[phase];
+  const label = { prepare: "Preparing files", commit: "Creating revision", push: "Sending revision", verify: "Waiting for the server to verify the revision", sync: "Synchronizing with server" }[phase];
   const percent = update && update.total > 0 ? Math.min(100, Math.floor(100 * update.complete / update.total)) : null;
   return <section className="commit-activity" aria-label="Commit progress">
     <div className="summary">{selected.toLocaleString()} selected {selected === 1 ? "file" : "files"}</div>

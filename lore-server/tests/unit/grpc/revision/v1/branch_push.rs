@@ -1210,3 +1210,146 @@ mod handler {
         .await;
     }
 }
+
+#[tokio::test]
+async fn replayed_push_returns_its_receipt_after_a_subsequent_push() {
+    use std::time::Duration;
+
+    use lore_proto::lore::revision::v1 as rpc;
+    use lore_server::grpc::revision::v1::service::LoreRevisionV1Service;
+    use rpc::branch_push_operation::State;
+    use rpc::branch_push_operation_service_server::BranchPushOperationService;
+
+    // Hold verification past the request deadline and release it from the client.
+    // This also checks that the worker outlives the completed Start RPC.
+    struct VerificationGate(Arc<tokio::sync::Semaphore>);
+    #[async_trait::async_trait]
+    impl lore_server::hooks::Hook for VerificationGate {
+        fn name(&self) -> &'static str {
+            "verification-gate"
+        }
+        fn hook_points(&self) -> &'static [lore_server::hooks::HookPoint] {
+            &[lore_server::hooks::HookPoint::BranchPush]
+        }
+        async fn pre_handler(
+            &self,
+            _: &lore_server::hooks::HookContext,
+        ) -> Result<(), lore_server::hooks::HookError> {
+            let _permit = self.0.acquire().await.unwrap();
+            Ok(())
+        }
+    }
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let hooks = HookDispatcher::new(
+        vec![("gate".into(), Box::new(VerificationGate(gate.clone())))],
+        Duration::from_secs(15),
+        Duration::from_secs(15),
+    );
+    let rpc_timeout = Duration::from_secs(2);
+    let (immutable, mutable, execution) = test_store_create().await.unwrap();
+    let repository = random::<RepositoryId>();
+    let mut notifications = MockNotificationSender::new();
+    notifications
+        .expect_branch_pushed()
+        .times(2)
+        .returning(|_, _, _, _, _| ());
+    let service = LoreRevisionV1Service::new(
+        immutable.clone(),
+        mutable.clone(),
+        Arc::new(notifications),
+        Arc::new(hooks),
+        allow_all(),
+        DEFAULT_HISTORY_STEP_SIZE,
+        Default::default(),
+        None,
+        rpc_timeout,
+        std::num::NonZeroUsize::MIN,
+    );
+
+    let verify = async {
+        let repo = Arc::new(RepositoryContext::new_server_context(
+            immutable, mutable, repository,
+        ));
+        let branch = create_root_branch(&repo, "main").await;
+        let first = build_revision(&repo, Hash::default(), 1).await;
+        let second = build_revision(&repo, first, 2).await;
+        let id: bytes::Bytes = uuid::Uuid::now_v7().as_bytes().to_vec().into();
+        let start = |id: bytes::Bytes, hash| {
+            make_request(repository, branch, hash, false, false).map(|push| {
+                rpc::StartBranchPushRequest {
+                    operation_id: id,
+                    push: Some(push),
+                }
+            })
+        };
+        for (operation_id, revision) in [
+            (id.clone(), first),
+            (uuid::Uuid::now_v7().as_bytes().to_vec().into(), second),
+        ] {
+            service
+                .start(start(operation_id.clone(), revision))
+                .await
+                .unwrap();
+            if revision == first {
+                tokio::time::sleep(rpc_timeout + Duration::from_millis(50)).await;
+                let query = make_request(repository, branch, first, false, false).map(|_| {
+                    rpc::GetBranchPushOperationRequest {
+                        operation_id: operation_id.clone(),
+                    }
+                });
+                assert!(matches!(
+                    service.get(query).await.unwrap().into_inner().state,
+                    Some(State::Processing(_))
+                ));
+                gate.add_permits(1);
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let request =
+                        make_request(repository, branch, revision, false, false).map(|_| {
+                            rpc::GetBranchPushOperationRequest {
+                                operation_id: operation_id.clone(),
+                            }
+                        });
+                    match service.get(request).await.unwrap().into_inner().state {
+                        Some(State::Processing(_)) => {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                        Some(State::Accepted(result)) => {
+                            assert_eq!(Hash::from(result.revision_signature), revision);
+                            break;
+                        }
+                        state => panic!("unexpected operation state: {state:?}"),
+                    }
+                }
+            })
+            .await
+            .expect("push completed");
+        }
+        let mut other_user = make_request(repository, branch, first, false, false).map(|_| {
+            rpc::GetBranchPushOperationRequest {
+                operation_id: id.clone(),
+            }
+        });
+        other_user.extensions_mut().insert(AuthorizationToken {
+            user_id: "another-user".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            service.get(other_user).await.unwrap_err().code(),
+            tonic::Code::NotFound
+        );
+        let replay = service
+            .start(start(id.clone(), first))
+            .await
+            .unwrap()
+            .into_inner()
+            .state;
+        assert!(
+            matches!(replay, Some(State::Accepted(result)) if Hash::from(result.revision_signature.clone()) == first)
+        );
+        let error = service.start(start(id, second)).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::AlreadyExists);
+    };
+    Box::pin(LORE_CONTEXT.scope(execution, verify)).await;
+}

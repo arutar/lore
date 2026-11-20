@@ -3170,3 +3170,83 @@ async fn list_finds_typed_entries_at_each_fan_out_level() {
         }
     }
 }
+
+#[tokio::test]
+async fn paired_branch_and_receipt_require_both_expected_values_and_survive_reopen() {
+    use lore_storage::mutable_store::ConditionalWrite;
+    use lore_storage::mutable_store::MutableStore;
+
+    let dir = lore_base::test_util::TempDir::new("ms_push_receipt_");
+    let open = || async {
+        Arc::new(
+            LocalMutableStore::new(
+                Some(dir.path()),
+                client_settings(),
+                make_in_memory_immutable().await,
+            )
+            .await
+            .expect("open persistent store"),
+        )
+    };
+    let store = open().await;
+    let partition = Partition::default();
+    let key = Hash::hash_buffer(b"same bucket");
+    let head = ConditionalWrite {
+        key,
+        kind: KeyType::BranchLatestPointer,
+        expected: Hash::default(),
+        value: Hash::from_u64(1),
+    };
+    let receipt = ConditionalWrite {
+        key,
+        kind: KeyType::PushJournal,
+        expected: Hash::default(),
+        value: Hash::from_u64(2),
+    };
+    assert!(
+        store
+            .clone()
+            .compare_and_swap_pair(partition, [head, receipt])
+            .await
+            .unwrap()
+    );
+    for (expected_head, expected_receipt) in [
+        (head.value, Hash::default()),
+        (Hash::default(), receipt.value),
+    ] {
+        assert!(
+            !store
+                .clone()
+                .compare_and_swap_pair(
+                    partition,
+                    [
+                        ConditionalWrite {
+                            expected: expected_head,
+                            value: Hash::from_u64(3),
+                            ..head
+                        },
+                        ConditionalWrite {
+                            expected: expected_receipt,
+                            value: Hash::from_u64(4),
+                            ..receipt
+                        },
+                    ]
+                )
+                .await
+                .unwrap()
+        );
+    }
+    drop(store);
+    let reopened = open().await;
+    for write in [head, receipt] {
+        assert_eq!(
+            reopened
+                .clone()
+                .load(partition, key, write.kind)
+                .await
+                .unwrap(),
+            write.value
+        );
+    }
+    assert!(KeyType::try_from(KeyType::PushJournal as u8).is_err());
+}

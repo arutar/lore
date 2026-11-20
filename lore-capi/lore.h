@@ -290,6 +290,9 @@ typedef enum lore_key_type_t {
   // because this is the only one they operate on; a publish large enough to fragment falls
   // back to an ordinary mutable store write, which does carry it like any other type.
   LORE_KEY_TYPE_RESOLVE = 7,
+  // Internal push journal. Raw storage RPCs must never decode this type
+  // from an untrusted integer (see `TryFrom` below).
+  LORE_KEY_TYPE_PUSH_JOURNAL = 8,
 } lore_key_type_t;
 
 // The change staged on a node for the next revision. `None` is a node the

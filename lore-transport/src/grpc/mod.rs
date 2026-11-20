@@ -1494,13 +1494,22 @@ impl Revision for GRPCRevision {
         force: bool,
         fast_forward_merge: bool,
     ) -> Result<BranchPushResponse, ProtocolError> {
+        let operation_id = Context::from(rand::random::<[u8; 16]>());
+        let allow_legacy = std::sync::atomic::AtomicBool::new(true);
         with_reconnect(
             &self.connection,
             || async {
                 self.client
                     .read()
                     .await
-                    .branch_push(branch, latest, force, fast_forward_merge)
+                    .branch_push(
+                        operation_id,
+                        &allow_legacy,
+                        branch,
+                        latest,
+                        force,
+                        fast_forward_merge,
+                    )
                     .await
             },
             |reconnect_id| self.reconnect(reconnect_id),

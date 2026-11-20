@@ -931,7 +931,7 @@ pub fn handle_branch_push(globals: LoreGlobalArgs, args: &BranchPushArgs) -> u8 
             LoreEvent::BranchPushRevisionPushBegin(data)
                 if data.local_revision != data.remote_revision => {
                     println!(
-                        "Pushing {} to branch {}",
+                        "Waiting for the server to verify {} for branch {}",
                         data.local_revision,
                         name_of(data.repository, data.branch)
                     );

@@ -154,6 +154,10 @@ someone else holds a lock on is refused, whichever client sent it.
 away their access at the next check; their commits and history stay as they are. Locks they still
 hold are marked *can't sign in* on the Locks tab, where a repository owner can release them.
 
+When a push finishes uploading, Windows Companion and the CLI show the server verification phase.
+With a 0.2.7 or later server and client, the client polls the result of that specific push. It can
+still confirm the revision after a connection drops or another user advances the branch.
+
 ## Quick start
 
 You need a host with Docker (Docker Engine with Compose v2 on Linux, Docker Desktop on Windows),
@@ -164,7 +168,7 @@ You need a host with Docker (Docker Engine with Compose v2 on Linux, Docker Desk
 
 ```sh
 # 1. Unpack the bundle
-tar -xzf lore-platform-server-0.2.6.tar.gz && cd lore-platform-server-0.2.6
+tar -xzf lore-platform-server-0.2.7.tar.gz && cd lore-platform-server-0.2.7
 
 # 2. Run setup with the name your users will type; keep the data outside the bundle
 LORE_DATA_ROOT=/srv/lore-data LORE_PUBLIC_HOST=lore.corp.local sh setup.sh
@@ -186,8 +190,8 @@ In PowerShell, as the user that runs Docker Desktop:
 
 ```powershell
 # 1. Unpack the bundle
-Expand-Archive lore-platform-server-0.2.6.zip -DestinationPath C:\lore
-cd C:\lore\lore-platform-server-0.2.6
+Expand-Archive lore-platform-server-0.2.7.zip -DestinationPath C:\lore
+cd C:\lore\lore-platform-server-0.2.7
 
 # 2. Run setup with the name your users will type; keep the data outside the bundle
 $env:LORE_DATA_ROOT = "D:\lore-data"

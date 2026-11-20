@@ -57,7 +57,7 @@ pub struct RevisionListInstruments {
 /// namespace. Standalone so the constructor can mint histograms before
 /// `LoreRevisionV1Service` exists.
 #[derive(Clone)]
-struct RevisionServiceInstrumentProvider;
+pub(super) struct RevisionServiceInstrumentProvider;
 
 impl InstrumentProvider for RevisionServiceInstrumentProvider {
     fn namespace(&self) -> &'static str {
@@ -74,14 +74,15 @@ pub struct LoreRevisionV1Service {
     mutable_store: Arc<dyn lore_storage::MutableStore>,
     notification: Arc<dyn NotificationSender>,
     hook_dispatcher: Arc<HookDispatcher>,
-    repository_authorizer: Arc<dyn RepositoryAuthorizer>,
+    pub(super) repository_authorizer: Arc<dyn RepositoryAuthorizer>,
     history_step_size: u64,
-    acceleration: crate::grpc::server::RevisionListAcceleration,
+    pub(super) acceleration: crate::grpc::server::RevisionListAcceleration,
     forwarded_requests: Option<Arc<dyn ForwardedRequests>>,
-    rpc_timeout: Duration,
+    pub(super) rpc_timeout: Duration,
     branch_list_concurrency: NonZeroUsize,
-    instrument_provider: RevisionServiceInstrumentProvider,
+    pub(super) instrument_provider: RevisionServiceInstrumentProvider,
     revision_list_instruments: RevisionListInstruments,
+    pub(super) push_workers: Arc<super::push_operation::Workers>,
 }
 
 impl LoreRevisionV1Service {
@@ -131,6 +132,7 @@ impl LoreRevisionV1Service {
             rpc_timeout,
             branch_list_concurrency,
             instrument_provider,
+            push_workers: Arc::default(),
             revision_list_instruments,
         }
     }

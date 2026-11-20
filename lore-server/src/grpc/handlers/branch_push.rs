@@ -297,6 +297,7 @@ impl PushOutcome {
 /// verification makes, recorded once when dropped, so a push cancelled part-way still reports
 /// what it did and the phase it was in.
 pub struct PushReport {
+    pub(crate) operation: Option<crate::grpc::revision::v1::push_operation::Receipt>,
     handler: PushHandler,
     repository: RepositoryId,
     target: Option<(BranchId, Hash)>,
@@ -363,6 +364,7 @@ impl PushReport {
             handler,
             repository,
             target: None,
+            operation: None,
             started: now,
             phase: PushPhase::Prepare,
             phase_started: now,
@@ -1314,12 +1316,25 @@ async fn store_new_head(
 
     loop {
         report.store_latest_attempts += 1;
-        let previous_head = try_store_latest(repository.clone(), branch, current, new_head)
-            .await
-            .filter_slow_down()?
-            .warn_map_err(|err| {
-                Status::internal(format!("Failed to store new latest pointer: {err}"))
-            })?;
+        let previous_head = if let Some(receipt) = &report.operation {
+            receipt
+                .commit(
+                    repository.clone(),
+                    branch,
+                    current,
+                    new_head,
+                    incoming.revision_number(),
+                    false,
+                )
+                .await?
+        } else {
+            try_store_latest(repository.clone(), branch, current, new_head)
+                .await
+                .filter_slow_down()?
+                .warn_map_err(|err| {
+                    Status::internal(format!("Failed to store new latest pointer: {err}"))
+                })?
+        };
 
         if previous_head == current {
             store_history_step(
@@ -1531,13 +1546,25 @@ async fn try_fast_forward_merge(
         // CAS: attempt to set the new revision as branch head
         report.enter(PushPhase::Commit);
         report.store_latest_attempts += 1;
-        let previous_head =
+        let previous_head = if let Some(receipt) = &report.operation {
+            receipt
+                .commit(
+                    repository.clone(),
+                    branch,
+                    current_head,
+                    new_revision,
+                    revision_number,
+                    true,
+                )
+                .await?
+        } else {
             try_store_latest(repository.clone(), branch, current_head, new_revision)
                 .await
                 .filter_slow_down()?
                 .warn_map_err(|err| {
                     Status::internal(format!("Failed to store fast-forward merge latest: {err}"))
-                })?;
+                })?
+        };
 
         if previous_head == current_head {
             // CAS succeeded

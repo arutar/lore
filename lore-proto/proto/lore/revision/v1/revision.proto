@@ -30,6 +30,44 @@ service RevisionService {
   rpc RevisionList     (RevisionListRequest)      returns (RevisionListResponse);
 }
 
+// Long-running finalization of uploaded fragments. Clients fall back to
+// RevisionService.BranchPush only when Start returns UNIMPLEMENTED.
+service BranchPushOperationService {
+  // Returns once the operation is durably registered. Repeating the same
+  // request returns its current status. Reusing its id with a different
+  // push returns ALREADY_EXISTS. The worker outlives the initiating RPC.
+  rpc Start(StartBranchPushRequest) returns (BranchPushOperation);
+  // Uses the same repository and caller scope as Start. Losing a transport
+  // response is not a terminal rejection of the operation.
+  rpc Get(GetBranchPushOperationRequest) returns (BranchPushOperation);
+}
+
+message StartBranchPushRequest {
+  // Client-generated 16-byte operation id, retained across retries.
+  bytes operation_id = 1;
+  BranchPushRequest push = 2;
+}
+
+message GetBranchPushOperationRequest {
+  bytes operation_id = 1;
+}
+
+message BranchPushOperation {
+  message Processing {}
+  message Rejected {
+    // Canonical gRPC status, including the binary details used for missing
+    // fragments so existing client-side recovery can handle the refusal.
+    int32 code = 1;
+    string message = 2;
+    bytes details = 3;
+  }
+  oneof state {
+    Processing processing = 1;
+    BranchPushResponse accepted = 2;
+    Rejected rejected = 3;
+  }
+}
+
 // Request to create a new branch. The caller must supply a fully-resolved
 // ancestry stack (no `number == 0` tip resolution is performed for
 // BranchCreate). The caller also pre-generates the branch `id` so that
