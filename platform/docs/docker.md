@@ -207,7 +207,7 @@ key) and never leaves a half-written one behind (`NAME.partial` until it's compl
 Nightly at 02:00:
 
 ```cron
-0 2 * * * cd /opt/lore-platform-server-0.2.8 && sh backup.sh /mnt/backup >> /var/log/lore-backup.log 2>&1
+0 2 * * * cd /opt/lore-platform-server-0.2.9 && sh backup.sh /mnt/backup >> /var/log/lore-backup.log 2>&1
 ```
 
 ## restore.sh / restore.ps1
@@ -350,7 +350,7 @@ To make your own bundle that points at your own registry:
 
 ```sh
 bash platform/deploy/make-bundle.sh VERSION IMAGE_PREFIX OUTPUT_DIR
-bash platform/deploy/make-bundle.sh 0.2.8 registry.corp.local/lore ./dist
+bash platform/deploy/make-bundle.sh 0.2.9 registry.corp.local/lore ./dist
 ```
 
 The images: `docker build -f platform/Dockerfile .` (control plane and WebUI) and
