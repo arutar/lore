@@ -762,9 +762,6 @@ mod tests {
     }
 
     /// No mode to record where the filesystem records none.
-    #[cfg(not(unix))]
-    async fn mode_changes_are_recorded(_fixture: &Fixture, _tree: &Tree, _seed: u64) {}
-
     /// Every generated tree, under every view pair, carries the set one view materializes to the
     /// set the other does -- and emits no record that was not the working tree's to take.
     ///
@@ -783,6 +780,7 @@ mod tests {
                 .spawn(LORE_CONTEXT.scope(execution, async move {
                     let (tree, mut rng) = Tree::drawn(seed);
                     let fixture = Fixture::build(immutable_store, mutable_store, &tree).await;
+                    #[cfg(unix)]
                     mode_changes_are_recorded(&fixture, &tree, seed).await;
                     let mut moved = 0;
 

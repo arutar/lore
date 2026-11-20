@@ -156,7 +156,7 @@ impl FileLockStore {
         })
         .map_err(|err| LockError::internal(format!("Can't encode the locks: {err}")))?;
         let path = self.path.clone();
-        tokio::task::spawn_blocking(move || write_atomically(&path, &bytes))
+        lore_base::lore_spawn_blocking_nocontext!(move || write_atomically(&path, &bytes))
             .await
             .map_err(|err| LockError::internal(format!("Writing the lock file stopped: {err}")))?
             .map_err(|err| {
@@ -350,7 +350,7 @@ impl LockStore for FileLockStore {
 pub struct FileLockStorePluginFactory;
 
 impl FileLockStorePluginFactory {
-    fn config(&self, config: &toml::Value) -> Result<FileLockStoreConfig, PluginError> {
+    fn config(config: &toml::Value) -> Result<FileLockStoreConfig, PluginError> {
         config.clone().try_into().map_err(|err| {
             PluginError::from(PluginConfigError {
                 plugin_name: PLUGIN_NAME.to_string(),
@@ -366,11 +366,11 @@ impl LockStorePluginFactory for FileLockStorePluginFactory {
     }
 
     fn validate_config(&self, config: &toml::Value) -> Result<(), PluginError> {
-        self.config(config).map(|_| ())
+        Self::config(config).map(|_| ())
     }
 
     fn create(&self, config: &toml::Value) -> Result<Arc<dyn LockStore>, PluginError> {
-        let config = self.config(config)?;
+        let config = Self::config(config)?;
         let store = FileLockStore::open(config.path).map_err(|message| {
             PluginError::from(PluginInitError {
                 plugin_name: PLUGIN_NAME.to_string(),

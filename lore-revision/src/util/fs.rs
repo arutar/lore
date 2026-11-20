@@ -52,6 +52,7 @@ pub async fn metadata_set_executable(
 
 /// Does nothing: Windows has no executable bit.
 #[cfg(target_family = "windows")]
+#[allow(clippy::unused_async)] // Matches the Unix implementation used by common callers.
 pub async fn set_executable(
     _path: impl AsRef<Path>,
     _metadata: Option<&Metadata>,

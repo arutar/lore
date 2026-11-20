@@ -165,7 +165,7 @@ async fn concurrent_lockers_each_get_their_own_files_and_one_wins_a_shared_one()
     let mut tasks = Vec::new();
     for user in 0..50 {
         let store = store.clone();
-        tasks.push(tokio::spawn(async move {
+        tasks.push(lore_base::lore_spawn!(async move {
             let own = store
                 .lock_resources(
                     &format!("user{user}"),

@@ -425,8 +425,8 @@ async fn create_feature_branch(
     .await
 }
 
-async fn with_execution<F: Future>(body: F) -> F::Output {
-    LORE_CONTEXT.scope(setup_test_execution(), body).await
+fn with_execution<F: Future>(body: F) -> std::pin::Pin<Box<impl Future<Output = F::Output>>> {
+    Box::pin(LORE_CONTEXT.scope(setup_test_execution(), body))
 }
 
 /// A revision's state the instance does not hold is read from the remote, whose refusal is the

@@ -26,6 +26,7 @@ mod format_bytes_tests {
     }
 }
 
+#[cfg(unix)]
 mod termination_signal_tests {
     use std::time::Duration;
 
@@ -34,7 +35,6 @@ mod termination_signal_tests {
     /// What registering ahead of the socket relies on: the handler is what holds
     /// a signal, so one delivered between registering and waiting reaches the
     /// wait rather than ending the process.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_signal_delivered_before_the_wait_still_ends_it() {
         let mut signals = TerminationSignals::register().expect("the handlers must register");

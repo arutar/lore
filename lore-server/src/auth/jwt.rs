@@ -268,7 +268,6 @@ impl ExchangeIssuer {
         let jwk_service = JwkServiceImpl::with_issuers(
             JWKServiceSettings {
                 endpoint: jwks_endpoint.map(str::to_owned),
-                ..Default::default()
             },
             Some(std::slice::from_ref(&issuer)),
         )?;

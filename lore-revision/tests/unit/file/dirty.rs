@@ -4,11 +4,13 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::atomic::Ordering;
 
 use lore_base::runtime::LORE_CONTEXT;
 use lore_revision::file::dirty::*;
 use lore_revision::filter::Filter;
+#[cfg(unix)]
 use lore_revision::filter::FilterStates;
 use lore_revision::node::Node;
 use lore_revision::node::NodeFlags;

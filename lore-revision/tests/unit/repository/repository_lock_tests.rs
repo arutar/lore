@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use lore_revision::repository::*;
 use lore_storage::ImmutableStore;
+#[cfg(unix)]
 use lore_storage::local::immutable_store::ImmutableStoreCreateOptions;
 
 /// **A caller that joins a cached repository lock keeps its own store claims.**
