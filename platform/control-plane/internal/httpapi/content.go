@@ -110,6 +110,47 @@ func (s *Server) repositoryHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// revisionChanges lists, a page at a time, the files a revision changed against its parent.
+// kind keeps one kind of change and q the paths containing it, so that a filter covers the
+// whole revision rather than the page the browser has.
+func (s *Server) revisionChanges(w http.ResponseWriter, r *http.Request) {
+	content := s.repositoryContent(w, r)
+	if content == nil {
+		return
+	}
+	query := r.URL.Query()
+	kind := query.Get("kind")
+	switch kind {
+	case "", loreclient.ChangeAdded, loreclient.ChangeModified, loreclient.ChangeDeleted, loreclient.ChangeMoved, loreclient.ChangeCopied:
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_kind", "Unknown kind of change")
+		return
+	}
+	limit, _ := strconv.Atoi(query.Get("limit"))
+	result, err := content.Changes(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "revision"),
+		loreclient.ChangeFilter{Kind: kind, Query: strings.TrimSpace(query.Get("q"))}, query.Get("cursor"), limit)
+	if err != nil {
+		writeRepositoryContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// revisionSummary counts a revision's changes by kind. It reads the whole revision, so the
+// WebUI asks for it beside the first page instead of before it.
+func (s *Server) revisionSummary(w http.ResponseWriter, r *http.Request) {
+	content := s.repositoryContent(w, r)
+	if content == nil {
+		return
+	}
+	result, err := content.ChangeSummary(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "revision"))
+	if err != nil {
+		writeRepositoryContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func accountName(user model.User) string {
 	if strings.HasPrefix(user.Username, "service-account-") {
 		return "Lore service (automation)"

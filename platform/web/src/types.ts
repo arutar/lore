@@ -161,6 +161,25 @@ export interface Revision {
   committedAt: string;
 }
 
+export type ChangeKind = "added" | "modified" | "deleted" | "moved" | "copied";
+
+/** A file a revision changed against its parent; `from` is a moved or copied file's old path. */
+export interface RevisionChange {
+  kind: ChangeKind;
+  path: string;
+  from?: string;
+}
+
+export interface ChangeSummary {
+  parent?: string;
+  added: number;
+  modified: number;
+  deleted: number;
+  moved: number;
+  copied: number;
+  total: number;
+}
+
 export interface RepositoryLock {
   branchId: string;
   path: string;

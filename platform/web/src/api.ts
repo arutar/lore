@@ -1,5 +1,5 @@
 import { demoApi } from "./demo/api";
-import type { AccessEntry, ADUser, Members, AuditEvent, BulkResult, GlobalSettings, Grant, GrantSubject, LabeledGrant, Page, PublicConfig, Repository, RepositoryLock, RepositoryTree, Revision, Role, Session, User } from "./types";
+import type { AccessEntry, ADUser, Members, AuditEvent, BulkResult, ChangeKind, ChangeSummary, GlobalSettings, Grant, GrantSubject, LabeledGrant, Page, PublicConfig, Repository, RepositoryLock, RepositoryTree, Revision, RevisionChange, Role, Session, User } from "./types";
 
 let csrfToken = "";
 
@@ -58,6 +58,10 @@ const serverApi = {
   repository: (id: string) => request<Repository>(`/repositories/${id}`),
   tree: (id: string, path = "", revision = "") => request<RepositoryTree>(`/repositories/${id}/tree?${query({ path, revision })}`),
   history: (id: string, cursor = "") => request<Page<Revision>>(`/repositories/${id}/history?${query({ cursor })}`),
+  // A revision's changed files, a page at a time; kind and q filter the whole revision.
+  changes: (id: string, revision: string, filter: { kind?: ChangeKind; q?: string; cursor?: string; limit?: number }, signal?: AbortSignal) =>
+    request<Page<RevisionChange>>(`/repositories/${id}/revisions/${revision}/changes?${query({ kind: filter.kind, q: filter.q, cursor: filter.cursor, limit: filter.limit })}`, { signal }),
+  changeSummary: (id: string, revision: string, signal?: AbortSignal) => request<ChangeSummary>(`/repositories/${id}/revisions/${revision}/summary`, { signal }),
   locks: (id: string) => request<{ items: RepositoryLock[]; canRelease: boolean }>(`/repositories/${id}/locks`),
   releaseLock: (id: string, lock: RepositoryLock) => request<void>(`/repositories/${id}/locks/release`, { method: "POST", body: JSON.stringify({ branchId: lock.branchId, hash: lock.hash }) }),
   downloadUrl: (id: string, path: string, revision: string) => `/web/v1/repositories/${id}/download?${query({ path, revision })}`,

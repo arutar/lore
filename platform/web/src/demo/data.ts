@@ -1,7 +1,7 @@
 // Fictional data for the read-only demo (npm run build:demo). Nothing here comes from a real
 // installation: the studio, people, groups and files are invented. Times are relative to when the
 // page is opened, so the demo always looks recently used.
-import type { AccessEntry, AuditEvent, LabeledGrant, LastChange, Members, PublicConfig, Repository, RepositoryLock, Revision, TreeNode, User } from "../types";
+import type { AccessEntry, AuditEvent, LabeledGrant, LastChange, Members, PublicConfig, Repository, RepositoryLock, Revision, RevisionChange, TreeNode, User } from "../types";
 
 const now = Date.now();
 const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString();
@@ -193,6 +193,29 @@ export function tree(id: string, path: string): TreeNode[] | undefined {
     entries.set(folder, { path: folder, type: "directory", size: 0, mode: 0o755, executable: false, lastChange: newer ? change : existing?.lastChange });
   }
   return [...entries.values()];
+}
+
+/** What revision `signature` changed: the files it last changed (all of them added in the first
+ * revision), a moved and a deleted file in the newest one, and a long list of new textures in any
+ * revision about textures, so the panel has something to scroll. */
+export function changes(id: string, signature: string): RevisionChange[] | undefined {
+  const current = spec(id);
+  const list = revisions(id);
+  const index = list.findIndex((revision) => revision.signature === signature);
+  if (!current || index < 0) return undefined;
+  const first = index === list.length - 1;
+  const result: RevisionChange[] = current.files.filter(([, , newest]) => newest === index + 1 || first)
+    .map(([path]) => ({ kind: first ? "added" : "modified", path }));
+  if (index === 0 && !first) {
+    const [path] = current.files[0] ?? ["readme.txt"];
+    const slash = path.lastIndexOf("/");
+    result.push({ kind: "moved", path: `${path.slice(0, slash + 1)}archive/${path.slice(slash + 1)}`, from: `${path.slice(0, slash + 1)}old/${path.slice(slash + 1)}` });
+    result.push({ kind: "deleted", path: `${path.slice(0, slash + 1)}obsolete_backup.bin` });
+  }
+  if (/texture/i.test(list[index].message)) {
+    for (let n = 1; n <= 1500; n++) result.push({ kind: "added", path: `Art/Textures/Batch${String(Math.ceil(n / 100)).padStart(2, "0")}/tex_${String(n).padStart(4, "0")}.png` });
+  }
+  return result;
 }
 
 export function locks(id: string): RepositoryLock[] {

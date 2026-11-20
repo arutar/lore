@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/arutar/lore/platform/control-plane/internal/loreclient"
 	"github.com/arutar/lore/platform/control-plane/internal/model"
 	"github.com/arutar/lore/platform/control-plane/internal/store"
@@ -18,6 +21,23 @@ import (
 type fakeRepositoryContent struct {
 	calls    int
 	released []string
+	filter   loreclient.ChangeFilter
+	cursor   string
+	limit    int
+}
+
+func (f *fakeRepositoryContent) Changes(_ context.Context, _ string, revision string, filter loreclient.ChangeFilter, cursor string, limit int) (loreclient.ChangePage, error) {
+	f.calls++
+	f.filter, f.cursor, f.limit = filter, cursor, limit
+	if revision != "abc123" {
+		return loreclient.ChangePage{}, status.Error(codes.NotFound, "no such revision")
+	}
+	return loreclient.ChangePage{Items: []loreclient.Change{{Kind: loreclient.ChangeDeleted, Path: "Art/old.png"}}, NextCursor: "500"}, nil
+}
+
+func (f *fakeRepositoryContent) ChangeSummary(context.Context, string, string) (loreclient.ChangeSummary, error) {
+	f.calls++
+	return loreclient.ChangeSummary{Parent: "parent", Deleted: 1, Total: 1}, nil
 }
 
 func (f *fakeRepositoryContent) LastChanges(_ context.Context, _ string, head string, paths []string) (map[string]loreclient.LastChange, error) {
@@ -162,4 +182,44 @@ func TestAccountNameUsesHumanIdentity(t *testing.T) {
 func fmtJSON(value any) string {
 	encoded, _ := json.Marshal(value)
 	return string(encoded)
+}
+
+func TestRevisionChangesFilterTheWholeRevision(t *testing.T) {
+	storage := store.NewMemory()
+	auth, err := NewAuthenticator(context.Background(), storage, AuthConfig{SessionTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := &fakeRepositoryContent{}
+	handler := NewServer(storage, auth, Config{Content: content, DevAuth: true, DevUser: model.User{ID: "admin", Username: "admin", Role: model.RoleAdmin}})
+	client := &testClient{t: t, handler: handler}
+	client.login()
+	_, public := client.request(http.MethodPost, "/web/v1/admin/repositories", map[string]any{"name": "public", "public": true}, true)
+	_, private := client.request(http.MethodPost, "/web/v1/admin/repositories", map[string]any{"name": "private"}, true)
+	anonymous := &testClient{t: t, handler: handler}
+	base := "/web/v1/repositories/" + public["id"].(string) + "/revisions/abc123"
+
+	code, page := anonymous.request(http.MethodGet, base+"/changes?kind=deleted&q=%20old%20&cursor=500&limit=200", nil, false)
+	if code != http.StatusOK || page["nextCursor"] != "500" {
+		t.Fatalf("changes status = %d, body = %v", code, page)
+	}
+	if item := page["items"].([]any)[0].(map[string]any); item["kind"] != "deleted" || item["path"] != "Art/old.png" {
+		t.Fatalf("change = %v", item)
+	}
+	if content.filter != (loreclient.ChangeFilter{Kind: "deleted", Query: "old"}) || content.cursor != "500" || content.limit != 200 {
+		t.Fatalf("passed filter %+v, cursor %q, limit %d", content.filter, content.cursor, content.limit)
+	}
+	if code, summary := anonymous.request(http.MethodGet, base+"/summary", nil, false); code != http.StatusOK || summary["deleted"] != float64(1) || summary["parent"] != "parent" {
+		t.Fatalf("summary status = %d, body = %v", code, summary)
+	}
+	if code, _ := anonymous.request(http.MethodGet, base+"/changes?kind=renamed", nil, false); code != http.StatusBadRequest {
+		t.Fatalf("unknown kind status = %d", code)
+	}
+	if code, _ := anonymous.request(http.MethodGet, "/web/v1/repositories/"+public["id"].(string)+"/revisions/gone/changes", nil, false); code != http.StatusNotFound {
+		t.Fatalf("unknown revision status = %d", code)
+	}
+	calls := content.calls
+	if code, _ := anonymous.request(http.MethodGet, "/web/v1/repositories/"+private["id"].(string)+"/revisions/abc123/changes", nil, false); code != http.StatusNotFound || content.calls != calls {
+		t.Fatalf("private changes status = %d, content read = %v", code, content.calls != calls)
+	}
 }

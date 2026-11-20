@@ -31,6 +31,8 @@ type Client struct {
 	tokens       oauth2.TokenSource
 	// lastChanges holds a *changeIndex per repository (see lastchange.go).
 	lastChanges sync.Map
+	// summaries holds counted revision changes (see changes.go).
+	summaries summaryCache
 }
 
 func New(config Config) (*Client, error) {

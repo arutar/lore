@@ -24,6 +24,8 @@ type RepositoryManager interface {
 type RepositoryContent interface {
 	Tree(ctx context.Context, repositoryID, revision, path string) (loreclient.RepositoryTree, error)
 	History(ctx context.Context, repositoryID, cursor string) (loreclient.HistoryPage, error)
+	Changes(ctx context.Context, repositoryID, revision string, filter loreclient.ChangeFilter, cursor string, limit int) (loreclient.ChangePage, error)
+	ChangeSummary(ctx context.Context, repositoryID, revision string) (loreclient.ChangeSummary, error)
 	Locks(ctx context.Context, repositoryID string) ([]loreclient.RepositoryLock, error)
 	Download(ctx context.Context, repositoryID, revision, path string) (*loreclient.Download, error)
 	LastChanges(ctx context.Context, repositoryID, head string, paths []string) (map[string]loreclient.LastChange, error)
@@ -104,6 +106,8 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 		router.Get("/repositories/{id}", server.repository)
 		router.Get("/repositories/{id}/tree", server.repositoryTree)
 		router.Get("/repositories/{id}/history", server.repositoryHistory)
+		router.Get("/repositories/{id}/revisions/{revision}/changes", server.revisionChanges)
+		router.Get("/repositories/{id}/revisions/{revision}/summary", server.revisionSummary)
 		router.Get("/repositories/{id}/locks", server.repositoryLocks)
 		router.With(requireCSRF).Post("/repositories/{id}/locks/release", server.releaseLock)
 		router.Get("/repositories/{id}/download", server.repositoryDownload)

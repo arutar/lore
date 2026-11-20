@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
-import { Link, NavLink, useNavigate, useParams } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, NavLink, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { useApp } from "../App";
 import { useLocale } from "../i18n";
-import type { LastChange, Repository, RepositoryLock, RepositoryTree, Revision } from "../types";
-import { Avatar, Badge, CopyButton, Dialog, Empty, ErrorNote, Icon, Loading, RepoTile, formatSize, useCopy, useToast, useTopBar } from "../ui";
+import type { ChangeKind, ChangeSummary, LastChange, Page, Repository, RepositoryLock, RepositoryTree, Revision, RevisionChange } from "../types";
+import { Avatar, Badge, CopyButton, Dialog, Empty, ErrorNote, Icon, Loading, RepoTile, formatSize, useToast, useTopBar } from "../ui";
 import { AccessTab } from "./Access";
 
 type Tab = "files" | "history" | "locks" | "access" | "settings";
@@ -120,33 +120,204 @@ function FilesTab({ id }: { id: string }) {
 
 function HistoryTab({ id }: { id: string }) {
   const { t, ago, dateTime, error } = useLocale();
-  const copy = useCopy();
+  const [params, setParams] = useSearchParams();
+  const selected = params.get("revision") ?? "";
+  // Cursors of the newer pages, so the panel's "newer" arrow can step back across a page.
+  const [trail, setTrail] = useState<string[]>([]);
   const [cursor, setCursor] = useState("");
-  const [page, setPage] = useState<{ items: Revision[]; nextCursor?: string } | null>(null);
+  const [page, setPage] = useState<Page<Revision> | null>(null);
+  const [latest, setLatest] = useState(0);
   const [problem, setProblem] = useState("");
+  const pending = useRef<"first" | "last" | null>(null);
+  const open = useCallback((signature: string) => setParams((current) => {
+    const next = new URLSearchParams(current);
+    if (signature) next.set("revision", signature); else next.delete("revision");
+    return next;
+  }, { replace: true }), [setParams]);
+  const openRef = useRef(open);
+  openRef.current = open;
   useEffect(() => {
     setPage(null);
-    api.history(id, cursor).then(setPage).catch((cause) => setProblem(error(cause)));
+    api.history(id, cursor).then((result) => {
+      setPage(result);
+      if (!cursor && result.items[0]) setLatest(result.items[0].number);
+      const want = pending.current;
+      pending.current = null;
+      if (want && result.items.length > 0) openRef.current(result.items[want === "first" ? 0 : result.items.length - 1].signature);
+    }).catch((cause) => setProblem(error(cause)));
   }, [id, cursor, error]);
+  const older = () => { if (!page?.nextCursor) return; setTrail([...trail, cursor]); setCursor(page.nextCursor); };
+  const newer = () => { if (trail.length === 0) return; setCursor(trail[trail.length - 1]); setTrail(trail.slice(0, -1)); };
   if (problem) return <ErrorNote message={problem} />;
   if (!page) return <Loading />;
   if (page.items.length === 0 && !cursor) return <div className="card"><Empty icon="history" title={t("history.empty")} text={t("history.emptyText")} /></div>;
-  return <div className="card">
-    <div className="timeline">{page.items.map((revision) => {
-      const author = revision.author || revision.committer;
-      return <div className="rev" key={revision.signature}>
-        <Avatar name={author || "?"} />
-        <div className="grow"><div className="msg truncate">{revision.message || <span className="muted">{t("history.noMessage")}</span>}</div>
-          <div className="sub" title={dateTime(revision.committedAt)}>{author} · {ago(revision.committedAt)}</div></div>
-        <div className="row"><Badge>#{revision.number}</Badge>
-          <button className="btn quiet sm mono" title={revision.signature} onClick={() => void copy(revision.signature, t("history.copySignature"))}>{revision.signature.slice(0, 12)}</button></div>
-      </div>;
-    })}</div>
-    {(cursor || page.nextCursor) && <div className="table-foot">
-      <span />{cursor && <button className="btn sm" onClick={() => setCursor("")}>{t("history.newest")}</button>}
-      {page.nextCursor && <button className="btn sm" onClick={() => setCursor(page.nextCursor!)}>{t("history.older")}</button>}
+  const index = page.items.findIndex((revision) => revision.signature === selected);
+  return <>
+    <div className="card">
+      <div className="timeline">{page.items.map((revision) => {
+        const author = revision.author || revision.committer;
+        const isSelected = revision.signature === selected;
+        return <div className={`rev clickable ${isSelected ? "sel" : ""}`} key={revision.signature} role="button" tabIndex={0} aria-pressed={isSelected}
+          title={t("history.open")} onClick={() => open(revision.signature)}
+          onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(revision.signature); } }}>
+          <Avatar name={author || "?"} />
+          <div className="grow"><div className="msg truncate">{revision.message || <span className="muted">{t("history.noMessage")}</span>}</div>
+            <div className="sub" title={dateTime(revision.committedAt)}>{author} · {ago(revision.committedAt)}</div></div>
+          <div className="row"><Badge>#{revision.number}</Badge>
+            <span className="sig" title={revision.signature}><code>{revision.signature.slice(0, 12)}</code>
+              <CopyButton small text={revision.signature} label={t("history.copyId")} message={t("history.copySignature")} /></span></div>
+        </div>;
+      })}</div>
+      {(cursor || page.nextCursor) && <div className="table-foot">
+        <span />{cursor && <button className="btn sm" onClick={() => { setTrail([]); setCursor(""); }}>{t("history.newest")}</button>}
+        {page.nextCursor && <button className="btn sm" onClick={older}>{t("history.older")}</button>}
+      </div>}
+    </div>
+    {selected && <RevisionPanel key={selected} id={id} signature={selected} revision={page.items[index]} latest={cursor ? 0 : latest}
+      onNewer={index > 0 ? () => open(page.items[index - 1].signature) : index === 0 && trail.length > 0 ? () => { pending.current = "last"; newer(); } : undefined}
+      onOlder={index >= 0 && index < page.items.length - 1 ? () => open(page.items[index + 1].signature) : index >= 0 && page.nextCursor ? () => { pending.current = "first"; older(); } : undefined}
+      onClose={() => open("")} />}
+  </>;
+}
+
+const changeLetter: Record<ChangeKind, string> = { added: "A", modified: "M", deleted: "D", moved: "R", copied: "C" };
+const changeKinds: ChangeKind[] = ["added", "modified", "deleted", "moved", "copied"];
+const changePage = 500;
+const changeRow = 34;
+
+/** The files a revision changed, beside the history. The list is read a page at a time as it
+ * scrolls and only the rows in view are drawn, so a revision of hundreds of thousands of files
+ * opens as fast as a small one. The kind filter and the search ask the server, so they cover the
+ * whole revision. */
+function RevisionPanel({ id, signature, revision, latest, onNewer, onOlder, onClose }: {
+  id: string; signature: string; revision?: Revision; latest: number;
+  onNewer?: () => void; onOlder?: () => void; onClose: () => void;
+}) {
+  const { t, ago, dateTime, error } = useLocale();
+  const [summary, setSummary] = useState<ChangeSummary | null>(null);
+  const [kind, setKind] = useState<ChangeKind | "">("");
+  const [search, setSearch] = useState("");
+  const [query, setQuery] = useState("");
+  const [items, setItems] = useState<RevisionChange[]>([]);
+  const [next, setNext] = useState<string | undefined>();
+  const [loading, setLoading] = useState(true);
+  const [problem, setProblem] = useState("");
+  const [scroll, setScroll] = useState(0);
+  const [height, setHeight] = useState(600);
+  const box = useRef<HTMLDivElement>(null);
+  const loadingMore = useRef(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    api.changeSummary(id, signature, controller.signal).then(setSummary).catch(() => undefined);
+    return () => controller.abort();
+  }, [id, signature]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setQuery(search.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setProblem("");
+    setItems([]);
+    setNext(undefined);
+    if (box.current) box.current.scrollTop = 0;
+    setScroll(0);
+    api.changes(id, signature, { kind: kind || undefined, q: query, limit: changePage }, controller.signal)
+      .then((result) => { setItems(result.items); setNext(result.nextCursor); setLoading(false); })
+      .catch((cause) => { if (!controller.signal.aborted) { setProblem(error(cause)); setLoading(false); } });
+    return () => controller.abort();
+  }, [id, signature, kind, query, error]);
+  const more = useCallback(() => {
+    if (!next || loadingMore.current) return;
+    loadingMore.current = true;
+    api.changes(id, signature, { kind: kind || undefined, q: query, cursor: next, limit: changePage })
+      .then((result) => { setItems((current) => [...current, ...result.items]); setNext(result.nextCursor); })
+      .catch((cause) => setProblem(error(cause)))
+      .finally(() => { loadingMore.current = false; });
+  }, [id, signature, kind, query, next, error]);
+  useEffect(() => {
+    const element = box.current;
+    if (!element) return;
+    const observer = new ResizeObserver(() => setHeight(element.clientHeight));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  // Keep reading while the loaded rows don't reach the bottom of the view.
+  useEffect(() => {
+    if (!loading && next && (items.length - 20) * changeRow < scroll + height) more();
+  }, [loading, next, items.length, scroll, height, more]);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (event.key === "Escape") { onClose(); return; }
+      if (target?.closest("input, textarea, select, [contenteditable=true]")) return;
+      if (event.key === "ArrowLeft" && onNewer) { event.preventDefault(); onNewer(); }
+      if (event.key === "ArrowRight" && onOlder) { event.preventDefault(); onOlder(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onNewer, onOlder, onClose]);
+
+  const kindName: Record<ChangeKind | "", string> = { "": t("changes.all"), added: t("changes.added"), modified: t("changes.modified"), deleted: t("changes.deleted"), moved: t("changes.moved"), copied: t("changes.copied") };
+  const kindTitle: Record<ChangeKind, string> = { added: t("changes.kind.added"), modified: t("changes.kind.modified"), deleted: t("changes.kind.deleted"), moved: t("changes.kind.moved"), copied: t("changes.kind.copied") };
+  const author = revision ? revision.author || revision.committer : "";
+  const count = (value: ChangeKind | "") => summary ? (value ? summary[value] : summary.total) : undefined;
+  const total = count(kind);
+  const first = Math.max(0, Math.floor(scroll / changeRow) - 10);
+  const last = Math.min(items.length, Math.ceil((scroll + height) / changeRow) + 10);
+  return <aside className="rev-panel" aria-label={revision ? t("changes.title", { number: String(revision.number) }) : signature}>
+    <div className="rev-panel-bar">
+      <b>{revision ? t("changes.title", { number: String(revision.number) }) : <span className="mono">{signature.slice(0, 12)}</span>}</b>
+      {revision && latest > 0 && <span className="muted small">{t("changes.of", { number: String(revision.number), total: String(latest) })}</span>}
+      <span className="grow" />
+      <span className="nav-pair">
+        <button className="btn quiet icon sm" disabled={!onNewer} title={t("changes.newer")} aria-label={t("changes.newer")} onClick={onNewer}><Icon name="chevron" className="flip" /></button>
+        <button className="btn quiet icon sm" disabled={!onOlder} title={t("changes.older")} aria-label={t("changes.older")} onClick={onOlder}><Icon name="chevron" /></button>
+      </span>
+      <CopyButton small text={window.location.href} label={t("changes.copyLink")} message={t("changes.linkCopied")} />
+      <button className="btn quiet icon sm" title={t("changes.close")} aria-label={t("changes.close")} onClick={onClose}><Icon name="x" /></button>
+    </div>
+    <div className="rev-panel-head">
+      {revision && <Avatar name={author || "?"} />}
+      <div className="grow">
+        {revision && <div className="msg">{revision.message || <span className="muted">{t("history.noMessage")}</span>}</div>}
+        {revision && <div className="sub" title={dateTime(revision.committedAt)}>{author} · {ago(revision.committedAt)}</div>}
+        <div className="sub">{summary && (summary.parent ? <>{t("changes.parent")} <code className="mono">{summary.parent.slice(0, 12)}</code></> : t("changes.first"))}</div>
+      </div>
+      <span className="sig" title={signature}><code>{signature.slice(0, 12)}</code>
+        <CopyButton small text={signature} label={t("history.copyId")} message={t("history.copySignature")} /></span>
+    </div>
+    <div className="rev-panel-tools">
+      <div className="chips">{(["", ...changeKinds] as (ChangeKind | "")[]).filter((value) => !value || !summary || summary[value] > 0 || kind === value).map((value) =>
+        <button key={value || "all"} className={`chip ${value} ${kind === value ? "on" : ""}`} onClick={() => setKind(value)}>
+          {kindName[value]}{count(value) !== undefined && <span className="n">{count(value)!.toLocaleString()}</span>}
+        </button>)}</div>
+      <label className="search sm"><Icon name="search" /><input className="input" value={search} placeholder={t("changes.filter")} aria-label={t("changes.filter")} onChange={(event) => setSearch(event.target.value)} /></label>
+    </div>
+    <div className="chg-list" ref={box} onScroll={(event) => setScroll(event.currentTarget.scrollTop)}>
+      {problem ? <ErrorNote message={problem} />
+        : loading ? <Loading />
+        : items.length === 0 ? <Empty icon="file" title={query || kind ? t("changes.noMatch") : t("changes.empty")} />
+        : <div style={{ height: items.length * changeRow, position: "relative" }}>
+          {items.slice(first, last).map((change, offset) => {
+            const slash = change.path.lastIndexOf("/");
+            return <div className="chg-row" key={first + offset} style={{ top: (first + offset) * changeRow }}>
+              <span className={`kind ${change.kind}`} title={kindTitle[change.kind]}>{changeLetter[change.kind]}</span>
+              <span className="path truncate" title={change.from ? `${change.from} → ${change.path}` : change.path}>
+                {change.from && <><span className="dir">{change.from}</span> <span className="muted">→</span> </>}
+                <span className="dir">{change.path.slice(0, slash + 1)}</span><span className={`name ${change.kind}`}>{change.path.slice(slash + 1)}</span>
+              </span>
+              {change.kind !== "deleted" && <a className="btn quiet icon sm" href={api.downloadUrl(id, change.path, signature)} title={t("changes.download")} aria-label={t("changes.download")}><Icon name="download" /></a>}
+            </div>;
+          })}
+        </div>}
+    </div>
+    {!loading && !problem && items.length > 0 && <div className="table-foot">
+      <span>{t("changes.shown", { shown: items.length.toLocaleString(), total: (total ?? items.length).toLocaleString() })}</span>
     </div>}
-  </div>;
+  </aside>;
 }
 
 function LocksTab({ id }: { id: string }) {

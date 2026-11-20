@@ -73,6 +73,22 @@ export const demoApi: Api = {
     return items ? reply({ revision, branchId: "main", items }) : missing();
   },
   history: (id) => reply(page(data.revisions(id))),
+  changes: (id, revision, filter) => {
+    const all = data.changes(id, revision);
+    if (!all) return missing();
+    const kept = all.filter((change) => (!filter.kind || change.kind === filter.kind) && matches(filter.q ?? "", change.path, change.from));
+    const start = Number(filter.cursor || 0);
+    const end = start + (filter.limit ?? 500);
+    return reply({ items: kept.slice(start, end), nextCursor: end < kept.length ? String(end) : undefined });
+  },
+  changeSummary: (id, revision) => {
+    const all = data.changes(id, revision);
+    if (!all) return missing();
+    const count = (kind: string) => all.filter((change) => change.kind === kind).length;
+    const list = data.revisions(id);
+    const parent = list[list.findIndex((item) => item.signature === revision) + 1]?.signature;
+    return reply({ parent, added: count("added"), modified: count("modified"), deleted: count("deleted"), moved: count("moved"), copied: count("copied"), total: all.length });
+  },
   locks: (id) => reply({ items: data.locks(id), canRelease: true }),
   releaseLock: readOnly,
   downloadUrl: (_id, path) => notice(`the file ${path}`),
