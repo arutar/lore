@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Push operations (`lore.platform.v1.BranchPushOperationService`): restarts after a stall,
 //! retries after a transient failure, fencing of a superseded worker, no limit on how many run at
-//! once, and the journal sweep.
+//! once, the journal sweep, and a restart after the journal was lost.
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use lore_base::runtime::LORE_CONTEXT;
 use lore_base::types::Hash;
+use lore_base::types::KeyType;
 use lore_proto::lore::platform::v1 as rpc;
 use lore_revision::branch;
 use lore_revision::branch::DEFAULT_HISTORY_STEP_SIZE;
@@ -30,6 +31,7 @@ use lore_server::hooks::StatusCode;
 use rand::random;
 use rpc::branch_push_operation::State;
 use rpc::branch_push_operation_service_server::BranchPushOperationService;
+use tokio_stream::StreamExt;
 use tonic::Request;
 
 use super::branch_push::build_revision;
@@ -518,6 +520,80 @@ async fn replayed_push_returns_its_receipt_after_a_subsequent_push() {
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::AlreadyExists);
+    };
+    Box::pin(LORE_CONTEXT.scope(fixture.execution.clone(), run)).await;
+}
+
+/// Journal writes don't flush the store, so a server crash can lose an operation. The client then
+/// starts it again under the same id: the new worker moves the branch, and the worker that lost
+/// its journal entry can't.
+#[tokio::test]
+async fn push_whose_journal_was_lost_starts_again_under_the_same_id() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let first = gate.clone();
+    let fixture = fixture(PushOperationSettings::default(), 1..=1, move |n| {
+        if n == 0 {
+            Step::Gate(first.clone())
+        } else {
+            Step::Pass
+        }
+    })
+    .await;
+    let run = async {
+        let branch = create_root_branch(&fixture.repo, "main").await;
+        let revision = build_revision(&fixture.repo, Hash::default(), 1).await;
+        let id = operation_id();
+        fixture
+            .service
+            .start(start(fixture.repository, branch, revision, &id))
+            .await
+            .unwrap();
+
+        let store = fixture.repo.try_mutable_store_arc().unwrap();
+        let mut entries = store
+            .clone()
+            .list(fixture.repository, KeyType::PushJournal)
+            .await
+            .unwrap();
+        while let Some((key, value)) = entries.next().await {
+            store
+                .clone()
+                .compare_and_swap(
+                    fixture.repository,
+                    key,
+                    value,
+                    Hash::default(),
+                    KeyType::PushJournal,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            fixture
+                .service
+                .get(get(fixture.repository, branch, &id))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::NotFound
+        );
+
+        fixture
+            .service
+            .start(start(fixture.repository, branch, revision, &id))
+            .await
+            .unwrap();
+        let (state, _) = decided(&fixture, branch, &id, Duration::from_secs(5)).await;
+        assert!(matches!(state, State::Accepted(_)), "{state:?}");
+        assert_eq!(latest(&fixture.repo, branch).await, revision);
+
+        gate.add_permits(1);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (state, _) = decided(&fixture, branch, &id, Duration::from_secs(5)).await;
+        assert!(
+            matches!(state, State::Accepted(_)),
+            "the lost worker overwrote the outcome: {state:?}"
+        );
     };
     Box::pin(LORE_CONTEXT.scope(fixture.execution.clone(), run)).await;
 }

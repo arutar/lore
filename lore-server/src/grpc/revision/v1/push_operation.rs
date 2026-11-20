@@ -283,7 +283,12 @@ async fn pointer(repo: &RepositoryContext, key: Hash, kind: KeyType) -> Result<H
     }
 }
 
-/// Writes `entry` durably and returns its content hash.
+/// Writes `entry` and returns its content hash.
+///
+/// Journal writes take the stores' own write-back, as the branch head and the pushed fragments
+/// do, rather than a flush. A flush writes every dirty bucket of the server's store, so right
+/// after a large upload it held a push for many seconds. A crash that loses a journal write loses
+/// the branch move it records too; the client then starts the operation again.
 async fn put(repo: Arc<RepositoryContext>, entry: &Entry) -> Result<Hash, Status> {
     let address = immutable::write(
         repo.clone(),
@@ -293,7 +298,6 @@ async fn put(repo: Arc<RepositoryContext>, entry: &Entry) -> Result<Hash, Status
     )
     .await
     .map_err(internal)?;
-    repo.immutable_store().flush(true).await.map_err(internal)?;
     Ok(address.hash)
 }
 
@@ -309,26 +313,12 @@ async fn read(repo: Arc<RepositoryContext>, hash: Hash) -> Result<Entry, Status>
     Entry::decode(data).map_err(internal)
 }
 
-/// Swaps a journal value, returning the previous one. `durable` flushes the store: a lease needs
-/// no flush, because a lease lost in a crash only lets the next query take the push over sooner,
-/// which the crash requires anyway.
-async fn swap(
-    repo: &RepositoryContext,
-    key: Hash,
-    old: Hash,
-    new: Hash,
-    durable: bool,
-) -> Result<Hash, Status> {
-    let storage = store(repo)?;
-    let previous = storage
-        .clone()
+/// Swaps a journal value, returning the previous one. See [`put`] for why it doesn't flush.
+async fn swap(repo: &RepositoryContext, key: Hash, old: Hash, new: Hash) -> Result<Hash, Status> {
+    store(repo)?
         .compare_and_swap(repo.id, key, old, new, KeyType::PushJournal)
         .await
-        .map_err(internal)?;
-    if durable {
-        storage.flush(true).await.map_err(internal)?;
-    }
-    Ok(previous)
+        .map_err(internal)
 }
 
 fn operation_key(user: &str, id: &[u8]) -> Result<Hash, Status> {
@@ -409,7 +399,7 @@ impl Receipt {
     /// over.
     async fn renew(&self, repo: Arc<RepositoryContext>) -> Result<bool, Status> {
         let until = now_ms()? + ms(self.settings.lease);
-        self.replace(&repo, self.next_lease(until), false).await
+        self.replace(&repo, self.next_lease(until)).await
     }
 
     /// Ends this worker's lease so that the next query restarts the push after `delay`. A
@@ -427,23 +417,17 @@ impl Receipt {
                 until_ms: until,
                 ..lease
             },
-            false,
         )
         .await
     }
 
-    async fn replace(
-        &self,
-        repo: &RepositoryContext,
-        next: Lease,
-        durable: bool,
-    ) -> Result<bool, Status> {
+    async fn replace(&self, repo: &RepositoryContext, next: Lease) -> Result<bool, Status> {
         let mut lease = self.lease.lock().await;
         if self.committed.load(Ordering::Relaxed) {
             return Ok(true);
         }
         let next = next.encode();
-        if swap(repo, self.key, *lease, next, durable).await? != *lease {
+        if swap(repo, self.key, *lease, next).await? != *lease {
             return Ok(false);
         }
         *lease = next;
@@ -456,7 +440,7 @@ impl Receipt {
         }
         let value = put(repo.clone(), &outcome(state, 0)?).await?;
         let lease = self.lease.lock().await;
-        swap(&repo, self.key, *lease, value, true).await?;
+        swap(&repo, self.key, *lease, value).await?;
         Ok(())
     }
 
@@ -654,7 +638,7 @@ impl LoreRevisionV1Service {
                         outcome: None,
                     };
                     let value = put(repo.clone(), &entry).await?;
-                    let previous = swap(&repo, registration, Hash::default(), value, true).await?;
+                    let previous = swap(&repo, registration, Hash::default(), value).await?;
                     if !previous.is_zero() && registered_push(&repo, previous).await? != push {
                         return Err(Status::already_exists("operation id already used"));
                     }
@@ -711,7 +695,7 @@ impl LoreRevisionV1Service {
                 details: Default::default(),
             });
             let value = put(repo.clone(), &outcome(state, 0)?).await?;
-            if swap(&repo, key, current, value, true).await? == current {
+            if swap(&repo, key, current, value).await? == current {
                 return Ok(Response::new(
                     read(repo, value)
                         .await?
@@ -913,12 +897,9 @@ async fn sweep(repo: Arc<RepositoryContext>, retention: Duration) -> Result<u64,
                 Ok(_) | Err(_) => continue,
             },
         };
-        if stamp < cutoff && swap(&repo, key, value, Hash::default(), false).await? == value {
+        if stamp < cutoff && swap(&repo, key, value, Hash::default()).await? == value {
             removed += 1;
         }
-    }
-    if removed > 0 {
-        store(&repo)?.flush(true).await.map_err(internal)?;
     }
     Ok(removed)
 }

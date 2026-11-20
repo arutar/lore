@@ -56,8 +56,13 @@ timeout, so a push that never fits in one request never completes.
   The registration key holds the request. The receipt key holds either an inline lease while a
   worker owns the push, or the outcome once it is decided.
 - A worker renews its lease every 10 s, and the lease lasts 60 s. If the worker dies, the next
-  `Get` after the lease expires starts the push again. A renewal needs no fsync: a lease lost in a
-  crash only lets the next query take over sooner.
+  `Get` after the lease expires starts the push again.
+- Journal writes don't flush the store; they reach disk with the store's own write-back, as the
+  branch head and the pushed fragments do. A flush writes every dirty bucket of the server's store,
+  so right after a large upload it held each push for seconds: 0.2.8 flushed on every journal write
+  and took 15–20 s longer than 0.2.5 to finish a GUI commit of 703,009 files. A crash that loses a
+  journal write loses the branch move it records with it. `Get` then answers `NOT_FOUND`, and the
+  client starts the operation again under the same id.
 - The exact lease value a worker last wrote is its fencing token. The worker moves the branch and
   records `Accepted` in one paired compare-and-swap (`MutableStore::compare_and_swap_pair`) that
   expects that value. A worker that lost its lease can therefore neither move the branch nor

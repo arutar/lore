@@ -317,12 +317,20 @@ impl RevisionService {
                             }
                             tokio::time::sleep(interval).await;
                             interval = (interval * 2).min(std::time::Duration::from_secs(1));
-                            operation = match operations
+                            let mut reply = operations
                                 .get(platform_v1::GetBranchPushOperationRequest {
                                     operation_id: operation_id.into(),
                                 })
-                                .await
+                                .await;
+                            if reply
+                                .as_ref()
+                                .is_err_and(|status| status.code() == tonic::Code::NotFound)
                             {
+                                // A server crash can lose the registration with the branch move
+                                // it would record. Starting again under the same id is safe.
+                                reply = operations.start(start.clone()).await;
+                            }
+                            operation = match reply {
                                 Ok(reply) => {
                                     // Each failure run gets the whole retry budget: a long push
                                     // may meet several short outages.
