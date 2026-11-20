@@ -43,7 +43,7 @@ the fork can shrink as Lore matures.
 
 ## What you get
 
-- **Web interface** — browse files with who changed each one last and when, history and locks;
+- **Web interface** — browse files with who changed each one last and when, history with what each revision added, changed, moved and deleted, and locks;
   download any file at any revision; manage repositories, access, users, audit log and settings.
   Russian and English, nine themes, works on a phone.
 - **File locks that hold** — lock a binary file before editing it, and the server refuses anyone
@@ -71,7 +71,7 @@ the fork can shrink as Lore matures.
 
 | | |
 |---|---|
-| <img src="platform/docs/images/repository-history.png" alt="Revision history" width="440"><br>**History** — every revision with its author | <img src="platform/docs/images/repository-locks.png" alt="File locks" width="440"><br>**Locks** — who is editing which binary file; owners can release a lock someone left behind |
+| <img src="platform/docs/images/repository-history.png" alt="Revision history" width="440"><br>**History** — every revision with its author; click one to see the files it changed | <img src="platform/docs/images/repository-locks.png" alt="File locks" width="440"><br>**Locks** — who is editing which binary file; owners can release a lock someone left behind |
 | <img src="platform/docs/images/repository-lock-release.png" alt="Releasing a lock" width="440"><br>**Release a lock** — confirmed, and recorded in the audit log | <img src="platform/docs/images/audit.png" alt="Audit log" width="440"><br>**Audit log** — who changed what |
 | <img src="platform/docs/images/repository-grant.png" alt="Granting access" width="440"><br>**Access** — grant to users and AD groups as you type | <img src="platform/docs/images/users.png" alt="Users" width="440"><br>**Users** — Active Directory and local accounts |
 | <img src="platform/docs/images/settings.png" alt="Settings" width="440"><br>**Settings** — theme, language, registration | <img src="platform/docs/images/theme-sky.png" alt="Sky theme" width="440"><br>**Themes** — nine built-in themes |
@@ -171,7 +171,7 @@ You need a host with Docker (Docker Engine with Compose v2 on Linux, Docker Desk
 
 ```sh
 # 1. Unpack the bundle
-tar -xzf lore-platform-server-0.2.9.tar.gz && cd lore-platform-server-0.2.9
+tar -xzf lore-platform-server-0.2.10.tar.gz && cd lore-platform-server-0.2.10
 
 # 2. Run setup with the name your users will type; keep the data outside the bundle
 LORE_DATA_ROOT=/srv/lore-data LORE_PUBLIC_HOST=lore.corp.local sh setup.sh
@@ -193,8 +193,8 @@ In PowerShell, as the user that runs Docker Desktop:
 
 ```powershell
 # 1. Unpack the bundle
-Expand-Archive lore-platform-server-0.2.9.zip -DestinationPath C:\lore
-cd C:\lore\lore-platform-server-0.2.9
+Expand-Archive lore-platform-server-0.2.10.zip -DestinationPath C:\lore
+cd C:\lore\lore-platform-server-0.2.10
 
 # 2. Run setup with the name your users will type; keep the data outside the bundle
 $env:LORE_DATA_ROOT = "D:\lore-data"
