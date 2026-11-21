@@ -12,7 +12,7 @@ as simple as SVN, built on [Epic Games' Lore](https://github.com/EpicGames/lore)
 
 Web interface · Active Directory sign-in · Windows Explorer integration · enforced file locks · one-command Docker deployment
 
-[![Release](https://img.shields.io/github/v/release/arutar/lore?filter=platform-v*&label=release)](../../releases)
+[![Release](https://img.shields.io/github/v/release/arutar/lore?filter=platform-v*&sort=semver&label=release)](../../releases)
 [![Platform Server](https://github.com/arutar/lore/actions/workflows/platform-server.yml/badge.svg)](https://github.com/arutar/lore/actions/workflows/platform-server.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
