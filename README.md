@@ -12,13 +12,13 @@ as simple as SVN, built on [Epic Games' Lore](https://github.com/EpicGames/lore)
 
 Web interface · Active Directory sign-in · Windows Explorer integration · enforced file locks · one-command Docker deployment
 
-[![Release](https://img.shields.io/github/v/release/arutar/lore?filter=platform-v*&sort=semver&label=release)](../../releases)
+[![Release](https://img.shields.io/github/v/release/arutar/lore?filter=platform-v*&sort=semver&label=release)](../../releases/latest)
 [![Platform Server](https://github.com/arutar/lore/actions/workflows/platform-server.yml/badge.svg)](https://github.com/arutar/lore/actions/workflows/platform-server.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 <a href="https://arutar.github.io/lore/"><img src="https://img.shields.io/badge/Live%20preview-open%20the%20web%20interface-1f6feb?style=for-the-badge&labelColor=0d419d" alt="Live preview: open the web interface" height="36"></a>
 
-[Live preview](https://arutar.github.io/lore/) · [Install](platform/docs/install.md) · [Docker reference](platform/docs/docker.md) · [Download](../../releases) · [How it works](#how-it-works) · [Differences from Lore](#how-this-differs-from-upstream-lore) · [Status](#status)
+[Live preview](https://arutar.github.io/lore/) · [Install](platform/docs/install.md) · [Docker reference](platform/docs/docker.md) · [Download](../../releases/latest) · [How it works](#how-it-works) · [Differences from Lore](#how-this-differs-from-upstream-lore) · [Status](#status)
 
 <a href="https://arutar.github.io/lore/"><img src="platform/docs/images/repository-files.png" alt="Repository files in the Lore Platform web interface" width="900"></a>
 
@@ -164,7 +164,7 @@ that the commit is saved locally (0.2.8 server and client; see
 ## Quick start
 
 You need a host with Docker (Docker Engine with Compose v2 on Linux, Docker Desktop on Windows),
-2 CPU cores and 4 GB of RAM. Download the server bundle from [Releases](../../releases).
+2 CPU cores and 4 GB of RAM. Download the server bundle from [Releases](../../releases/latest).
 
 <details open>
 <summary><b>Linux</b></summary>
@@ -219,7 +219,7 @@ Add Active Directory by passing `LORE_LDAP_URL`, `LORE_LDAP_BASE_DN`, `LORE_LDAP
   Directory, HTTPS, mail, clients, upgrades, troubleshooting.
 
 Clients: `LoreClient-<version>-x64.msi` for Windows, `lore-cli-<version>-<arch>.tar.gz` for Linux,
-both on the [Releases](../../releases) page.
+both on the [Releases](../../releases/latest) page.
 
 ## How this differs from upstream Lore
 

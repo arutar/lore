@@ -114,7 +114,7 @@ host as the Lore server they connect to**, so nothing has to be configured on th
 ### 4.1 Get the server bundle
 
 Download `lore-platform-server-<version>.tar.gz` (or `.zip`) from the
-[Releases](../../../../releases) page and unpack it where the server should live:
+[Releases](../../../../releases/latest) page and unpack it where the server should live:
 
 ```sh
 mkdir -p /opt && cd /opt
@@ -295,7 +295,7 @@ certificate for it too). Most installations don't need this.
 
 ## 9. Install the clients
 
-From the [Releases](../../../../releases) page:
+From the [Releases](../../../../releases/latest) page:
 
 - **Windows:** `LoreClient-<version>-x64.msi`. Installs the `lore` CLI, the Explorer integration
   (context menu, status icons) and the sign-in companion. Requires the Microsoft Edge WebView2
