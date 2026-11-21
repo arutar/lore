@@ -1,7 +1,7 @@
 // Fictional data for the read-only demo (npm run build:demo). Nothing here comes from a real
 // installation: the studio, people, groups and files are invented. Times are relative to when the
 // page is opened, so the demo always looks recently used.
-import type { AccessEntry, AuditEvent, LabeledGrant, LastChange, Members, PublicConfig, Repository, RepositoryLock, Revision, RevisionChange, TreeNode, User } from "../types";
+import type { ClientDownloads, AccessEntry, AuditEvent, LabeledGrant, LastChange, Members, PublicConfig, Repository, RepositoryLock, Revision, RevisionChange, TreeNode, User } from "../types";
 
 const now = Date.now();
 const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString();
@@ -260,3 +260,15 @@ export const audit: AuditEvent[] = [
   event(98, "u-pavel", "grant.remove", "repository", "build-pipeline", "tools/build-pipeline", { subjectType: "group", subject: "grp-artists", subjectName: "studio-artists", before: "read", after: "" }),
   event(120, "u-admin", "user.create", "user", "u-kate", "Kate Morgan"),
 ];
+
+// Client builds as a server's downloads folder lists them; the files themselves aren't in the demo.
+export const downloads: ClientDownloads = {
+  version: "0.2.11",
+  source: "github",
+  items: [
+    { platform: "windows", kind: "msi", arch: "x86_64", file: "LoreClient-0.2.11-x64.msi", url: "https://github.com/arutar/lore/releases/download/platform-v0.2.11/LoreClient-0.2.11-x64.msi", size: 75_923_456, sha256: "3f9c1e0b7a64d2c58e1f4b0a9d7c6e5f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d" },
+    { platform: "windows", kind: "zip", arch: "x86_64", file: "LoreClient-0.2.11-win-x64.zip", url: "https://github.com/arutar/lore/releases/download/platform-v0.2.11/LoreClient-0.2.11-win-x64.zip", size: 100_326_207, sha256: "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00" },
+    { platform: "linux", kind: "tar", arch: "x86_64", file: "lore-cli-0.2.11-x86_64-unknown-linux-gnu.tar.gz", url: "https://github.com/arutar/lore/releases/download/platform-v0.2.11/lore-cli-0.2.11-x86_64-unknown-linux-gnu.tar.gz", size: 81_708_647, sha256: "0d1e2f3a4b5c6d7e8f9011223344556677889900aabbccddeeff001122334455" },
+    { platform: "linux", kind: "tar", arch: "aarch64", file: "lore-cli-0.2.11-aarch64-unknown-linux-gnu.tar.gz", url: "https://github.com/arutar/lore/releases/download/platform-v0.2.11/lore-cli-0.2.11-aarch64-unknown-linux-gnu.tar.gz", size: 80_073_259, sha256: "ffeeddccbbaa99887766554433221100fedcba98765432100123456789abcdef" },
+  ],
+};

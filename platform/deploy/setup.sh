@@ -2,6 +2,17 @@
 set -eu
 
 cd "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+# --client-downloads online|offline|off: where the WebUI's home page gets the client from
+# (LORE_CLIENT_DOWNLOADS, saved in .env). See "Client downloads" below.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --client-downloads=*) LORE_CLIENT_DOWNLOADS=${1#*=}; export LORE_CLIENT_DOWNLOADS ;;
+        --client-downloads) [ $# -ge 2 ] || { echo "--client-downloads needs online, offline or off" >&2; exit 1; }
+            LORE_CLIENT_DOWNLOADS=$2; export LORE_CLIENT_DOWNLOADS; shift ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+    shift
+done
 command -v docker >/dev/null 2>&1 || { echo "Docker is required" >&2; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 is required" >&2; exit 1; }
 docker info >/dev/null 2>&1 || { echo "Docker engine isn't running" >&2; exit 1; }
@@ -92,14 +103,14 @@ load_env
 # generated configuration together with the data that compose mounts from it.
 DATA_ROOT=${LORE_DATA_ROOT:-./data}
 GENERATED=$DATA_ROOT/generated
-mkdir -p "$GENERATED/caddy" "$DATA_ROOT/postgres" "$DATA_ROOT/lore" "$DATA_ROOT/control-plane" "$DATA_ROOT/caddy"
+mkdir -p "$GENERATED/caddy" "$DATA_ROOT/postgres" "$DATA_ROOT/lore" "$DATA_ROOT/control-plane" "$DATA_ROOT/caddy" "$DATA_ROOT/downloads"
 # On Linux each service writes its directory as its own user (postgres, lore, root), not as the
 # user running setup. The data root itself is closed to other users of the host; the service
 # directories inside are open to the containers, and what the services keep in them carries
 # their own permissions (PostgreSQL 700, the signing key 600). Docker Desktop ignores both.
 chmod 700 "$DATA_ROOT" 2>/dev/null || true
 chmod 777 "$DATA_ROOT/postgres" "$DATA_ROOT/lore" "$DATA_ROOT/control-plane" "$DATA_ROOT/caddy" 2>/dev/null || true
-chmod 755 "$GENERATED" "$GENERATED/caddy" 2>/dev/null || true
+chmod 755 "$GENERATED" "$GENERATED/caddy" "$DATA_ROOT/downloads" 2>/dev/null || true
 escape_sed() { printf '%s' "$1" | sed 's/[&|\\]/\\&/g'; }
 escape_json() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 set_env() {
@@ -128,6 +139,70 @@ for name in LORE_LDAP_URL LORE_LDAP_BASE_DN LORE_LDAP_BIND_DN LORE_LDAP_BIND_PAS
     eval "value=\${$name:-}"
     if [ -n "$value" ]; then set_env "$name" "$value"; fi
 done
+
+# Client downloads. The control plane serves DATA_ROOT/downloads at /downloads/, and the home
+# page lists what manifest.json there names. The bundle's clients.tsv lists this release's client
+# builds (platform, kind, architecture, size, SHA-256, file name).
+#   online (default): links to the release on GitHub; nothing is stored here.
+#   offline: the files are kept here, for networks without internet access. They come from
+#     ./clients next to this script when it holds them, otherwise from GitHub.
+#   off: the home page offers no client.
+CLIENT_MODE=${LORE_CLIENT_DOWNLOADS:-online}
+case "$CLIENT_MODE" in online|offline|off) ;; *) echo "LORE_CLIENT_DOWNLOADS must be online, offline or off" >&2; exit 1 ;; esac
+set_env LORE_CLIENT_DOWNLOADS "$CLIENT_MODE"
+DOWNLOADS=$DATA_ROOT/downloads
+sha256_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+has_file() { [ -f "$1" ] && [ "$(sha256_of "$1")" = "$2" ]; }
+rm -f "$DOWNLOADS/manifest.json"
+if [ "$CLIENT_MODE" = off ] || [ ! -f clients.tsv ] || [ ! -f VERSION ]; then
+    # A source checkout has no clients.tsv: the home page links to the releases instead.
+    find "$DOWNLOADS" -maxdepth 1 -type f -delete
+else
+    VERSION=$(tr -d '\r\n' < VERSION)
+    RELEASE=${LORE_CLIENT_RELEASE_URL:-https://github.com/arutar/lore/releases/download}/platform-v$VERSION
+    ITEMS=""
+    KEEP=" manifest.json "
+    TAB=$(printf '\t')
+    while IFS=$TAB read -r platform kind arch size sha file || [ -n "${file:-}" ]; do
+        file=${file%"$(printf '\r')"}
+        [ -n "$file" ] || continue
+        case "$file" in *[!A-Za-z0-9._-]*|.*) echo "clients.tsv names an invalid file: $file" >&2; exit 1 ;; esac
+        case "$platform$kind$arch" in *[!a-z0-9_]*) echo "clients.tsv has an invalid line for $file" >&2; exit 1 ;; esac
+        case "$size" in ''|*[!0-9]*) echo "clients.tsv has an invalid size for $file" >&2; exit 1 ;; esac
+        case "$sha" in *[!0-9a-f]*) echo "clients.tsv has an invalid SHA-256 for $file" >&2; exit 1 ;; esac
+        [ ${#sha} -eq 64 ] || { echo "clients.tsv has an invalid SHA-256 for $file" >&2; exit 1; }
+        if [ "$CLIENT_MODE" = offline ]; then
+            if ! has_file "$DOWNLOADS/$file" "$sha"; then
+                if [ -f "clients/$file" ]; then
+                    cp "clients/$file" "$DOWNLOADS/$file.part"
+                else
+                    echo "Downloading $file"
+                    curl -fL# --retry 3 -o "$DOWNLOADS/$file.part" "$RELEASE/$file" || {
+                        rm -f "$DOWNLOADS/$file.part"
+                        echo "Couldn't download $file. Put the release's client files in $(pwd)/clients and run setup again." >&2; exit 1; }
+                fi
+                has_file "$DOWNLOADS/$file.part" "$sha" || { rm -f "$DOWNLOADS/$file.part"; echo "$file doesn't match its SHA-256 in clients.tsv" >&2; exit 1; }
+                mv "$DOWNLOADS/$file.part" "$DOWNLOADS/$file"
+                chmod 644 "$DOWNLOADS/$file"
+            fi
+            KEEP="$KEEP$file "
+            url="/downloads/$file"
+        else
+            url="$RELEASE/$file"
+        fi
+        ITEMS="$ITEMS${ITEMS:+,}{\"platform\":\"$platform\",\"kind\":\"$kind\",\"arch\":\"$arch\",\"file\":\"$file\",\"url\":\"$url\",\"size\":$size,\"sha256\":\"$sha\"}"
+    done < clients.tsv
+    # Files of an earlier version, or all of them after switching to online, go.
+    for path in "$DOWNLOADS"/* "$DOWNLOADS"/.[!.]*; do
+        [ -f "$path" ] || continue
+        case "$KEEP" in *" ${path##*/} "*) ;; *) rm -f "$path" ;; esac
+    done
+    if [ "$CLIENT_MODE" = offline ]; then SOURCE=server; else SOURCE=github; fi
+    printf '{"version":"%s","source":"%s","items":[%s]}\n' "$VERSION" "$SOURCE" "$ITEMS" > "$DOWNLOADS/manifest.json.part"
+    chmod 644 "$DOWNLOADS/manifest.json.part"
+    mv "$DOWNLOADS/manifest.json.part" "$DOWNLOADS/manifest.json"
+fi
+
 WEB_ESCAPED=$(escape_sed "$WEB_URL")
 KEYCLOAK_ESCAPED=$(escape_sed "$KEYCLOAK_URL")
 HOST_ESCAPED=$(escape_sed "$PUBLIC_HOST")
@@ -240,5 +315,5 @@ docker compose "$@" exec -T \
     -e LORE_LDAP_STARTTLS="${LORE_LDAP_STARTTLS:-}" -e LORE_LDAP_INSECURE_SKIP_VERIFY="${LORE_LDAP_INSECURE_SKIP_VERIFY:-}" \
     keycloak bash /opt/lore/configure-realm.sh
 
-printf '\nLore is ready.\nWebUI: %s\nKeycloak: %s\nAdministrator: admin\nInitial administrator password: %s\nData: %s\n' \
-    "$WEB_URL" "$KEYCLOAK_URL" "$LORE_ADMIN_PASSWORD" "$(cd "$DATA_ROOT" && pwd)"
+printf '\nLore is ready.\nWebUI: %s\nKeycloak: %s\nAdministrator: admin\nInitial administrator password: %s\nData: %s\nClient downloads: %s\n' \
+    "$WEB_URL" "$KEYCLOAK_URL" "$LORE_ADMIN_PASSWORD" "$(cd "$DATA_ROOT" && pwd)" "$CLIENT_MODE"

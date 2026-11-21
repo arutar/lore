@@ -32,6 +32,24 @@ export interface Session {
   csrfToken?: string;
 }
 
+/** A client build the server hands out from /downloads, as its manifest.json lists it. */
+export interface ClientDownload {
+  platform: "windows" | "linux";
+  kind: "msi" | "zip" | "tar";
+  arch: "x86_64" | "aarch64";
+  file: string;
+  url: string;
+  size: number;
+  sha256: string;
+}
+
+export interface ClientDownloads {
+  version: string;
+  /** "github": the links lead to the release on GitHub; "server": this server holds the files. */
+  source: "github" | "server";
+  items: ClientDownload[];
+}
+
 export interface PublicConfig {
   registrationEnabled: boolean;
   oidcEnabled: boolean;

@@ -43,15 +43,17 @@ type GroupCatalog interface {
 type Config struct {
 	// Deletions marks the repositories being deleted here, shared with the registry service so that
 	// Lore's unregistration leaves their rows until Lore confirms (see package deletions).
-	Deletions           *deletions.Tracker
-	Repositories        RepositoryManager
-	Directory           GroupCatalog
-	Content             RepositoryContent
-	TokenExchange       *TokenExchange
-	RegistrationRealm   RegistrationRealm
-	Accounts            AccountManager
-	BearerAuth          BearerAuthenticator
-	StaticDir           string
+	Deletions         *deletions.Tracker
+	Repositories      RepositoryManager
+	Directory         GroupCatalog
+	Content           RepositoryContent
+	TokenExchange     *TokenExchange
+	RegistrationRealm RegistrationRealm
+	Accounts          AccountManager
+	BearerAuth        BearerAuthenticator
+	StaticDir         string
+	// DownloadsDir holds the client builds and manifest.json served at /downloads/.
+	DownloadsDir        string
 	DevAuth             bool
 	DevUser             model.User
 	OIDC                AuthConfig
@@ -78,7 +80,7 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 	router.Use(func(next http.Handler) http.Handler {
 		withTimeout := middleware.Timeout(30 * time.Second)(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/download") {
+			if r.Method == http.MethodGet && (strings.HasSuffix(r.URL.Path, "/download") || strings.HasPrefix(r.URL.Path, "/downloads/")) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -87,6 +89,7 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 	})
 	router.Use(auth.middleware)
 	router.Get("/healthz", server.health)
+	router.Get("/downloads/{name}", server.download)
 	router.Route("/web/v1", func(router chi.Router) {
 		router.Get("/config", server.publicConfig)
 		router.Get("/session", server.session)

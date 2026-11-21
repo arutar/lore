@@ -52,7 +52,7 @@ export function RepositoryPage() {
       <RepoTile name={repository.name} large />
       <div className="grow">
         <div className="row wrap"><h1>{repository.name}</h1>
-          {repository.public ? <Badge kind="ok" icon="globe">{t("list.public")}</Badge> : <Badge icon="lock">{t("list.private")}</Badge>}
+          {repository.public ? <Badge kind="ok" icon="globe">{t("list.public")}</Badge> : <Badge kind="warn" icon="lock">{t("list.private")}</Badge>}
           {canManage && <Badge kind="accent">{t("permission.owner")}</Badge>}
         </div>
         <p className="muted">{repository.description || t("repo.noDescription")}</p>
@@ -284,10 +284,12 @@ function RevisionPanel({ id, signature, revision, latest, onNewer, onOlder, onCl
       <div className="grow">
         {revision && <div className="msg">{revision.message || <span className="muted">{t("history.noMessage")}</span>}</div>}
         {revision && <div className="sub" title={dateTime(revision.committedAt)}>{author} · {ago(revision.committedAt)}</div>}
-        <div className="sub">{summary && (summary.parent ? <>{t("changes.parent")} <code className="mono">{summary.parent.slice(0, 12)}</code></> : t("changes.first"))}</div>
       </div>
-      <span className="sig" title={signature}><code>{signature.slice(0, 12)}</code>
-        <CopyButton small text={signature} label={t("history.copyId")} message={t("history.copySignature")} /></span>
+      <div className="rev-ids">
+        <span className="sig" title={signature}><code>{signature.slice(0, 12)}</code>
+          <CopyButton small text={signature} label={t("history.copyId")} message={t("history.copySignature")} /></span>
+        {summary && <div className="sub" title={summary.parent || undefined}>{summary.parent ? <>{t("changes.parent")} <code className="mono">{summary.parent.slice(0, 12)}</code></> : t("changes.first")}</div>}
+      </div>
     </div>
     <div className="rev-panel-tools">
       <div className="chips">{(["", ...changeKinds] as (ChangeKind | "")[]).filter((value) => !value || !summary || summary[value] > 0 || kind === value).map((value) =>

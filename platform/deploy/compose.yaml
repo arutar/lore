@@ -94,6 +94,8 @@ services:
       LORE_SERVICE_CLIENT_ID: lore-control-plane
       LORE_SERVICE_CLIENT_SECRET: ${LORE_SERVICE_CLIENT_SECRET:?Run setup.sh or setup.ps1 first}
       LORE_GRPC_SECURE: "false"
+      # Client builds for the WebUI's home page; setup writes them (LORE_CLIENT_DOWNLOADS).
+      DOWNLOADS_DIR: /downloads
       LORE_TOKEN_EXCHANGE_ISSUER: ${LORE_EXCHANGE_PUBLIC_URL:-${LORE_PUBLIC_URL:-http://host.docker.internal:8080}}/web/v1/lore-oidc
       LORE_TOKEN_SIGNING_KEY_FILE: ${LORE_TOKEN_SIGNING_KEY_FILE:-/data/token-exchange-signing.pem}
       LORE_LDAP_URL: ${LORE_LDAP_URL:-}
@@ -116,6 +118,7 @@ services:
       - "${LORE_AD_HOST:-localhost}:${LORE_AD_IP:-127.0.0.1}"
     volumes:
       - ${LORE_DATA_ROOT:-./data}/control-plane:/data
+      - ${LORE_DATA_ROOT:-./data}/downloads:/downloads:ro
     # The image has the same check; repeated here so it holds for images built before -Y off.
     healthcheck:
       test: ["CMD-SHELL", "wget -Y off -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]

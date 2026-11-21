@@ -8,7 +8,10 @@ param(
     # Port of the WebUI in HTTP mode, when 8080 is taken on this computer.
     [string]$HttpPort = $env:LORE_HTTP_PORT,
     [switch]$DirectCaddy,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    # Where the WebUI's home page gets the client from; see "Client downloads" below.
+    [ValidateSet("", "online", "offline", "off")]
+    [string]$ClientDownloads = $env:LORE_CLIENT_DOWNLOADS
 )
 
 $ErrorActionPreference = "Stop"
@@ -133,7 +136,69 @@ foreach ($name in @(
 # generated configuration together with the data that compose mounts from it.
 $dataRoot = if ($env:LORE_DATA_ROOT) { $env:LORE_DATA_ROOT } else { "./data" }
 $generated = "$dataRoot/generated"
-New-Item -ItemType Directory -Force -Path "$generated/caddy", "$dataRoot/postgres", "$dataRoot/lore", "$dataRoot/control-plane", "$dataRoot/caddy" | Out-Null
+New-Item -ItemType Directory -Force -Path "$generated/caddy", "$dataRoot/postgres", "$dataRoot/lore", "$dataRoot/control-plane", "$dataRoot/caddy", "$dataRoot/downloads" | Out-Null
+
+# Client downloads. The control plane serves $dataRoot/downloads at /downloads/, and the home
+# page lists what manifest.json there names. The bundle's clients.tsv lists this release's client
+# builds (platform, kind, architecture, size, SHA-256, file name).
+#   online (default): links to the release on GitHub; nothing is stored here.
+#   offline: the files are kept here, for networks without internet access. They come from
+#     .\clients next to this script when it holds them, otherwise from GitHub.
+#   off: the home page offers no client.
+if (-not $ClientDownloads) { $ClientDownloads = if ($settings.LORE_CLIENT_DOWNLOADS) { $settings.LORE_CLIENT_DOWNLOADS } else { "online" } }
+if ($ClientDownloads -notin @("online", "offline", "off")) { throw "LORE_CLIENT_DOWNLOADS must be online, offline or off" }
+Set-EnvSetting "LORE_CLIENT_DOWNLOADS" $ClientDownloads
+$downloads = "$dataRoot/downloads"
+Remove-Item -Force -ErrorAction SilentlyContinue "$downloads/manifest.json"
+if ($ClientDownloads -eq "off" -or -not (Test-Path clients.tsv) -or -not (Test-Path VERSION)) {
+    # A source checkout has no clients.tsv: the home page links to the releases instead.
+    Get-ChildItem -File -Force $downloads | Remove-Item -Force
+} else {
+    $version = (Get-Content VERSION -Raw).Trim()
+    $releaseBase = if ($env:LORE_CLIENT_RELEASE_URL) { $env:LORE_CLIENT_RELEASE_URL } else { "https://github.com/arutar/lore/releases/download" }
+    $release = "$releaseBase/platform-v$version"
+    $items = @()
+    $keep = @("manifest.json")
+    foreach ($line in Get-Content clients.tsv) {
+        if (-not $line.Trim()) { continue }
+        $platform, $kind, $arch, $size, $sha, $file = $line.TrimEnd("`r").Split("`t")
+        if ($file -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or "$platform$kind$arch" -notmatch '^[a-z0-9_]+$' -or
+            $size -notmatch '^[0-9]+$' -or $sha -notmatch '^[0-9a-f]{64}$') { throw "clients.tsv has an invalid line: $line" }
+        $target = Join-Path $downloads $file
+        if ($ClientDownloads -eq "offline") {
+            $present = (Test-Path $target) -and (Get-FileHash -Algorithm SHA256 $target).Hash.ToLowerInvariant() -eq $sha
+            if (-not $present) {
+                $part = "$target.part"
+                if (Test-Path (Join-Path clients $file)) {
+                    Copy-Item -Force (Join-Path clients $file) $part
+                } else {
+                    Write-Host "Downloading $file"
+                    try {
+                        $ProgressPreference = "SilentlyContinue"
+                        Invoke-WebRequest -UseBasicParsing -Uri "$release/$file" -OutFile $part
+                    } catch {
+                        Remove-Item -Force -ErrorAction SilentlyContinue $part
+                        throw "Couldn't download $file ($($_.Exception.Message)). Put the release's client files in $(Join-Path (Get-Location).Path 'clients') and run setup again."
+                    }
+                }
+                if ((Get-FileHash -Algorithm SHA256 $part).Hash.ToLowerInvariant() -ne $sha) {
+                    Remove-Item -Force $part
+                    throw "$file doesn't match its SHA-256 in clients.tsv"
+                }
+                Move-Item -Force $part $target
+            }
+            $keep += $file
+            $url = "/downloads/$file"
+        } else {
+            $url = "$release/$file"
+        }
+        $items += [ordered]@{ platform = $platform; kind = $kind; arch = $arch; file = $file; url = $url; size = [long]$size; sha256 = $sha }
+    }
+    # Files of an earlier version, or all of them after switching to online, go.
+    Get-ChildItem -File -Force $downloads | Where-Object { $_.Name -notin $keep } | Remove-Item -Force
+    $manifest = [ordered]@{ version = $version; source = $(if ($ClientDownloads -eq "offline") { "server" } else { "github" }); items = $items }
+    ConvertTo-Json -InputObject $manifest -Depth 4 -Compress | Write-Utf8NoBom "$downloads/manifest.json"
+}
 (Get-Content lore/docker.toml -Raw).Replace("http://host.docker.internal:8080/auth", $AuthUrl).Replace("http://host.docker.internal:8080", $PublicUrl) |
     Write-Utf8NoBom "$generated/lore.toml"
 (Get-Content keycloak/lore-realm.json -Raw).Replace("http://localhost:8080", $PublicUrl).Replace("host.docker.internal", $PublicHost) |
@@ -241,4 +306,4 @@ foreach ($entry in $realmSettings.GetEnumerator()) { $execArguments += @("-e", "
 & docker @composeFiles @execArguments keycloak bash /opt/lore/configure-realm.sh
 if ($LASTEXITCODE -ne 0) { throw "Keycloak realm configuration failed" }
 
-Write-Host "`nLore is ready.`nWebUI: $PublicUrl`nKeycloak: $AuthUrl`nAdministrator: admin`nInitial administrator password: $($settings.LORE_ADMIN_PASSWORD)`nData: $([IO.Path]::GetFullPath($dataRoot))"
+Write-Host "`nLore is ready.`nWebUI: $PublicUrl`nKeycloak: $AuthUrl`nAdministrator: admin`nInitial administrator password: $($settings.LORE_ADMIN_PASSWORD)`nData: $([IO.Path]::GetFullPath($dataRoot))`nClient downloads: $ClientDownloads"

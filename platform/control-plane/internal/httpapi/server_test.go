@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -566,5 +568,50 @@ func TestLogoutReturnsKeycloakEndSessionURL(t *testing.T) {
 	status, session := client.request(http.MethodGet, "/web/v1/session", nil, false)
 	if status != http.StatusOK || session["authenticated"] != false {
 		t.Fatalf("session after logout = %v", session)
+	}
+}
+
+func TestDownloadsServeTheFolderAndNothingElse(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`{"version":"1.2.3"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "LoreClient-1.2.3-x64.msi"), []byte("msi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	storage := store.NewMemory()
+	auth, err := NewAuthenticator(context.Background(), storage, AuthConfig{SessionTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(storage, auth, Config{DownloadsDir: dir})
+	get := func(path string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		return recorder
+	}
+
+	manifest := get("/downloads/manifest.json")
+	if manifest.Code != http.StatusOK || manifest.Body.String() != `{"version":"1.2.3"}` || manifest.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatalf("manifest: %d %q %q", manifest.Code, manifest.Body.String(), manifest.Header().Get("Cache-Control"))
+	}
+	msi := get("/downloads/LoreClient-1.2.3-x64.msi")
+	if msi.Code != http.StatusOK || msi.Body.String() != "msi" || !strings.Contains(msi.Header().Get("Content-Disposition"), "attachment") {
+		t.Fatalf("client: %d %q %q", msi.Code, msi.Body.String(), msi.Header().Get("Content-Disposition"))
+	}
+	for _, path := range []string{"/downloads/missing.zip", "/downloads/sub", "/downloads/..%2Fsecret", "/downloads/.hidden", "/downloads/sub/x"} {
+		if code := get(path).Code; code != http.StatusNotFound {
+			t.Errorf("%s answered %d", path, code)
+		}
+	}
+
+	unset := NewServer(storage, auth, Config{})
+	recorder := httptest.NewRecorder()
+	unset.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/downloads/manifest.json", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("without a downloads folder: %d", recorder.Code)
 	}
 }

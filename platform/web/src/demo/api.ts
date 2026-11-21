@@ -81,6 +81,10 @@ export const demoApi: Api = {
     const end = start + (filter.limit ?? 500);
     return reply({ items: kept.slice(start, end), nextCursor: end < kept.length ? String(end) : undefined });
   },
+  // `?downloads=server` in the demo's address shows a server that holds the files itself.
+  downloads: () => reply(/[?&]downloads=server/.test(window.location.href)
+    ? { ...data.downloads, source: "server" as const, items: data.downloads.items.map((item) => ({ ...item, url: `https://lore.brightwater.example/downloads/${item.file}` })) }
+    : data.downloads),
   changeSummary: (id, revision) => {
     const all = data.changes(id, revision);
     if (!all) return missing();

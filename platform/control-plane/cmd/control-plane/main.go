@@ -129,6 +129,7 @@ func run() error {
 		RegistrationRealm:   registrationRealm,
 		Accounts:            accounts,
 		StaticDir:           settings.StaticDir,
+		DownloadsDir:        settings.DownloadsDir,
 		DevAuth:             settings.DevAuth,
 		DevUser:             model.User{ID: settings.DevUserID, Username: settings.DevUsername, DisplayName: settings.DevUsername, Role: model.RoleAdmin, Source: "local"},
 		OIDC:                httpapi.AuthConfig{},

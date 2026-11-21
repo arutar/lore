@@ -1,5 +1,5 @@
 import { demoApi } from "./demo/api";
-import type { AccessEntry, ADUser, Members, AuditEvent, BulkResult, ChangeKind, ChangeSummary, GlobalSettings, Grant, GrantSubject, LabeledGrant, Page, PublicConfig, Repository, RepositoryLock, RepositoryTree, Revision, RevisionChange, Role, Session, User } from "./types";
+import type { AccessEntry, ClientDownloads, ADUser, Members, AuditEvent, BulkResult, ChangeKind, ChangeSummary, GlobalSettings, Grant, GrantSubject, LabeledGrant, Page, PublicConfig, Repository, RepositoryLock, RepositoryTree, Revision, RevisionChange, Role, Session, User } from "./types";
 
 let csrfToken = "";
 
@@ -62,6 +62,12 @@ const serverApi = {
   changes: (id: string, revision: string, filter: { kind?: ChangeKind; q?: string; cursor?: string; limit?: number }, signal?: AbortSignal) =>
     request<Page<RevisionChange>>(`/repositories/${id}/revisions/${revision}/changes?${query({ kind: filter.kind, q: filter.q, cursor: filter.cursor, limit: filter.limit })}`, { signal }),
   changeSummary: (id: string, revision: string, signal?: AbortSignal) => request<ChangeSummary>(`/repositories/${id}/revisions/${revision}/summary`, { signal }),
+  // The client builds this server hands out; the installation puts them in its downloads folder.
+  downloads: async (): Promise<ClientDownloads> => {
+    const response = await fetch("/downloads/manifest.json", { credentials: "same-origin" });
+    if (!response.ok) throw new ApiError(`Request failed (${response.status})`, response.status, "http_" + response.status);
+    return response.json() as Promise<ClientDownloads>;
+  },
   locks: (id: string) => request<{ items: RepositoryLock[]; canRelease: boolean }>(`/repositories/${id}/locks`),
   releaseLock: (id: string, lock: RepositoryLock) => request<void>(`/repositories/${id}/locks/release`, { method: "POST", body: JSON.stringify({ branchId: lock.branchId, hash: lock.hash }) }),
   downloadUrl: (id: string, path: string, revision: string) => `/web/v1/repositories/${id}/download?${query({ path, revision })}`,

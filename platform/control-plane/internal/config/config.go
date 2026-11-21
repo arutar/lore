@@ -12,6 +12,7 @@ type Config struct {
 	GRPCAddress           string
 	DatabaseURL           string
 	StaticDir             string
+	DownloadsDir          string
 	ExternalURL           string
 	NativeRepositoryURL   string
 	DevAuth               bool
@@ -42,6 +43,7 @@ func FromEnv() (Config, error) {
 		GRPCAddress:           env("LORE_GRPC_ADDR", ":9090"),
 		DatabaseURL:           env("DATABASE_URL", "memory://"),
 		StaticDir:             env("STATIC_DIR", ""),
+		DownloadsDir:          os.Getenv("DOWNLOADS_DIR"),
 		ExternalURL:           env("EXTERNAL_URL", "http://localhost:8080"),
 		NativeRepositoryURL:   os.Getenv("LORE_NATIVE_PUBLIC_URL"),
 		DevUserID:             env("DEV_USER_ID", "dev-admin"),

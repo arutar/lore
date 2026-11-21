@@ -28,6 +28,7 @@ const paths = {
   chevron: <path d="m9 6 6 6-6 6" />,
   warn: <><path d="M12 4 2.5 20h19z" /><path d="M12 10v5M12 17.5v.01" /></>,
   terminal: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m7 9 3 3-3 3M13 15h4" /></>,
+  windows: <><rect x="4" y="4" width="7" height="7" rx="1" /><rect x="13" y="4" width="7" height="7" rx="1" /><rect x="4" y="13" width="7" height="7" rx="1" /><rect x="13" y="13" width="7" height="7" rx="1" /></>,
 };
 
 export type IconName = keyof typeof paths;
@@ -36,16 +37,21 @@ export function Icon({ name, className = "" }: { name: IconName; className?: str
   return <svg className={`i ${className}`} viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
 }
 
-const tones = ["var(--accent)", "var(--accent-2)", "var(--ok)", "var(--warn)"];
-export const tone = (text: string) => tones[[...text].reduce((hash, character) => (hash * 31 + character.charCodeAt(0)) >>> 0, 7) % tones.length];
+/** The theme's identity colour for a name (a repository, a person): the same name always gets the same one. */
+export const tone = (text: string) => {
+  let hash = [...text].reduce((value, character) => Math.imul(value ^ character.charCodeAt(0), 16777619) >>> 0, 630);
+  hash = Math.imul(hash ^ (hash >>> 15), 0x2c1b3c6d) >>> 0;
+  return `var(--id-${((hash ^ (hash >>> 12)) >>> 0) % 6 + 1})`;
+};
+const toneStyle = (text: string) => { const value = tone(text); return { "--tone": value, "--tone-2": value.replace(")", "b)") } as React.CSSProperties; };
 const initials = (text: string) => text.split(/[\s._@-]+/).filter(Boolean).slice(0, 2).map((word) => word[0]!.toUpperCase()).join("") || "?";
 
 export function Avatar({ name, square, small }: { name: string; square?: boolean; small?: boolean }) {
-  return <span className={`avatar ${square ? "sq" : ""} ${small ? "sm" : ""}`} style={{ "--tone": tone(name) } as React.CSSProperties}>{initials(name)}</span>;
+  return <span className={`avatar ${square ? "sq" : ""} ${small ? "sm" : ""}`} style={toneStyle(name)}>{initials(name)}</span>;
 }
 
 export function RepoTile({ name, large }: { name: string; large?: boolean }) {
-  return <span className={`repo-tile ${large ? "lg" : ""}`} style={{ "--tone": tone(name) } as React.CSSProperties}><Icon name="repo" /></span>;
+  return <span className={`repo-tile ${large ? "lg" : ""}`} style={toneStyle(name)}><Icon name="repo" /></span>;
 }
 
 export function Badge({ kind = "", icon, children, title }: { kind?: "" | "ok" | "accent" | "warn" | "danger"; icon?: IconName; children: ReactNode; title?: string }) {

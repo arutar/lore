@@ -7,7 +7,7 @@ import { Badge, ErrorNote, Icon, Loading, Switch, useToast, useTopBar } from "..
 
 /** Preview colours of each theme: background, surface, accent, text. */
 export const themes: [string, string, string, string, string][] = [
-  ["midnight", "Midnight", "#0c131c", "#242c36", "#61a9f6"], ["sky", "Sky", "#292623", "#44403d", "#53a7df"], ["ember", "Ember", "#191514", "#322e2d", "#c6413d"],
+  ["midnight", "Midnight", "#0c131c", "#242c36", "#61a9f6"], ["sky", "Sky", "#161310", "#2f2c28", "#53a7df"], ["ember", "Ember", "#191514", "#322e2d", "#c6413d"],
   ["sage", "Sage", "#1f231f", "#393d39", "#e89270"], ["ocean", "Ocean", "#0f181a", "#253235", "#54c9c5"],
   ["retro", "Retro", "#171612", "#302f2a", "#e6bf5d"], ["autumn", "Autumn", "#1b1413", "#342d2c", "#ea8d52"], ["light", "Light", "#eee9de", "#e4ddcf", "#b04613"],
   ["cyberpunk", "Cyberpunk", "#14161c", "#2c2e38", "#e96cad"],
