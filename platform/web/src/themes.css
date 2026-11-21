@@ -13,7 +13,6 @@
 :root {
   --bg:#0c131c; --surface:#171f28; --surface-2:#242c36; --line:#38424f; --text:#e6eaef; --muted:#acb3bd; --accent:#61a9f6; --accent-ink:#92c5ff; --on-accent:#0c1723; --accent-2:#e791c2; --ok:#78d694; --warn:#eec066; --danger:#f28885;
   --id-1:#77b5fb; --id-1b:#878cdd; --id-2:#e791c2; --id-2b:#d47480; --id-3:#31c8c9; --id-3b:#1aa5cb; --id-4:#b0a4f8; --id-4b:#b47dc5; --id-5:#76c788; --id-5b:#15ad95; --id-6:#e0a454; --id-6b:#a79631; --id-ink:#0e1926;
- 
   --radius:10px; --radius-sm:7px; --shadow:0 18px 50px -20px rgb(0 0 0 / 60%);
   --font:"Segoe UI Variable Text","Segoe UI",Inter,system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
   --mono:"Cascadia Code","JetBrains Mono",ui-monospace,Consolas,"DejaVu Sans Mono",monospace;
