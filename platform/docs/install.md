@@ -118,8 +118,8 @@ Download `lore-platform-server-<version>.tar.gz` (or `.zip`) from the
 
 ```sh
 mkdir -p /opt && cd /opt
-tar -xzf ~/lore-platform-server-0.2.10.tar.gz
-cd lore-platform-server-0.2.10
+tar -xzf ~/lore-platform-server-0.2.11.tar.gz
+cd lore-platform-server-0.2.11
 ```
 
 The bundle contains only scripts and configuration; `setup` pulls the published images
@@ -164,7 +164,8 @@ What `setup` does:
 3. Starts all containers and waits until every health check passes.
 4. Applies the settings to Keycloak (address, Active Directory, mail, client secret) and makes sure
    the local administrator account `admin` exists.
-5. Prints the WebUI address and the **initial administrator password**.
+5. Puts the client downloads in place for the WebUI's home page (see below).
+6. Prints the WebUI address and the **initial administrator password**.
 
 ```
 Lore is ready.
@@ -173,6 +174,7 @@ Keycloak: http://lore.corp.local:8080/auth
 Administrator: admin
 Initial administrator password: 3f9c...
 Data: /srv/lore-data
+Client downloads: online
 ```
 
 Open the WebUI and sign in as `admin` with that password. The password is also stored in `.env`
@@ -181,6 +183,22 @@ as `LORE_ADMIN_PASSWORD`.
 `setup` is safe to run again at any time: it keeps the secrets and data, applies changed settings
 and restarts what changed. Settings you pass once are saved to `.env`, so a plain `sh setup.sh`
 later reuses them.
+
+**Client downloads.** The WebUI's home page offers the client of the server's version for Windows
+and Linux. By default (`online`) it links to the files of the release on GitHub. If your users
+can't reach github.com, keep the files on the server instead (about 340 MB):
+
+```sh
+sh setup.sh --client-downloads offline
+```
+
+```powershell
+.\setup.ps1 -ClientDownloads offline
+```
+
+Setup downloads them from the release, or takes them from a `clients/` folder next to it on a
+host without internet access, and checks their SHA-256. See
+[docker.md](docker.md#client-downloads).
 
 ### 4.4 Check
 
@@ -295,7 +313,8 @@ certificate for it too). Most installations don't need this.
 
 ## 9. Install the clients
 
-From the [Releases](../../../../releases/latest) page:
+The WebUI's home page offers the client of the server's version, with a copyable `curl` command for
+Linux. The same files are on the [Releases](../../../../releases/latest) page:
 
 - **Windows:** `LoreClient-<version>-x64.msi`. Installs the `lore` CLI, the Explorer integration
   (context menu, status icons) and the sign-in companion. Requires the Microsoft Edge WebView2
@@ -303,7 +322,7 @@ From the [Releases](../../../../releases/latest) page:
 - **Linux:** `lore-cli-<version>-<arch>.tar.gz`:
 
   ```sh
-  tar -xzf lore-cli-0.2.10-x86_64-unknown-linux-gnu.tar.gz
+  tar -xzf lore-cli-0.2.11-x86_64-unknown-linux-gnu.tar.gz
   install -m 0755 lore ~/.local/bin/lore
   ```
 
@@ -359,7 +378,7 @@ sh restore.sh backups/20261113-020000 --yes
 Schedule backups with cron or Task Scheduler, for example nightly at 02:00:
 
 ```cron
-0 2 * * * cd /opt/lore-platform-server-0.2.10 && sh backup.sh /mnt/backup >> /var/log/lore-backup.log 2>&1
+0 2 * * * cd /opt/lore-platform-server-0.2.11 && sh backup.sh /mnt/backup >> /var/log/lore-backup.log 2>&1
 ```
 
 ## 11. Upgrade
@@ -387,6 +406,7 @@ complete list, with the parameters of every script, is in [docker.md](docker.md#
 | `LORE_DIRECT_CADDY` | `false` | `true`: Caddy listens on 80/443 and manages certificates |
 | `LORE_PROXY_BIND` | `0.0.0.0` | Interface for port 8080; `127.0.0.1` behind a local reverse proxy |
 | `LORE_DATA_ROOT` | `./data` | Where all data is stored |
+| `LORE_CLIENT_DOWNLOADS` | `online` | Client downloads on the home page: `online` (links to GitHub), `offline` (files kept on the server) or `off` |
 | `LORE_LDAP_URL` | — | `ldap://` or `ldaps://` URL of a domain controller; enables AD |
 | `LORE_LDAP_BASE_DN` | — | Where users and groups are searched |
 | `LORE_LDAP_BIND_DN`, `LORE_LDAP_BIND_PASSWORD` | — | Read-only service account |

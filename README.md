@@ -45,7 +45,8 @@ the fork can shrink as Lore matures.
 
 - **Web interface** — browse files with who changed each one last and when, history with what each revision added, changed, moved and deleted, and locks;
   download any file at any revision; manage repositories, access, users, audit log and settings.
-  Russian and English, nine themes, works on a phone.
+  The home page offers the Windows and Linux client of the server's version. Russian and English,
+  nine themes, works on a phone.
 - **File locks that hold** — lock a binary file before editing it, and the server refuses anyone
   else's push that changes it. Locks survive restarts and are in backups. A repository owner can
   release a lock left behind by someone who is away or has left; it goes to the audit log.
@@ -171,7 +172,7 @@ You need a host with Docker (Docker Engine with Compose v2 on Linux, Docker Desk
 
 ```sh
 # 1. Unpack the bundle
-tar -xzf lore-platform-server-0.2.10.tar.gz && cd lore-platform-server-0.2.10
+tar -xzf lore-platform-server-0.2.11.tar.gz && cd lore-platform-server-0.2.11
 
 # 2. Run setup with the name your users will type; keep the data outside the bundle
 LORE_DATA_ROOT=/srv/lore-data LORE_PUBLIC_HOST=lore.corp.local sh setup.sh
@@ -193,8 +194,8 @@ In PowerShell, as the user that runs Docker Desktop:
 
 ```powershell
 # 1. Unpack the bundle
-Expand-Archive lore-platform-server-0.2.10.zip -DestinationPath C:\lore
-cd C:\lore\lore-platform-server-0.2.10
+Expand-Archive lore-platform-server-0.2.11.zip -DestinationPath C:\lore
+cd C:\lore\lore-platform-server-0.2.11
 
 # 2. Run setup with the name your users will type; keep the data outside the bundle
 $env:LORE_DATA_ROOT = "D:\lore-data"
