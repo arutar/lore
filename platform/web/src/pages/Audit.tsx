@@ -74,7 +74,7 @@ export function AuditPage() {
   if (!events) return <Loading />;
   if (events.length === 0) return <div className="card"><Empty icon="audit" title={t("audit.empty")} /></div>;
   return <div className="card table-wrap">
-    <table className="table"><thead><tr><th>{t("audit.time")}</th><th>{t("audit.actor")}</th><th>{t("audit.action")}</th><th>{t("audit.target")}</th><th className="opt">{t("audit.change")}</th></tr></thead>
+    <table className="table stacked"><thead><tr><th>{t("audit.time")}</th><th>{t("audit.actor")}</th><th>{t("audit.action")}</th><th>{t("audit.target")}</th><th className="opt">{t("audit.change")}</th></tr></thead>
       <tbody>{events.map((event) => {
         const actor = event.actorId ? event.actorName || t("audit.formerUser") : t("audit.system");
         return <tr key={event.id}>

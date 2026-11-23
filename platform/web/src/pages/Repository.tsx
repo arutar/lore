@@ -52,8 +52,8 @@ export function RepositoryPage() {
       <RepoTile name={repository.name} large />
       <div className="grow">
         <div className="row wrap"><h1>{repository.name}</h1>
-          {repository.public ? <Badge kind="ok" icon="globe">{t("list.public")}</Badge> : <Badge kind="warn" icon="lock">{t("list.private")}</Badge>}
-          {canManage && <Badge kind="accent">{t("permission.owner")}</Badge>}
+          <span className="row hero-badges">{repository.public ? <Badge kind="ok" icon="globe">{t("list.public")}</Badge> : <Badge kind="warn" icon="lock">{t("list.private")}</Badge>}
+            {canManage && <Badge kind="accent">{t("permission.owner")}</Badge>}</span>
         </div>
         <p className="muted">{repository.description || t("repo.noDescription")}</p>
       </div>
@@ -353,7 +353,7 @@ function LocksTab({ id }: { id: string }) {
   if (problem) return <ErrorNote message={problem} />;
   if (!locks) return <Loading />;
   return <div className="card">{locks.length === 0 ? <Empty icon="lock" title={t("locks.empty")} text={t("locks.emptyText")} />
-    : <div className="table-wrap"><table className="table"><thead><tr><th>{t("locks.path")}</th><th>{t("locks.owner")}</th><th className="num">{t("locks.when")}</th>{canRelease && <th />}</tr></thead><tbody>
+    : <div className="table-wrap"><table className="table stacked"><thead><tr><th>{t("locks.path")}</th><th>{t("locks.owner")}</th><th className="num">{t("locks.when")}</th>{canRelease && <th />}</tr></thead><tbody>
       {locks.map((lock) => <tr key={`${lock.branchId}:${lock.path}`}><td><div className="cell-main"><Icon name="lock" className="file-ico" /><span className="mono">{lock.path}</span></div></td>
         <td><div className="row"><Avatar name={lock.owner} />{lock.owner}{lock.ownerDisabled && <Badge kind="warn" title={t("locks.ownerGoneHint")}>{t("locks.ownerGone")}</Badge>}</div></td>
         <td className="num" title={dateTime(lock.lockedAt)}>{ago(lock.lockedAt)}</td>

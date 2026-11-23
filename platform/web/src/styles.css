@@ -475,3 +475,64 @@ label.btn input[type=file] { display:none; }
   background:linear-gradient(145deg,color-mix(in srgb,var(--accent) 24%,var(--surface)),color-mix(in srgb,var(--accent) 12%,var(--surface))); }
 .version-cover small { font-size:10.5px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--muted); }
 .version-cover b { font-size:24px; font-weight:700; letter-spacing:-.3px; color:var(--accent-ink); font-variant-numeric:tabular-nums; }
+/* поиск и диалоги не шире экрана */
+.palette, .dialog { max-width:calc(100vw - 24px); min-width:0; }
+/* телефон: на главной под списком репозиториев идут приветствие и установка клиента, одной прокруткой */
+@media (max-width:980px) {
+  .shell.home { height:auto; min-height:100vh; align-content:start; }
+  .shell.home .rail { position:fixed; top:0; bottom:0; left:0; width:56px; z-index:30; }
+  .shell.home .detail { display:contents; }
+  .shell.home .detail > *, .shell.home > .list-pane { grid-column:2; }
+  .shell.home .demo-bar { order:1; } .shell.home .top { order:2; } .shell.home .content { order:4; }
+  .shell.home .list-pane { order:3; border-right:0; border-bottom:1px solid var(--line); }
+  .shell.home .list-pane .items { overflow:visible; }
+}
+@media (max-width:640px) {
+  .top-title b { min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  /* вкладки репозитория: у неактивных только значок */
+  .tabs a:not(.on) { font-size:0; gap:0; padding:10px 12px; }
+  .tabs a:not(.on) .count { margin-left:6px; }
+  /* история: номер и подпись ревизии второй строкой */
+  .rev { grid-template-columns:28px minmax(0,1fr); gap:4px 12px; padding:12px 14px; }
+  .rev > .avatar { grid-row:span 2; align-self:start; }
+  .rev > .row { grid-column:2; }
+  .table .change { display:none; }
+  .table td, .table th { padding-left:12px; padding-right:12px; }
+  .table .act .btn:not(.icon) { font-size:0; gap:0; }
+  /* таблицы-списки: первая ячейка строкой, остальное под ней */
+  .table.stacked thead { display:none; }
+  .table.stacked, .table.stacked tbody { display:block; }
+  .table.stacked tr { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; padding:10px 12px; border-bottom:1px solid color-mix(in srgb,var(--line) 65%,transparent); }
+  .table.stacked tr:last-child { border-bottom:0; }
+  .table.stacked td { display:block; width:auto; height:auto; padding:0; border:0; min-width:0; }
+  .table.stacked td:first-child { flex:1 0 100%; }
+  .table.stacked td.act, .table.stacked td.num { margin-left:auto; }
+  .table.stacked tr > td:nth-child(2):empty { display:none; }
+  .members tr.member td:first-child { padding-left:28px; }
+  .members.stacked tr.member { background:color-mix(in srgb,var(--surface-2) 45%,transparent); }
+  .members tr:not(.member) td:nth-child(2) > .badge { display:none; }
+  .access-grid .card-head > .grow { min-width:min(100%,180px); }
+  .danger-zone .setting-row > .grow { flex:1 1 180px; }
+  .stats { grid-template-columns:1fr 1fr; }
+  .card-head.with-version > .grow { flex:1 1 150px; }
+  .card-head.with-version > .badge { margin:0 0 12px 18px; }
+  .version-cover { min-width:96px; padding:12px 14px; }
+  .dl-row > .grow { min-width:0; flex:1 1 180px; }
+  .dl-actions { flex:1 0 100%; }
+}
+/* телефон: рядом со значком имя и пилюли, описание и факты под ними на всю ширину */
+@media (max-width:640px) {
+  .repo-hero { display:grid; grid-template-columns:auto minmax(0,1fr); gap:4px 14px; align-items:start; }
+  .repo-hero > .grow, .repo-hero > .grow > .row { display:contents; }
+  .repo-hero > .repo-tile { grid-row:1 / span 2; }
+  .repo-hero h1 { grid-column:2; grid-row:1; }
+  .repo-hero .hero-badges { grid-column:2; grid-row:2; }
+  .repo-hero > .grow > p { grid-column:1 / -1; grid-row:3; margin-top:10px; }
+  .repo-hero .facts { grid-column:1 / -1; grid-row:4; margin:4px 0 0; }
+  /* скачивания: кнопки на всю ширину; у Linux копирование curl значком рядом с архитектурой */
+  .dl-actions { justify-content:stretch; }
+  .dl-actions > * { flex:1 1 auto; justify-content:center; }
+  .dl-actions .seg { display:flex; flex:1 1 0; } .dl-actions .seg button { flex:1; }
+  .dl-actions > .btn.quiet { flex:0 0 36px; width:36px; padding:0; font-size:0; gap:0; border:1px solid var(--line); }
+  .dl-row:has(.os-tile.linux) .dl-actions > .btn.primary { flex-basis:100%; }
+}

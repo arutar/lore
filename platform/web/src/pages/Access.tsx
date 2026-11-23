@@ -63,7 +63,7 @@ export function AccessTab({ repository, onChanged }: { repository: Repository; o
           <BulkButtons repository={repository} onImported={() => void load()} /></div>
         <SubjectPicker repository={repository} onGrant={(type, subject, label, permission) =>
           run(() => api.setGrant({ repositoryId: repository.id, subjectType: type, subject, permission }), t("access.granted", { name: label, permission: permissionLabel(permission) }))} />
-        <div className="table-wrap"><table className="table"><tbody>
+        <div className="table-wrap"><table className="table stacked"><tbody>
           {named.map((grant) => {
             const lastOwner = grant.permission === "owner" && owners === 1;
             return <tr key={`${grant.subjectType}:${grant.subject}`}>

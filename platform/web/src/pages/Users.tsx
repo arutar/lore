@@ -104,7 +104,7 @@ export function UsersPage() {
     </div>
     <ErrorNote message={problem} onRetry={() => void load()} />
     {!data ? <Loading /> : <div className="card table-wrap">
-      <table className="table members"><thead><tr><th>{t("members.who")}</th><th>{t("users.source")}</th><th>{t("users.role")}</th><th className="act">{t("users.active")}</th></tr></thead>
+      <table className="table members stacked"><thead><tr><th>{t("members.who")}</th><th>{t("users.source")}</th><th>{t("users.role")}</th><th className="act">{t("users.active")}</th></tr></thead>
         <tbody>{visible.length === 0 ? <tr><td colSpan={4}><Empty icon="search" title={t("users.empty")} /></td></tr> : visible.map((row) => {
           if (row.kind === "group") {
             const expanded = open.has(row.key) || (needle !== "" && !matches(row.search));
