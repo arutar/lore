@@ -1,6 +1,6 @@
 # Текущее состояние Lore Platform
 
-Обновлено 2026-11-23, к релизу `platform-v0.3.1`: слит upstream main (215 изменений до 9a26efd3), список токенов MCP с поиском и статусами, отзыв токенов при удалении учётки.
+Обновлено 2026-11-23, к релизу `platform-v0.3.2`: прогресс проверки push перенесён в общее событие `Progress` (upstream его не отправляет); `BranchPushFragmentProgress` снова как у upstream.
 
 История по версиям — `platform/docs/releases/`. Коротко:
 - 0.2.4–0.2.5 — окно Commit для сотен тысяч файлов (дерево папок, страницы, поиск), прогресс коммита и отправки, удаление репозитория администратором;
@@ -12,6 +12,7 @@
 - 0.2.11 — скачивание клиента с главной (`/downloads/`, `clients.tsv` в бандле, `LORE_CLIENT_DOWNLOADS=online|offline|off`), темы v3.
 - 0.3.0 — MCP для ИИ-агентов: `/mcp` в control plane, 9 инструментов только для чтения, токены `lore_mcp_…` (в базе SHA-256), переключатель MCP (личный сильнее группового), ссылки на скачивание на `LORE_MCP_LINK_TTL`, режимы `off|internal|on` в setup; мобильная вёрстка всех страниц. Руководство — `platform/docs/mcp.md`, решение — `platform/docs/decisions/0002-mcp.md`.
 - 0.3.1 — слияние upstream (prefetch проверки push, восстановление прерванного push, быстрый stage широких каталогов, докачка больших файлов, исправления FUSE); прогресс проверки push теперь в полях `server_*` события `BranchPushFragmentProgress` (у upstream 256 событий — предел `bitcode`); список токенов MCP с поиском и статусами.
+- 0.3.2 — прогресс проверки push в событии `Progress` (данные `LoreProgressEventData`: репозиторий, ветка, `server_phase`, `server_restarts`, `server_checked`) вместо полей в конце `BranchPushFragmentProgress`; когда upstream переделает `Progress` (их TODO про union), переходим на их вариант.
 
 Замеры загрузки 703 009 файлов — в разделе Performance основного README.
 
