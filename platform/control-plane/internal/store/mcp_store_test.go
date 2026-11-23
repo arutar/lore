@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +114,92 @@ func TestMCPTokensLinksAndSwitches(t *testing.T) {
 			if !actions[action] {
 				t.Errorf("audit has no %s", action)
 			}
+		}
+	})
+}
+
+func TestDeletingAnAccountRevokesItsMCPTokens(t *testing.T) {
+	forEachStore(t, func(t *testing.T, storage Store) {
+		ctx := t.Context()
+		mustUser(t, storage, model.User{ID: "gone", Username: "gone"})
+		mustUser(t, storage, model.User{ID: "stays", Username: "stays"})
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		for _, token := range []model.MCPToken{{ID: "g1", UserID: "gone", Name: "a", CreatedAt: now}, {ID: "s1", UserID: "stays", Name: "b", CreatedAt: now}} {
+			if err := storage.CreateMCPToken(ctx, token, "hash-"+token.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := storage.CreateMCPLink(ctx, "link", model.MCPLink{TokenID: "g1", UserID: "gone", RepositoryID: repoA, Path: "f", Revision: "r", ExpiresAt: now.Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.DeleteUser(ctx, "admin", "gone"); err != nil {
+			t.Fatal(err)
+		}
+		if token, _ := storage.GetMCPToken(ctx, "g1"); token.RevokedAt == nil {
+			t.Fatal("a deleted account's token wasn't revoked")
+		}
+		if token, _ := storage.GetMCPToken(ctx, "s1"); token.RevokedAt != nil {
+			t.Fatal("another account's token was revoked")
+		}
+		if _, err := storage.GetMCPLink(ctx, "link", time.Now()); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("a deleted account's link still works: %v", err)
+		}
+		page, err := storage.SearchMCPTokens(ctx, "", "", 10)
+		if err != nil || len(page.Items) != 1 || page.Items[0].ID != "s1" || page.Items[0].UserLogin != "stays" {
+			t.Fatalf("search = %+v, %v", page, err)
+		}
+	})
+}
+
+func TestSearchMCPTokensFindsByTokenAndOwnerAndPages(t *testing.T) {
+	forEachStore(t, func(t *testing.T, storage Store) {
+		ctx := t.Context()
+		mustUser(t, storage, model.User{ID: "u1", Username: "mlopez", DisplayName: "Maria Lopez", Email: "maria@example.com"})
+		mustUser(t, storage, model.User{ID: "u2", Username: "kchen", DisplayName: "Kim Chen", Email: "kim@example.com"})
+		base := time.Now().UTC().Truncate(time.Microsecond)
+		tokens := []model.MCPToken{
+			{ID: "a", UserID: "u1", Name: "Claude Code", CreatedAt: base},
+			{ID: "b", UserID: "u2", Name: "Cursor 100%", CreatedAt: base.Add(time.Second)},
+			{ID: "c", UserID: "u1", Name: "nightly_job", CreatedAt: base.Add(2 * time.Second)},
+			{ID: "d", UserID: "u2", Name: "Hermes", CreatedAt: base.Add(2 * time.Second)},
+		}
+		for _, token := range tokens {
+			if err := storage.CreateMCPToken(ctx, token, "hash-"+token.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ids := func(page model.Page[model.MCPToken]) string {
+			var out []string
+			for _, token := range page.Items {
+				out = append(out, token.ID)
+			}
+			return strings.Join(out, ",")
+		}
+		for query, want := range map[string]string{
+			"": "d,c,b,a", "LOPEZ": "c,a", "kim@": "d,b", "claude": "a", "100%": "b", "_job": "c", "%": "b", "nobody": "",
+		} {
+			page, err := storage.SearchMCPTokens(ctx, query, "", 10)
+			if err != nil || ids(page) != want {
+				t.Errorf("search %q = %q, %v, want %q", query, ids(page), err, want)
+			}
+		}
+		var seen []string
+		cursor := ""
+		for range 5 {
+			page, err := storage.SearchMCPTokens(ctx, "", cursor, 3)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen = append(seen, ids(page))
+			if cursor = page.NextCursor; cursor == "" {
+				break
+			}
+		}
+		if strings.Join(seen, "|") != "d,c,b|a" {
+			t.Fatalf("pages = %v", seen)
+		}
+		if _, err := storage.SearchMCPTokens(ctx, "", "not-a-cursor", 3); !errors.Is(err, ErrInvalidCursor) {
+			t.Fatalf("bad cursor: %v", err)
 		}
 	})
 }

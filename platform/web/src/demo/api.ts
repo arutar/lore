@@ -129,10 +129,10 @@ export const demoApi: Api = {
     return reply(settings);
   },
   audit: () => reply(page(data.audit)),
-  mcpTokens: () => reply({ items: data.mcpTokens, url: data.mcpUrl }),
+  mcpTokens: () => reply({ items: data.mcpTokens.map((token) => ({ ...token, status: "active" as const })), url: data.mcpUrl }),
   createMCPToken: readOnly,
   revokeMCPToken: readOnly,
-  allMCPTokens: () => reply({ items: data.allMcpTokens }),
+  allMCPTokens: (q = "") => reply(page(data.allMcpTokens.filter((token) => matches(q, token.name, token.userName, token.userLogin)))),
   adminRevokeMCPToken: readOnly,
   setUserMCP: readOnly,
   setAccessMCP: readOnly,

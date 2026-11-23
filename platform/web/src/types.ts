@@ -41,6 +41,9 @@ export interface MCPToken {
   id: string;
   userId: string;
   userName?: string;
+  userLogin?: string;
+  /** Whether it works now; when not, why: its owner is disabled, MCP is off for them, or it expired. */
+  status?: "active" | "expired" | "user_disabled" | "mcp_off";
   name: string;
   /** The start of the secret, to tell tokens apart. */
   hint: string;

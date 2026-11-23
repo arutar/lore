@@ -167,9 +167,13 @@ func MCPAllowed(user User, entries []AccessEntry) bool {
 type MCPToken struct {
 	ID     string `json:"id"`
 	UserID string `json:"userId"`
-	// UserName is filled in for the administrator's list of every token.
-	UserName string `json:"userName,omitempty"`
-	Name     string `json:"name"`
+	// UserName and UserLogin name the owner in the administrator's list of every token.
+	UserName  string `json:"userName,omitempty"`
+	UserLogin string `json:"userLogin,omitempty"`
+	// Status is whether the token works now: "active", "expired", "user_disabled" (its owner
+	// is disabled, deleted or no longer admitted from Active Directory) or "mcp_off".
+	Status string `json:"status,omitempty"`
+	Name   string `json:"name"`
 	// Hint is the start of the secret, so a token can be told apart from others in a list.
 	Hint string `json:"hint"`
 	// Repositories limits the token to these repository IDs; empty means every repository its

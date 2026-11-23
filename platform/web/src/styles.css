@@ -569,3 +569,10 @@ label.btn input[type=file] { display:none; }
   .mcp-examples .seg { justify-self:stretch; } .mcp-examples .seg button { flex:1; padding:0 8px; font-size:12px; }
 }
 @media (max-width:640px) { .table.stacked td { overflow-wrap:anywhere; } }
+/* MCP: список всех токенов у администратора */
+.mcp-search { padding-bottom:0; }
+.mcp-search .search { max-width:420px; }
+.mcp-all td small { display:block; color:var(--muted); font-size:12px; }
+.mcp-all td small.mono, .mcp-all td .muted small { display:inline; }
+.mcp-all td small.mono { font-family:var(--mono); font-size:11.5px; }
+@media (max-width:640px) { .mcp-search .search { max-width:none; } .mcp-all td.nowrap { white-space:normal; } }

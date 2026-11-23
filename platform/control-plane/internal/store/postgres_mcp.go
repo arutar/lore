@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -202,4 +203,60 @@ func (p *Postgres) GetMCPLink(ctx context.Context, hash string, now time.Time) (
 	}
 	link.ExpiresAt = link.ExpiresAt.UTC()
 	return link, nil
+}
+
+func (p *Postgres) SearchMCPTokens(ctx context.Context, query, after string, limit int) (model.Page[model.MCPToken], error) {
+	afterTime, afterID, err := parseTokenCursor(after)
+	if err != nil {
+		return model.Page[model.MCPToken]{}, err
+	}
+	// Conditions are added only when they apply, as pageConditions does, so the plan can use
+	// mcp_tokens_active_created for the order and the trigram indexes for the search.
+	conditions := []string{"t.revoked_at IS NULL"}
+	var args []any
+	if after != "" {
+		args = append(args, afterTime, afterID)
+		conditions = append(conditions, fmt.Sprintf("(t.created_at, t.id) < ($%d, $%d)", len(args)-1, len(args)))
+	}
+	if query != "" {
+		args = append(args, containsPattern(query))
+		var matches []string
+		for _, column := range []string{"t.name", "u.username", "u.display_name", "u.email"} {
+			matches = append(matches, fmt.Sprintf(`lower(%s) LIKE lower($%d) ESCAPE '\'`, column, len(args)))
+		}
+		conditions = append(conditions, "("+strings.Join(matches, " OR ")+")")
+	}
+	args = append(args, limit+1)
+	rows, err := p.pool.Query(ctx, `
+		SELECT t.id, t.user_id, t.name, t.hint, t.repositories, t.created_at, t.expires_at, t.last_used_at, t.revoked_at,
+			COALESCE(u.username, '')
+		FROM mcp_tokens t LEFT JOIN users u ON u.id = t.user_id
+		WHERE `+strings.Join(conditions, " AND ")+fmt.Sprintf(`
+		ORDER BY t.created_at DESC, t.id DESC
+		LIMIT $%d`, len(args)), args...)
+	if err != nil {
+		return model.Page[model.MCPToken]{}, fmt.Errorf("search MCP tokens: %w", err)
+	}
+	defer rows.Close()
+	tokens := []model.MCPToken{}
+	for rows.Next() {
+		var token model.MCPToken
+		if err := rows.Scan(&token.ID, &token.UserID, &token.Name, &token.Hint, &token.Repositories, &token.CreatedAt,
+			&token.ExpiresAt, &token.LastUsedAt, &token.RevokedAt, &token.UserLogin); err != nil {
+			return model.Page[model.MCPToken]{}, fmt.Errorf("scan MCP token: %w", err)
+		}
+		if token.Repositories == nil {
+			token.Repositories = []string{}
+		}
+		tokens = append(tokens, token)
+	}
+	if err := rows.Err(); err != nil {
+		return model.Page[model.MCPToken]{}, err
+	}
+	page := model.Page[model.MCPToken]{Items: tokens}
+	if len(tokens) > limit {
+		page.Items = tokens[:limit]
+		page.NextCursor = tokenCursor(tokens[limit-1])
+	}
+	return page, nil
 }

@@ -280,6 +280,8 @@ export const mcpTokens: MCPToken[] = [
   { id: "t-hermes", userId: "u-admin", name: "Hermes + DeepSeek, release notes", hint: "lore_mcp_c9Lm", repositories: ["hollow-keep", "handbook"], createdAt: ago(24 * 3), expiresAt: ago(-24 * 87), lastUsedAt: ago(26) },
 ];
 export const allMcpTokens: MCPToken[] = [
-  ...mcpTokens.map((token) => ({ ...token, userName: "Administrator" })),
-  { id: "t-mark", userId: "u-mark", userName: "Mark Chen", name: "Cursor", hint: "lore_mcp_Pz04", repositories: ["build-pipeline"], createdAt: ago(24 * 20), lastUsedAt: ago(3) },
+  ...mcpTokens.map((token) => ({ ...token, userName: "Administrator", userLogin: "admin", status: "active" as const })),
+  { id: "t-mark", userId: "u-mark", userName: "Mark Chen", userLogin: "mchen", status: "active", name: "Cursor", hint: "lore_mcp_Pz04", repositories: ["build-pipeline"], createdAt: ago(24 * 20), lastUsedAt: ago(3) },
+  { id: "t-lina", userId: "u-lina", userName: "Lina Sato", userLogin: "lsato", status: "mcp_off", name: "Claude Desktop (mcp-remote)", hint: "lore_mcp_Wd7k", repositories: [], createdAt: ago(24 * 9), lastUsedAt: ago(24 * 2) },
+  { id: "t-omar", userId: "u-omar", userName: "Omar Haddad", userLogin: "ohaddad", status: "expired", name: "Nightly asset report", hint: "lore_mcp_3fQa", repositories: ["character-pack"], createdAt: ago(24 * 95), expiresAt: ago(24 * 5), lastUsedAt: ago(24 * 6) },
 ];

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"math/big"
 	"net/http"
 	"strings"
@@ -86,6 +87,9 @@ func (s *Server) mcpTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tokens, err := s.store.ListMCPTokens(r.Context(), user.ID)
+	if err == nil {
+		err = s.describeTokens(r, tokens)
+	}
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -190,18 +194,78 @@ func (s *Server) revokeToken(w http.ResponseWriter, r *http.Request, actorID, id
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// allMCPTokens lists every account's tokens for an administrator.
+// allMCPTokens pages through every account's tokens for an administrator, newest first, with a
+// search on the token's name and its owner, and each token's status.
 func (s *Server) allMCPTokens(w http.ResponseWriter, r *http.Request) {
-	tokens, err := s.store.ListMCPTokens(r.Context(), "")
+	limit, ok := pageLimit(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_page_size", "Page size must be between 1 and 100")
+		return
+	}
+	page, err := s.store.SearchMCPTokens(r.Context(), searchQuery(r), r.URL.Query().Get("cursor"), limit)
+	if errors.Is(err, store.ErrInvalidCursor) {
+		writeError(w, http.StatusBadRequest, "invalid_cursor", "The page cursor is invalid")
+		return
+	}
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	names := s.accountNames(r.Context())
-	for index := range tokens {
-		tokens[index].UserName = names(tokens[index].UserID)
+	if err := s.describeTokens(r, page.Items); err != nil {
+		writeStoreError(w, err)
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": tokens})
+	writeJSON(w, http.StatusOK, page)
+}
+
+// describeTokens fills in each token's owner name and status: whether it works now, and if not,
+// why. A token isn't changed by its owner being switched off; it just stops working until the
+// owner may use MCP again.
+func (s *Server) describeTokens(r *http.Request, tokens []model.MCPToken) error {
+	var entries []model.AccessEntry
+	loaded := false
+	owners := map[string]*model.User{}
+	now := time.Now()
+	for index := range tokens {
+		token := &tokens[index]
+		owner, seen := owners[token.UserID]
+		if !seen {
+			user, err := s.store.GetUser(r.Context(), token.UserID)
+			switch {
+			case err == nil:
+				owner = &user
+			case !errors.Is(err, store.ErrNotFound):
+				return err
+			}
+			owners[token.UserID] = owner
+		}
+		if owner != nil {
+			token.UserName = accountName(*owner)
+			if token.UserLogin == "" {
+				token.UserLogin = owner.Username
+			}
+		}
+		switch {
+		case owner == nil || !owner.Active():
+			token.Status = "user_disabled"
+		case token.ExpiresAt != nil && !now.Before(*token.ExpiresAt):
+			token.Status = "expired"
+		default:
+			if owner.Federated() && !loaded {
+				var err error
+				if entries, err = s.store.ListAccess(r.Context()); err != nil {
+					return err
+				}
+				loaded = true
+			}
+			if model.MCPAllowed(*owner, entries) {
+				token.Status = "active"
+			} else {
+				token.Status = "mcp_off"
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Server) adminRevokeMCPToken(w http.ResponseWriter, r *http.Request) {

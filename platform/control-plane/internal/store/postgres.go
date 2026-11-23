@@ -655,6 +655,13 @@ func (p *Postgres) DeleteUser(ctx context.Context, actorID, id string) error {
 	if _, err := tx.Exec(ctx, "DELETE FROM sessions WHERE user_id = $1", id); err != nil {
 		return fmt.Errorf("delete user sessions: %w", err)
 	}
+	// The account's MCP tokens and their download links end with it.
+	if _, err := tx.Exec(ctx, "UPDATE mcp_tokens SET revoked_at = $2 WHERE user_id = $1 AND revoked_at IS NULL", id, time.Now().UTC()); err != nil {
+		return fmt.Errorf("revoke user MCP tokens: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM mcp_links WHERE user_id = $1", id); err != nil {
+		return fmt.Errorf("delete user MCP links: %w", err)
+	}
 	if err := insertAudit(ctx, tx, actorID, "user.delete", "user", id, username, ""); err != nil {
 		return err
 	}
