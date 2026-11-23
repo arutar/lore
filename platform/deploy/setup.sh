@@ -4,11 +4,19 @@ set -eu
 cd "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 # --client-downloads online|offline|off: where the WebUI's home page gets the client from
 # (LORE_CLIENT_DOWNLOADS, saved in .env). See "Client downloads" below.
+# --mcp off|internal|on and --mcp-networks "10.0.0.0/16;192.168.0.0/24": the MCP endpoint for AI
+# agents (LORE_MCP, LORE_MCP_NETWORKS, saved in .env). See "MCP" below and docs/mcp.md.
 while [ $# -gt 0 ]; do
     case "$1" in
         --client-downloads=*) LORE_CLIENT_DOWNLOADS=${1#*=}; export LORE_CLIENT_DOWNLOADS ;;
         --client-downloads) [ $# -ge 2 ] || { echo "--client-downloads needs online, offline or off" >&2; exit 1; }
             LORE_CLIENT_DOWNLOADS=$2; export LORE_CLIENT_DOWNLOADS; shift ;;
+        --mcp=*) LORE_MCP=${1#*=}; export LORE_MCP ;;
+        --mcp) [ $# -ge 2 ] || { echo "--mcp needs off, internal or on" >&2; exit 1; }
+            LORE_MCP=$2; export LORE_MCP; shift ;;
+        --mcp-networks=*) LORE_MCP_NETWORKS=${1#*=}; export LORE_MCP_NETWORKS ;;
+        --mcp-networks) [ $# -ge 2 ] || { echo "--mcp-networks needs networks such as \"10.0.0.0/16;192.168.0.0/24\"" >&2; exit 1; }
+            LORE_MCP_NETWORKS=$2; export LORE_MCP_NETWORKS; shift ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
     shift
@@ -135,10 +143,36 @@ for name in LORE_LDAP_URL LORE_LDAP_BASE_DN LORE_LDAP_BIND_DN LORE_LDAP_BIND_PAS
     LORE_LDAP_USERNAME_ATTRIBUTE LORE_LDAP_STARTTLS LORE_LDAP_INSECURE_SKIP_VERIFY LORE_LDAP_TIMEOUT \
     LORE_LDAP_REFRESH LORE_LDAP_OUTAGE_GRACE \
     LORE_SMTP_HOST LORE_SMTP_PORT LORE_SMTP_FROM LORE_SMTP_FROM_NAME LORE_SMTP_USERNAME LORE_SMTP_PASSWORD \
-    LORE_SMTP_STARTTLS LORE_SMTP_SSL LORE_DATA_ROOT LORE_PROXY_BIND LORE_CONTROL_PLANE_IMAGE LORE_SERVER_IMAGE; do
+    LORE_SMTP_STARTTLS LORE_SMTP_SSL LORE_DATA_ROOT LORE_PROXY_BIND LORE_CONTROL_PLANE_IMAGE LORE_SERVER_IMAGE \
+    LORE_MCP_CONCURRENCY LORE_MCP_MAX_READ LORE_MCP_LINK_TTL; do
     eval "value=\${$name:-}"
     if [ -n "$value" ]; then set_env "$name" "$value"; fi
 done
+
+# MCP for AI agents, always with a personal token (docs/mcp.md).
+#   off (default): no MCP endpoint.
+#   internal: only clients in LORE_MCP_NETWORKS, which you must give, such as
+#     "10.0.0.0/16;192.168.0.0/24" (networks in CIDR form, separated by ";").
+#   on: from anywhere the WebUI is reachable.
+MCP_MODE=${LORE_MCP:-off}
+case "$MCP_MODE" in off|internal|on) ;; *) echo "LORE_MCP must be off, internal or on" >&2; exit 1 ;; esac
+MCP_NETWORKS=$(printf '%s' "${LORE_MCP_NETWORKS:-}" | tr ', ' ';;' | tr -s ';' | sed 's/^;//; s/;$//')
+for network in $(printf '%s' "$MCP_NETWORKS" | tr ';' ' '); do
+    case "$network" in
+        *[!0-9A-Fa-f:./]*|'') echo "LORE_MCP_NETWORKS: \"$network\" isn't a network such as 10.0.0.0/16" >&2; exit 1 ;;
+    esac
+done
+if [ "$MCP_MODE" = internal ] && [ -z "$MCP_NETWORKS" ]; then
+    echo "--mcp internal needs the networks it answers, for example: --mcp-networks \"10.0.0.0/16;192.168.0.0/24\"" >&2
+    exit 1
+fi
+set_env LORE_MCP "$MCP_MODE"
+set_env LORE_MCP_NETWORKS "$MCP_NETWORKS"
+case "$MCP_MODE" in
+    off) MCP_SUMMARY=off ;;
+    internal) MCP_SUMMARY="internal ($MCP_NETWORKS): $WEB_URL/mcp" ;;
+    on) MCP_SUMMARY="on: $WEB_URL/mcp" ;;
+esac
 
 # Client downloads. The control plane serves DATA_ROOT/downloads at /downloads/, and the home
 # page lists what manifest.json there names. The bundle's clients.tsv lists this release's client
@@ -315,5 +349,5 @@ docker compose "$@" exec -T \
     -e LORE_LDAP_STARTTLS="${LORE_LDAP_STARTTLS:-}" -e LORE_LDAP_INSECURE_SKIP_VERIFY="${LORE_LDAP_INSECURE_SKIP_VERIFY:-}" \
     keycloak bash /opt/lore/configure-realm.sh
 
-printf '\nLore is ready.\nWebUI: %s\nKeycloak: %s\nAdministrator: admin\nInitial administrator password: %s\nData: %s\nClient downloads: %s\n' \
-    "$WEB_URL" "$KEYCLOAK_URL" "$LORE_ADMIN_PASSWORD" "$(cd "$DATA_ROOT" && pwd)" "$CLIENT_MODE"
+printf '\nLore is ready.\nWebUI: %s\nKeycloak: %s\nAdministrator: admin\nInitial administrator password: %s\nData: %s\nClient downloads: %s\nMCP: %s\n' \
+    "$WEB_URL" "$KEYCLOAK_URL" "$LORE_ADMIN_PASSWORD" "$(cd "$DATA_ROOT" && pwd)" "$CLIENT_MODE" "$MCP_SUMMARY"

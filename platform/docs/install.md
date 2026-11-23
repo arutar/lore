@@ -175,6 +175,7 @@ Administrator: admin
 Initial administrator password: 3f9c...
 Data: /srv/lore-data
 Client downloads: online
+MCP: off
 ```
 
 Open the WebUI and sign in as `admin` with that password. The password is also stored in `.env`
@@ -199,6 +200,21 @@ sh setup.sh --client-downloads offline
 Setup downloads them from the release, or takes them from a `clients/` folder next to it on a
 host without internet access, and checks their SHA-256. See
 [docker.md](docker.md#client-downloads).
+
+**MCP for AI agents (optional).** AI agents such as Claude Code, Cursor or Hermes can read
+repositories over MCP with a personal token. It's off unless you turn it on, for your internal
+networks only or for everyone who can reach the WebUI:
+
+```sh
+sh setup.sh --mcp internal --mcp-networks "10.0.0.0/16;192.168.0.0/24"
+sh setup.sh --mcp on
+```
+
+```powershell
+.\setup.ps1 -Mcp internal -McpNetworks "10.0.0.0/16;192.168.0.0/24"
+```
+
+See [mcp.md](mcp.md) for tokens, who may use MCP and how to connect an agent.
 
 ### 4.4 Check
 
@@ -310,6 +326,8 @@ certificate for it too). Most installations don't need this.
 5. Repository → **Access** — give *Read*, *Write* or *Owner* to users and AD groups, or switch on
    "all signed-in users" / "public".
 6. Copy the repository address (`lore://...`) with the copy button and send it to the team.
+7. **MCP** (when it's on) — people create their own tokens for AI agents in the left menu; in
+   **Users and groups** the MCP switch turns it off for a person or a group. See [mcp.md](mcp.md).
 
 ## 9. Install the clients
 
@@ -407,6 +425,11 @@ complete list, with the parameters of every script, is in [docker.md](docker.md#
 | `LORE_PROXY_BIND` | `0.0.0.0` | Interface for port 8080; `127.0.0.1` behind a local reverse proxy |
 | `LORE_DATA_ROOT` | `./data` | Where all data is stored |
 | `LORE_CLIENT_DOWNLOADS` | `online` | Client downloads on the home page: `online` (links to GitHub), `offline` (files kept on the server) or `off` |
+| `LORE_MCP` | `off` | MCP for AI agents: `off`, `internal` (only `LORE_MCP_NETWORKS`) or `on`; see [mcp.md](mcp.md) |
+| `LORE_MCP_NETWORKS` | — | Networks for `internal`, e.g. `10.0.0.0/16;192.168.0.0/24` |
+| `LORE_MCP_CONCURRENCY` | `8` | MCP calls one token may run at once; `0`: no limit |
+| `LORE_MCP_MAX_READ` | `1048576` | Most bytes of text one `read_text` call returns |
+| `LORE_MCP_LINK_TTL` | `10m` | How long an MCP download link works |
 | `LORE_LDAP_URL` | — | `ldap://` or `ldaps://` URL of a domain controller; enables AD |
 | `LORE_LDAP_BASE_DN` | — | Where users and groups are searched |
 | `LORE_LDAP_BIND_DN`, `LORE_LDAP_BIND_PASSWORD` | — | Read-only service account |

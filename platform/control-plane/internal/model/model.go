@@ -71,6 +71,9 @@ type User struct {
 	// Deleted marks a removed local account. The record stays, renamed, so the audit log keeps
 	// its name; it's hidden from every list and can't be used.
 	Deleted bool `json:"deleted,omitempty"`
+	// MCPDisabled switches MCP off for a local account. A directory account's MCP access comes
+	// from the access list instead, see MCPAllowed.
+	MCPDisabled bool `json:"mcpDisabled,omitempty"`
 }
 
 // Federated reports whether the account comes from Active Directory.
@@ -91,7 +94,9 @@ type AccessEntry struct {
 	Detail      string      `json:"detail,omitempty"`
 	Role        Role        `json:"role"`
 	Disabled    bool        `json:"disabled"`
-	CreatedAt   time.Time   `json:"createdAt"`
+	// MCPDisabled switches MCP off for the account or for the group's members, see MCPAllowed.
+	MCPDisabled bool      `json:"mcpDisabled"`
+	CreatedAt   time.Time `json:"createdAt"`
 }
 
 // ResolveAccess decides what the entries give a directory account with these groups: a
@@ -129,6 +134,73 @@ func ResolveAccess(entries []AccessEntry, directoryID string, groups []string) (
 		}
 	}
 	return admitted, role
+}
+
+// MCPAllowed reports whether an account may use MCP. A local account follows its own switch. A
+// directory account with a personal entry on the access list follows that entry's switch,
+// whatever its groups say; one admitted only through groups may use MCP when at least one of its
+// enabled groups allows it. Every switch is on unless an administrator turns it off.
+func MCPAllowed(user User, entries []AccessEntry) bool {
+	if !user.Federated() {
+		return !user.MCPDisabled
+	}
+	for _, entry := range entries {
+		if entry.SubjectType == SubjectUser && strings.EqualFold(entry.Subject, user.DirectoryID) {
+			return !entry.MCPDisabled
+		}
+	}
+	for _, entry := range entries {
+		if entry.SubjectType != SubjectGroup || entry.Disabled || entry.MCPDisabled {
+			continue
+		}
+		for _, group := range user.Groups {
+			if strings.EqualFold(entry.Subject, group) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// MCPToken is a personal token for the MCP endpoint. Only its SHA-256 is stored; the secret is
+// shown once, when it's created. It reads what its owner may read, never more.
+type MCPToken struct {
+	ID     string `json:"id"`
+	UserID string `json:"userId"`
+	// UserName is filled in for the administrator's list of every token.
+	UserName string `json:"userName,omitempty"`
+	Name     string `json:"name"`
+	// Hint is the start of the secret, so a token can be told apart from others in a list.
+	Hint string `json:"hint"`
+	// Repositories limits the token to these repository IDs; empty means every repository its
+	// owner may read.
+	Repositories []string   `json:"repositories"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
+	LastUsedAt   *time.Time `json:"lastUsedAt,omitempty"`
+	RevokedAt    *time.Time `json:"revokedAt,omitempty"`
+}
+
+// Usable reports whether the token may still authenticate at the given time.
+func (t MCPToken) Usable(now time.Time) bool {
+	return t.RevokedAt == nil && (t.ExpiresAt == nil || now.Before(*t.ExpiresAt))
+}
+
+// Covers reports whether the token reaches the repository.
+func (t MCPToken) Covers(repositoryID string) bool {
+	return len(t.Repositories) == 0 || slices.ContainsFunc(t.Repositories, func(id string) bool { return strings.EqualFold(id, repositoryID) })
+}
+
+// MCPLink is a short-lived download link that an MCP client asked for. Only its key's SHA-256
+// is stored. It downloads one file at one revision while the token, the account and the
+// repository grant still allow it.
+type MCPLink struct {
+	TokenID      string
+	UserID       string
+	RepositoryID string
+	Path         string
+	Revision     string
+	ExpiresAt    time.Time
 }
 
 // Admits reports whether the entries let a directory account with these groups in.

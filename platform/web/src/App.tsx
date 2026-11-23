@@ -10,6 +10,7 @@ import { RepositoryPage } from "./pages/Repository";
 import { UsersPage } from "./pages/Users";
 import { AuditPage } from "./pages/Audit";
 import { SettingsPage, themes } from "./pages/Settings";
+import { McpPage } from "./pages/Mcp";
 import { NewRepositoryDialog } from "./pages/NewRepository";
 
 export interface AppState {
@@ -116,12 +117,13 @@ function Shell({ session, config, setConfig, expired }: { session: Session; conf
     window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
   }, [signinProblem]);
 
-  const wide = isAdmin && /^\/admin\//.test(location.pathname);
+  const wide = (isAdmin && /^\/admin\//.test(location.pathname)) || location.pathname === "/mcp-tokens";
   const home = location.pathname === "/";
   const nav = [{ to: "/", label: t("nav.repositories"), icon: "repo" as const, end: false },
     ...(isAdmin ? [{ to: "/admin/users", label: t("nav.users"), icon: "users" as const, end: true },
       { to: "/admin/audit", label: t("nav.audit"), icon: "audit" as const, end: true },
-      { to: "/admin/settings", label: t("nav.settings"), icon: "settings" as const, end: true }] : [])];
+      { to: "/admin/settings", label: t("nav.settings"), icon: "settings" as const, end: true }] : []),
+    ...(config.mcpEnabled && session.mcpAllowed ? [{ to: "/mcp-tokens", label: t("nav.mcp"), icon: "plug" as const, end: true }] : [])];
 
   return <AppContext.Provider value={state}>
     <TopBarContext.Provider value={setTopBar}>
@@ -153,6 +155,7 @@ function Shell({ session, config, setConfig, expired }: { session: Session; conf
               <Route path="/admin/users" element={isAdmin ? <UsersPage /> : <Navigate to="/" />} />
               <Route path="/admin/audit" element={isAdmin ? <AuditPage /> : <Navigate to="/" />} />
               <Route path="/admin/settings" element={isAdmin ? <SettingsPage /> : <Navigate to="/" />} />
+              <Route path="/mcp-tokens" element={session.authenticated ? <McpPage /> : <Navigate to="/" />} />
               <Route path="*" element={<Navigate to="/" />} />
             </Routes>}
           </main>

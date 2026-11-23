@@ -136,6 +136,8 @@ func run() error {
 		ExternalURL:         settings.ExternalURL,
 		NativeRepositoryURL: settings.NativeRepositoryURL,
 		SecureHeaders:       settings.SecureCookies,
+		MCP: httpapi.MCPConfig{Mode: httpapi.MCPMode(settings.MCP), Networks: settings.MCPNetworks, Concurrency: settings.MCPConcurrency,
+			MaxRead: settings.MCPMaxRead, LinkTTL: settings.MCPLinkTTL},
 	})
 
 	server := &http.Server{

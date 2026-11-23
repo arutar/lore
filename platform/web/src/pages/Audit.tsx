@@ -7,6 +7,7 @@ import { Avatar, Badge, Empty, ErrorNote, Loading, useTopBar } from "../ui";
 const tones: Record<string, "" | "ok" | "accent" | "warn" | "danger"> = {
   "grant.set": "", "grant.remove": "warn", "user.create": "ok", "user.provision": "ok", "user.update": "accent",
   "user.disable": "danger", "user.directory_disable": "danger", "user.enable": "ok", "user.directory_enable": "ok", "repository.create": "ok",
+  "mcp.token.create": "accent", "mcp.token.revoke": "warn", "mcp.download": "accent",
 };
 
 export function AuditPage() {
@@ -51,6 +52,18 @@ export function AuditPage() {
         return settingsChange(event.before, event.after);
       case "lock.release":
         return t("audit.lockReleased", { path: event.before ?? "", owner: subject(event) });
+      case "user.mcp":
+      case "access.mcp": {
+        const state = (value?: string) => (value === "off" ? t("audit.off") : t("audit.on"));
+        const change = t("audit.mcpSwitch", { before: state(event.before), after: state(event.after) });
+        return event.action === "access.mcp" && subject(event) ? `${subject(event)}: ${change}` : change;
+      }
+      case "mcp.token.create":
+        return event.after || "—";
+      case "mcp.token.revoke":
+        return event.before || "—";
+      case "mcp.download":
+        return event.after || "—";
       default:
         return "—";
     }

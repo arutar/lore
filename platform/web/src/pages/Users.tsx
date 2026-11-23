@@ -92,9 +92,15 @@ export function UsersPage() {
       <option value="user">{t("users.roleUser")}</option><option value="admin">{t("users.roleAdmin")}</option></select>;
   const remove = (entry: AccessEntry) => <button className="btn quiet icon sm" title={t("members.remove", { name: entry.name })} aria-label={t("members.remove", { name: entry.name })}
     onClick={() => { if (window.confirm(t("members.removeConfirm", { name: entry.name }))) void run(() => api.removeAccess(entry.subjectType, entry.subject), t("access.dirRemoved", { name: entry.name })); }}><Icon name="x" /></button>;
+  // MCP for AI agents, when this server offers it: a personal switch decides for the person,
+  // a group's for its members who have none.
+  const mcp = Boolean(config.mcpEnabled);
+  const mcpCell = (enabled: boolean, name: string, hint: string, change: (enabled: boolean) => Promise<unknown>) => mcp &&
+    <td className="mcp-col" data-label={t("users.mcp")}><Switch checked={enabled} label={hint} onChange={(on) => void run(() => change(on), t(on ? "users.mcpOn" : "users.mcpOff", { name }))} /></td>;
   const entryControls = (entry: AccessEntry) => <>
     <td>{roleSelect(entry.role, (role) => void run(() => api.updateAccess(entry.subjectType, entry.subject, role, entry.disabled), t("users.updated", { name: entry.name })))}</td>
-    <td className="act"><span className="row-actions"><Switch checked={!entry.disabled} label={t("users.active")} onChange={(active) => void run(() => api.updateAccess(entry.subjectType, entry.subject, entry.role, !active), t("users.updated", { name: entry.name }))} />{remove(entry)}</span></td>
+    {mcpCell(!entry.mcpDisabled, entry.name, t(entry.subjectType === "group" ? "users.mcpGroupHint" : "users.mcpHint"), (on) => api.setAccessMCP(entry.subjectType, entry.subject, on))}
+    <td className="act" data-label={t("users.active")}><span className="row-actions"><Switch checked={!entry.disabled} label={t("users.active")} onChange={(active) => void run(() => api.updateAccess(entry.subjectType, entry.subject, entry.role, !active), t("users.updated", { name: entry.name }))} />{remove(entry)}</span></td>
   </>;
 
   return <>
@@ -104,8 +110,8 @@ export function UsersPage() {
     </div>
     <ErrorNote message={problem} onRetry={() => void load()} />
     {!data ? <Loading /> : <div className="card table-wrap">
-      <table className="table members stacked"><thead><tr><th>{t("members.who")}</th><th>{t("users.source")}</th><th>{t("users.role")}</th><th className="act">{t("users.active")}</th></tr></thead>
-        <tbody>{visible.length === 0 ? <tr><td colSpan={4}><Empty icon="search" title={t("users.empty")} /></td></tr> : visible.map((row) => {
+      <table className="table members stacked"><thead><tr><th>{t("members.who")}</th><th>{t("users.source")}</th><th>{t("users.role")}</th>{mcp && <th className="mcp-col" title={t("users.mcpHint")}>{t("users.mcp")}</th>}<th className="act">{t("users.active")}</th></tr></thead>
+        <tbody>{visible.length === 0 ? <tr><td colSpan={mcp ? 5 : 4}><Empty icon="search" title={t("users.empty")} /></td></tr> : visible.map((row) => {
           if (row.kind === "group") {
             const expanded = open.has(row.key) || (needle !== "" && !matches(row.search));
             const members = row.members.filter((member) => !needle || matches(row.search) || matches(`${userName(member)} ${userDetail(member)}`));
@@ -117,13 +123,13 @@ export function UsersPage() {
               <td><Badge kind="accent">{t("members.adGroup")}</Badge></td>
               {entryControls(row.entry)}
             </tr>,
-            ...(expanded ? (members.length === 0 ? [<tr key={row.key + ":none"} className="member"><td colSpan={4}><small className="muted">{t("members.noneSignedIn")}</small></td></tr>]
+            ...(expanded ? (members.length === 0 ? [<tr key={row.key + ":none"} className="member"><td colSpan={mcp ? 5 : 4}><small className="muted">{t("members.noneSignedIn")}</small></td></tr>]
               : members.map((member) => {
                 const own = member.directoryId ? personal.has(member.directoryId.toLowerCase()) : false;
                 return <tr key={row.key + ":" + member.id} className="member">
                   <td><div className="cell-main"><Avatar name={userName(member)} /><div className="grow"><b>{userName(member)}{member.id === session.user?.id && <span className="badge inline">{t("users.you")}</span>}</b>
                     <small className="truncate">{userDetail(member)} · {t("members.lastSeen", { when: ago(member.updatedAt) })}</small></div></div></td>
-                  <td colSpan={2}>{own ? <Badge>{t("members.hasPersonal")}</Badge> : member.directoryDisabled ? <Badge kind="danger">{t("users.disabledInAd")}</Badge> : <small className="muted">{t("members.viaGroup", { group: row.name })}</small>}</td>
+                  <td colSpan={mcp ? 3 : 2}>{own ? <Badge>{t("members.hasPersonal")}</Badge> : member.directoryDisabled ? <Badge kind="danger">{t("users.disabledInAd")}</Badge> : <small className="muted">{t("members.viaGroup", { group: row.name })}</small>}</td>
                   <td className="act">{!own && member.directoryId && <button className="btn sm" title={t("members.personalHint")}
                     onClick={() => void run(() => api.addPersonalAccess(member.directoryId!, "user", false), t("members.personalAdded", { name: userName(member) }))}>{t("members.personal")}</button>}</td>
                 </tr>;
@@ -145,7 +151,8 @@ export function UsersPage() {
             <td><div className="cell-main"><Avatar name={row.name} /><div className="grow"><b>{row.name}{self && <span className="badge inline">{t("users.you")}</span>}</b><small className="truncate">{userDetail(row.user)}</small></div></div></td>
             <td><Badge>{t("users.sourceLocal")}</Badge></td>
             <td>{roleSelect(row.user.role, (role) => update({ role }), self, self ? t("users.selfRole") : undefined)}</td>
-            <td className="act"><span className="row-actions"><Switch checked={!row.user.disabled} disabled={self} label={self ? t("users.selfDisable") : t("users.active")} onChange={(active) => update({ disabled: !active })} />
+            {mcpCell(!row.user.mcpDisabled, row.name, t("users.mcpHint"), (on) => api.setUserMCP(row.user.id, on))}
+            <td className="act" data-label={t("users.active")}><span className="row-actions"><Switch checked={!row.user.disabled} disabled={self} label={self ? t("users.selfDisable") : t("users.active")} onChange={(active) => update({ disabled: !active })} />
               {self ? <span className="act-spacer" aria-hidden="true" /> : <button className="btn quiet icon sm" title={t("members.deleteLocal", { name: row.name })} aria-label={t("members.deleteLocal", { name: row.name })}
                 onClick={() => { if (window.confirm(t("members.deleteLocalConfirm", { name: row.name }))) void run(() => api.deleteUser(row.user.id), t("members.deletedLocal", { name: row.name })); }}><Icon name="x" /></button>}</span></td>
           </tr>;

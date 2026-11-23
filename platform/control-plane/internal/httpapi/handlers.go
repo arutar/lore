@@ -67,6 +67,7 @@ func (s *Server) publicConfig(w http.ResponseWriter, r *http.Request) {
 		"nativeRepositoryUrl": s.config.NativeRepositoryURL,
 		"theme":               settings.Theme,
 		"language":            settings.Language,
+		"mcpEnabled":          s.config.MCP.Mode != MCPOff,
 	})
 }
 
@@ -76,10 +77,19 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
 		return
 	}
+	mcpAllowed := false
+	if s.config.MCP.Mode != MCPOff {
+		allowed, err := s.mcpAllowed(r, *user)
+		if err != nil {
+			log.Printf("MCP access of %s wasn't checked: %v", user.ID, err)
+		}
+		mcpAllowed = allowed
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"authenticated": true,
 		"user":          user,
 		"csrfToken":     session.CSRFToken,
+		"mcpAllowed":    mcpAllowed,
 	})
 }
 
@@ -747,6 +757,18 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 		usernames[id] = accountName(user)
 		return usernames[id]
 	}
+	var names map[string]string
+	accessNames := func() map[string]string {
+		if names == nil {
+			names = map[string]string{}
+			if entries, err := s.store.ListAccess(r.Context()); err == nil {
+				for _, entry := range entries {
+					names[strings.ToLower(entry.Subject)] = entry.Name
+				}
+			}
+		}
+		return names
+	}
 	for index := range page.Items {
 		event := &page.Items[index]
 		event.ActorName = username(event.ActorID)
@@ -773,9 +795,13 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 			event.TargetName = "Global settings"
 		case "access":
 			// Access entries name directory accounts by objectGUID, which aren't Lore user IDs;
-			// the event keeps the name the entry had.
+			// the event keeps the name the entry had. A switch event keeps only its positions, so
+			// its name comes from the entry while it's on the list.
 			event.TargetName = "Active Directory access"
-			if event.SubjectName == "" {
+			if event.SubjectName == "" && event.Action == "access.mcp" {
+				event.SubjectName = accessNames()[strings.ToLower(event.Subject)]
+			}
+			if event.SubjectName == "" && event.Action != "access.mcp" {
 				event.SubjectName = event.After + event.Before
 			}
 		}

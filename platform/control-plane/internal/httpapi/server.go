@@ -61,17 +61,30 @@ type Config struct {
 	NativeRepositoryURL string
 	// SecureHeaders adds Strict-Transport-Security; set it when the WebUI is served over HTTPS.
 	SecureHeaders bool
+	// MCP configures the /mcp endpoint for AI agents; its zero value turns it off.
+	MCP MCPConfig
 }
 
 type Server struct {
-	store  store.Store
-	auth   *Authenticator
-	config Config
-	groups groupCache
+	store   store.Store
+	auth    *Authenticator
+	config  Config
+	groups  groupCache
+	limiter *mcpLimiter
 }
 
 func NewServer(store store.Store, auth *Authenticator, config Config) http.Handler {
-	server := &Server{store: store, auth: auth, config: config}
+	if config.MCP.Mode == "" {
+		config.MCP.Mode = MCPOff
+	}
+	if config.MCP.MaxRead <= 0 {
+		config.MCP.MaxRead = 1 << 20
+	}
+	if config.MCP.LinkTTL <= 0 {
+		config.MCP.LinkTTL = 10 * time.Minute
+	}
+	server := &Server{store: store, auth: auth, config: config,
+		limiter: &mcpLimiter{limit: config.MCP.Concurrency, running: map[string]int{}}}
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
 	router.Use(middleware.RealIP)
@@ -80,7 +93,7 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 	router.Use(func(next http.Handler) http.Handler {
 		withTimeout := middleware.Timeout(30 * time.Second)(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodGet && (strings.HasSuffix(r.URL.Path, "/download") || strings.HasPrefix(r.URL.Path, "/downloads/")) {
+			if r.Method == http.MethodGet && (strings.HasSuffix(r.URL.Path, "/download") || strings.HasPrefix(r.URL.Path, "/downloads/") || strings.HasPrefix(r.URL.Path, "/mcp/download/")) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -90,6 +103,19 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 	router.Use(auth.middleware)
 	router.Get("/healthz", server.health)
 	router.Get("/downloads/{name}", server.download)
+	if config.MCP.Mode != MCPOff {
+		router.Post("/mcp", server.mcp)
+		router.Get("/mcp", server.mcpNoStream)
+		router.Delete("/mcp", server.mcpNoStream)
+		router.Get("/mcp/download/{key}", server.mcpDownload)
+	} else {
+		// Off: no MCP at all, rather than the WebUI's page.
+		notFound := func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, http.StatusNotFound, "not_found", "Resource not found")
+		}
+		router.HandleFunc("/mcp", notFound)
+		router.HandleFunc("/mcp/*", notFound)
+	}
 	router.Route("/web/v1", func(router chi.Router) {
 		router.Get("/config", server.publicConfig)
 		router.Get("/session", server.session)
@@ -105,6 +131,9 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 			router.Get("/lore-oidc/jwks", config.TokenExchange.jwks)
 			router.Post("/lore-oidc/token", config.TokenExchange.exchange)
 		}
+		router.Get("/mcp-tokens", server.mcpTokens)
+		router.With(requireCSRF).Post("/mcp-tokens", server.createMCPToken)
+		router.With(requireCSRF).Delete("/mcp-tokens/{id}", server.revokeMCPToken)
 		router.Get("/catalog", server.catalog)
 		router.Get("/repositories/{id}", server.repository)
 		router.Get("/repositories/{id}/tree", server.repositoryTree)
@@ -132,6 +161,9 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 			router.With(requireCSRF).Post("/users/import", server.importUsers)
 			router.With(requireCSRF).Patch("/users/{id}", server.updateUser)
 			router.With(requireCSRF).Delete("/users/{id}", server.deleteUser)
+			router.With(requireCSRF).Put("/users/{id}/mcp", server.setUserMCP)
+			router.Get("/mcp-tokens", server.allMCPTokens)
+			router.With(requireCSRF).Delete("/mcp-tokens/{id}", server.adminRevokeMCPToken)
 			router.Get("/repositories", server.repositories)
 			router.With(requireCSRF).Post("/repositories", server.createRepository)
 			router.With(requireCSRF).Patch("/repositories/{id}", server.updateRepository)
@@ -144,6 +176,7 @@ func NewServer(store store.Store, auth *Authenticator, config Config) http.Handl
 			router.With(requireCSRF).Post("/access", server.addAccess)
 			router.With(requireCSRF).Delete("/access/{type}/{subject}", server.removeAccess)
 			router.With(requireCSRF).Patch("/access/{type}/{subject}", server.updateAccess)
+			router.With(requireCSRF).Put("/access/{type}/{subject}/mcp", server.setAccessMCP)
 			router.Get("/members", server.members)
 		})
 	})

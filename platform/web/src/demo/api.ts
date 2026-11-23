@@ -59,7 +59,7 @@ export const demoApi: Api = {
     const settings = loadSettings();
     return reply({ ...data.config, theme: settings.theme, language: settings.language, registrationEnabled: settings.registrationEnabled });
   },
-  session: () => reply({ authenticated: true, user: data.me, csrfToken: "demo" }),
+  session: () => reply({ authenticated: true, user: data.me, csrfToken: "demo", mcpAllowed: true }),
   devLogin: readOnly,
   logout: readOnly,
   catalog: (q = "") => reply(page(data.repositories.filter((repository) => matches(q, repository.name, repository.description)))),
@@ -129,4 +129,11 @@ export const demoApi: Api = {
     return reply(settings);
   },
   audit: () => reply(page(data.audit)),
+  mcpTokens: () => reply({ items: data.mcpTokens, url: data.mcpUrl }),
+  createMCPToken: readOnly,
+  revokeMCPToken: readOnly,
+  allMCPTokens: () => reply({ items: data.allMcpTokens }),
+  adminRevokeMCPToken: readOnly,
+  setUserMCP: readOnly,
+  setAccessMCP: readOnly,
 };

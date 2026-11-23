@@ -108,6 +108,12 @@ services:
       LORE_LDAP_TIMEOUT: ${LORE_LDAP_TIMEOUT:-}
       # How often Active Directory groups and account status are re-read, and how long
       # the last known groups are trusted while AD can't be reached.
+      # MCP for AI agents (platform/docs/mcp.md); setup writes LORE_MCP and LORE_MCP_NETWORKS.
+      LORE_MCP: ${LORE_MCP:-off}
+      LORE_MCP_NETWORKS: ${LORE_MCP_NETWORKS:-}
+      LORE_MCP_CONCURRENCY: ${LORE_MCP_CONCURRENCY:-8}
+      LORE_MCP_MAX_READ: ${LORE_MCP_MAX_READ:-1048576}
+      LORE_MCP_LINK_TTL: ${LORE_MCP_LINK_TTL:-10m}
       LORE_LDAP_REFRESH: ${LORE_LDAP_REFRESH:-5m}
       LORE_LDAP_OUTAGE_GRACE: ${LORE_LDAP_OUTAGE_GRACE:-8h}
     expose:

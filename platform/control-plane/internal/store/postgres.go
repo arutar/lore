@@ -366,12 +366,12 @@ func (p *Postgres) ListUsers(ctx context.Context, search, after string, limit in
 	return model.Page[model.User]{Items: items, NextCursor: next}, nil
 }
 
-const userColumns = "id, username, email, display_name, role, groups, source, disabled, created_at, updated_at, directory_id, directory_disabled, groups_synced_at, access_denied, deleted"
+const userColumns = "id, username, email, display_name, role, groups, source, disabled, created_at, updated_at, directory_id, directory_disabled, groups_synced_at, access_denied, deleted, mcp_disabled"
 
 func scanUser(row pgx.Row) (model.User, error) {
 	var user model.User
 	err := row.Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.Role, &user.Groups, &user.Source, &user.Disabled,
-		&user.CreatedAt, &user.UpdatedAt, &user.DirectoryID, &user.DirectoryDisabled, &user.GroupsSyncedAt, &user.AccessDenied, &user.Deleted)
+		&user.CreatedAt, &user.UpdatedAt, &user.DirectoryID, &user.DirectoryDisabled, &user.GroupsSyncedAt, &user.AccessDenied, &user.Deleted, &user.MCPDisabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.User{}, ErrNotFound
 	}
@@ -531,7 +531,7 @@ func (p *Postgres) ApplyDirectoryAccess(ctx context.Context, id string, denied b
 
 func (p *Postgres) ListAccess(ctx context.Context) ([]model.AccessEntry, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT subject_type, subject, name, detail, role, disabled, created_at FROM directory_access
+		SELECT subject_type, subject, name, detail, role, disabled, mcp_disabled, created_at FROM directory_access
 		ORDER BY subject_type = 'user', lower(name), subject`)
 	if err != nil {
 		return nil, fmt.Errorf("read access list: %w", err)
@@ -540,7 +540,7 @@ func (p *Postgres) ListAccess(ctx context.Context) ([]model.AccessEntry, error) 
 	entries := []model.AccessEntry{}
 	for rows.Next() {
 		var entry model.AccessEntry
-		if err := rows.Scan(&entry.SubjectType, &entry.Subject, &entry.Name, &entry.Detail, &entry.Role, &entry.Disabled, &entry.CreatedAt); err != nil {
+		if err := rows.Scan(&entry.SubjectType, &entry.Subject, &entry.Name, &entry.Detail, &entry.Role, &entry.Disabled, &entry.MCPDisabled, &entry.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan access entry: %w", err)
 		}
 		entries = append(entries, entry)
@@ -581,9 +581,9 @@ func (p *Postgres) UpdateAccess(ctx context.Context, actorID string, subjectType
 	defer func() { _ = tx.Rollback(ctx) }()
 	var entry model.AccessEntry
 	err = tx.QueryRow(ctx, `
-		SELECT subject_type, subject, name, detail, role, disabled, created_at FROM directory_access
+		SELECT subject_type, subject, name, detail, role, disabled, mcp_disabled, created_at FROM directory_access
 		WHERE subject_type = $1 AND subject = $2 FOR UPDATE`, subjectType, subject).
-		Scan(&entry.SubjectType, &entry.Subject, &entry.Name, &entry.Detail, &entry.Role, &entry.Disabled, &entry.CreatedAt)
+		Scan(&entry.SubjectType, &entry.Subject, &entry.Name, &entry.Detail, &entry.Role, &entry.Disabled, &entry.MCPDisabled, &entry.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.AccessEntry{}, ErrNotFound
 	}

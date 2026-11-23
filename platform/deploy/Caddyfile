@@ -15,7 +15,12 @@
 		reverse_proxy keycloak:8080
 	}
 	handle {
-		reverse_proxy control-plane:8080
+		# The client's address as Caddy sees it, never one the client claims: the control plane
+		# uses it for LORE_MCP=internal.
+		reverse_proxy control-plane:8080 {
+			header_up X-Real-IP {client_ip}
+			header_up -True-Client-IP
+		}
 	}
 }
 

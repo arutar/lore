@@ -18,7 +18,7 @@ Web interface · Active Directory sign-in · Windows Explorer integration · enf
 
 <a href="https://arutar.github.io/lore/"><img src="https://img.shields.io/badge/Live%20preview-open%20the%20web%20interface-1f6feb?style=for-the-badge&labelColor=0d419d" alt="Live preview: open the web interface" height="36"></a>
 
-[Live preview](https://arutar.github.io/lore/) · [Install](platform/docs/install.md) · [Docker reference](platform/docs/docker.md) · [Download](../../releases/latest) · [How it works](#how-it-works) · [Differences from Lore](#how-this-differs-from-upstream-lore) · [Status](#status)
+[Live preview](https://arutar.github.io/lore/) · [Install](platform/docs/install.md) · [Docker reference](platform/docs/docker.md) · [MCP for AI agents](platform/docs/mcp.md) · [Download](../../releases/latest) · [How it works](#how-it-works) · [Differences from Lore](#how-this-differs-from-upstream-lore) · [Status](#status)
 
 <a href="https://arutar.github.io/lore/"><img src="platform/docs/images/repository-files.png" alt="Repository files in the Lore Platform web interface" width="900"></a>
 
@@ -62,6 +62,13 @@ the fork can shrink as Lore matures.
   files are staged, it lists the files and asks how to go on; discarding your changes is always
   confirmed first. Sign in once in the browser; the session is kept.
 - **Linux CLI** built from this fork.
+- **MCP for AI agents** — Claude Code, Cursor, Hermes or any other MCP client reads repositories
+  with a personal token: list and browse repositories, read text files in parts or search them,
+  follow the history and locks, get a short-lived download link for any file. Read-only by design:
+  there is no tool that changes or deletes anything. A token reads what its owner may read at that
+  moment; an administrator switches MCP off per person or per Active Directory group, and chooses
+  whether it answers inside the company networks only or from anywhere. Off until turned on.
+  [How to set it up](platform/docs/mcp.md).
 - **Easy server** — Docker Compose bundle: `setup` generates the secrets, starts everything,
   connects AD and mail, and prints the admin password. Backup and restore scripts included.
 - **Internal and external networks** — plain HTTP inside the office with nothing to configure on
@@ -106,6 +113,7 @@ offers the ways forward; **Cancel** always leaves everything as it was:
 flowchart TB
     Browser["🌐 Browser"]
     Desktop["🪟 Windows Explorer · lore CLI<br/>🐧 Linux lore CLI"]
+    Agent["🤖 AI agent<br/>any MCP client"]
     AD[("Active Directory<br/>users · groups")]
 
     subgraph Host["Server host"]
@@ -119,6 +127,7 @@ flowchart TB
     end
 
     Browser -->|"browse, manage access"| Web
+    Agent -.->|"MCP, read-only<br/>personal token"| Web
     Desktop -.->|"① sign in once"| Web
     Desktop ==>|"② clone · sync · commit · lock"| Lore
     Lore <-->|"may this user do this?"| Web

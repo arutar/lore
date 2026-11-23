@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -35,6 +37,12 @@ type Config struct {
 	TokenSigningKeyFile   string
 	DirectoryRefresh      time.Duration
 	DirectoryOutageGrace  time.Duration
+	// MCP is off, internal (only from MCPNetworks) or on.
+	MCP            string
+	MCPNetworks    []netip.Prefix
+	MCPConcurrency int
+	MCPMaxRead     int
+	MCPLinkTTL     time.Duration
 }
 
 func FromEnv() (Config, error) {
@@ -89,6 +97,9 @@ func FromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if err := mcpFromEnv(&config); err != nil {
+		return Config{}, err
+	}
 	if config.OIDCRedirectURL == "" {
 		config.OIDCRedirectURL = config.ExternalURL + "/web/v1/oidc/callback"
 	}
@@ -102,6 +113,54 @@ func FromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("LORE_SERVICE_TOKEN_URL, LORE_SERVICE_CLIENT_ID and LORE_SERVICE_CLIENT_SECRET are required with LORE_REPOSITORY_ADDR")
 	}
 	return config, nil
+}
+
+// mcpFromEnv reads the MCP settings: LORE_MCP (off, internal or on), LORE_MCP_NETWORKS (the
+// networks internal answers, as CIDRs separated by ";", "," or spaces), LORE_MCP_CONCURRENCY
+// (calls a token may run at once, 0 for no limit), LORE_MCP_MAX_READ (the most bytes read_text
+// returns in one call) and LORE_MCP_LINK_TTL (how long a download link works).
+func mcpFromEnv(config *Config) error {
+	config.MCP = strings.ToLower(env("LORE_MCP", "off"))
+	switch config.MCP {
+	case "off", "internal", "on":
+	default:
+		return fmt.Errorf("LORE_MCP must be off, internal or on")
+	}
+	for _, value := range strings.FieldsFunc(os.Getenv("LORE_MCP_NETWORKS"), func(r rune) bool { return r == ';' || r == ',' || r == ' ' || r == '\t' }) {
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			address, addressErr := netip.ParseAddr(value)
+			if addressErr != nil {
+				return fmt.Errorf("LORE_MCP_NETWORKS: %q isn't a network such as 10.0.0.0/16", value)
+			}
+			prefix = netip.PrefixFrom(address, address.BitLen())
+		}
+		config.MCPNetworks = append(config.MCPNetworks, prefix.Masked())
+	}
+	if config.MCP == "internal" && len(config.MCPNetworks) == 0 {
+		return fmt.Errorf("LORE_MCP=internal needs LORE_MCP_NETWORKS, for example 10.0.0.0/16;192.168.0.0/24")
+	}
+	var err error
+	if config.MCPConcurrency, err = intEnv("LORE_MCP_CONCURRENCY", 8, 0, 1000); err != nil {
+		return err
+	}
+	if config.MCPMaxRead, err = intEnv("LORE_MCP_MAX_READ", 1<<20, 4<<10, 64<<20); err != nil {
+		return err
+	}
+	config.MCPLinkTTL, err = durationEnv("LORE_MCP_LINK_TTL", 10*time.Minute, time.Minute, 24*time.Hour)
+	return err
+}
+
+func intEnv(name string, fallback, minimum, maximum int) (int, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < minimum || parsed > maximum {
+		return 0, fmt.Errorf("%s must be a whole number between %d and %d", name, minimum, maximum)
+	}
+	return parsed, nil
 }
 
 func env(name, fallback string) string {

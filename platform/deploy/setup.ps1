@@ -11,7 +11,12 @@ param(
     [switch]$SkipBuild,
     # Where the WebUI's home page gets the client from; see "Client downloads" below.
     [ValidateSet("", "online", "offline", "off")]
-    [string]$ClientDownloads = $env:LORE_CLIENT_DOWNLOADS
+    [string]$ClientDownloads = $env:LORE_CLIENT_DOWNLOADS,
+    # The MCP endpoint for AI agents (docs/mcp.md): off, internal (only -McpNetworks) or on.
+    [ValidateSet("", "off", "internal", "on")]
+    [string]$Mcp = $env:LORE_MCP,
+    # Networks MCP answers in internal mode, such as "10.0.0.0/16;192.168.0.0/24".
+    [string]$McpNetworks = $env:LORE_MCP_NETWORKS
 )
 
 $ErrorActionPreference = "Stop"
@@ -126,7 +131,8 @@ foreach ($name in @(
     "LORE_LDAP_REFRESH", "LORE_LDAP_OUTAGE_GRACE",
     "LORE_SMTP_HOST", "LORE_SMTP_PORT", "LORE_SMTP_FROM", "LORE_SMTP_FROM_NAME",
     "LORE_SMTP_USERNAME", "LORE_SMTP_PASSWORD", "LORE_SMTP_STARTTLS", "LORE_SMTP_SSL",
-    "LORE_DATA_ROOT", "LORE_PROXY_BIND", "LORE_CONTROL_PLANE_IMAGE", "LORE_SERVER_IMAGE"
+    "LORE_DATA_ROOT", "LORE_PROXY_BIND", "LORE_CONTROL_PLANE_IMAGE", "LORE_SERVER_IMAGE",
+    "LORE_MCP_CONCURRENCY", "LORE_MCP_MAX_READ", "LORE_MCP_LINK_TTL"
 )) {
     $value = [Environment]::GetEnvironmentVariable($name)
     if ($value) { Set-EnvSetting $name $value }
@@ -137,6 +143,29 @@ foreach ($name in @(
 $dataRoot = if ($env:LORE_DATA_ROOT) { $env:LORE_DATA_ROOT } else { "./data" }
 $generated = "$dataRoot/generated"
 New-Item -ItemType Directory -Force -Path "$generated/caddy", "$dataRoot/postgres", "$dataRoot/lore", "$dataRoot/control-plane", "$dataRoot/caddy", "$dataRoot/downloads" | Out-Null
+
+# MCP for AI agents, always with a personal token (docs/mcp.md).
+#   off (default): no MCP endpoint.
+#   internal: only clients in LORE_MCP_NETWORKS, which you must give, such as
+#     "10.0.0.0/16;192.168.0.0/24" (networks in CIDR form, separated by ";").
+#   on: from anywhere the WebUI is reachable.
+if (-not $Mcp) { $Mcp = if ($settings.LORE_MCP) { $settings.LORE_MCP } else { "off" } }
+if ($Mcp -notin @("off", "internal", "on")) { throw "LORE_MCP must be off, internal or on" }
+if (-not $PSBoundParameters.ContainsKey("McpNetworks") -and -not $McpNetworks) { $McpNetworks = $settings.LORE_MCP_NETWORKS }
+$mcpNetworkList = @("$McpNetworks" -split "[;, ]+" | Where-Object { $_ })
+foreach ($network in $mcpNetworkList) {
+    if ($network -notmatch '^[0-9A-Fa-f:./]+$') { throw "LORE_MCP_NETWORKS: `"$network`" isn't a network such as 10.0.0.0/16" }
+}
+if ($Mcp -eq "internal" -and $mcpNetworkList.Count -eq 0) {
+    throw "-Mcp internal needs the networks it answers, for example: -McpNetworks `"10.0.0.0/16;192.168.0.0/24`""
+}
+Set-EnvSetting "LORE_MCP" $Mcp
+Set-EnvSetting "LORE_MCP_NETWORKS" ($mcpNetworkList -join ";")
+$mcpSummary = switch ($Mcp) {
+    "off" { "off" }
+    "internal" { "internal ($($mcpNetworkList -join ';')): $PublicUrl/mcp" }
+    "on" { "on: $PublicUrl/mcp" }
+}
 
 # Client downloads. The control plane serves $dataRoot/downloads at /downloads/, and the home
 # page lists what manifest.json there names. The bundle's clients.tsv lists this release's client
@@ -306,4 +335,4 @@ foreach ($entry in $realmSettings.GetEnumerator()) { $execArguments += @("-e", "
 & docker @composeFiles @execArguments keycloak bash /opt/lore/configure-realm.sh
 if ($LASTEXITCODE -ne 0) { throw "Keycloak realm configuration failed" }
 
-Write-Host "`nLore is ready.`nWebUI: $PublicUrl`nKeycloak: $AuthUrl`nAdministrator: admin`nInitial administrator password: $($settings.LORE_ADMIN_PASSWORD)`nData: $([IO.Path]::GetFullPath($dataRoot))`nClient downloads: $ClientDownloads"
+Write-Host "`nLore is ready.`nWebUI: $PublicUrl`nKeycloak: $AuthUrl`nAdministrator: admin`nInitial administrator password: $($settings.LORE_ADMIN_PASSWORD)`nData: $([IO.Path]::GetFullPath($dataRoot))`nClient downloads: $ClientDownloads`nMCP: $mcpSummary"

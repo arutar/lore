@@ -1,5 +1,5 @@
 import { demoApi } from "./demo/api";
-import type { AccessEntry, ClientDownloads, ADUser, Members, AuditEvent, BulkResult, ChangeKind, ChangeSummary, GlobalSettings, Grant, GrantSubject, LabeledGrant, Page, PublicConfig, Repository, RepositoryLock, RepositoryTree, Revision, RevisionChange, Role, Session, User } from "./types";
+import type { AccessEntry, ClientDownloads, MCPToken, ADUser, Members, AuditEvent, BulkResult, ChangeKind, ChangeSummary, GlobalSettings, Grant, GrantSubject, LabeledGrant, Page, PublicConfig, Repository, RepositoryLock, RepositoryTree, Revision, RevisionChange, Role, Session, User } from "./types";
 
 let csrfToken = "";
 
@@ -102,6 +102,16 @@ const serverApi = {
   // The server replaces all settings at once: always send the complete object.
   saveSettings: (settings: GlobalSettings) => request<GlobalSettings>("/admin/settings", { method: "PATCH", body: JSON.stringify(settings) }),
   audit: (cursor = "") => request<Page<AuditEvent>>(`/admin/audit?${query({ pageSize: 50, cursor })}`),
+  // MCP: the signed-in account's tokens, and every token for an administrator.
+  mcpTokens: () => request<{ items: MCPToken[]; url: string }>("/mcp-tokens"),
+  createMCPToken: (input: { name: string; repositories: string[]; expiresInDays: number }) =>
+    request<{ token: MCPToken; secret: string; url: string }>("/mcp-tokens", { method: "POST", body: JSON.stringify(input) }),
+  revokeMCPToken: (id: string) => request<void>(`/mcp-tokens/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  allMCPTokens: () => request<{ items: MCPToken[] }>("/admin/mcp-tokens"),
+  adminRevokeMCPToken: (id: string) => request<void>(`/admin/mcp-tokens/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  setUserMCP: (id: string, enabled: boolean) => request<User>(`/admin/users/${encodeURIComponent(id)}/mcp`, { method: "PUT", body: JSON.stringify({ enabled }) }),
+  setAccessMCP: (subjectType: "user" | "group", subject: string, enabled: boolean) =>
+    request<AccessEntry>(`/admin/access/${subjectType}/${encodeURIComponent(subject)}/mcp`, { method: "PUT", body: JSON.stringify({ enabled }) }),
 };
 
 export type Api = typeof serverApi;

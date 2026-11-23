@@ -1,7 +1,7 @@
 // Fictional data for the read-only demo (npm run build:demo). Nothing here comes from a real
 // installation: the studio, people, groups and files are invented. Times are relative to when the
 // page is opened, so the demo always looks recently used.
-import type { ClientDownloads, AccessEntry, AuditEvent, LabeledGrant, LastChange, Members, PublicConfig, Repository, RepositoryLock, Revision, RevisionChange, TreeNode, User } from "../types";
+import type { ClientDownloads, AccessEntry, AuditEvent, LabeledGrant, LastChange, MCPToken, Members, PublicConfig, Repository, RepositoryLock, Revision, RevisionChange, TreeNode, User } from "../types";
 
 const now = Date.now();
 const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString();
@@ -46,7 +46,7 @@ const byId = (id: string) => users.find((user) => user.id === id)!;
 export const config: PublicConfig = {
   registrationEnabled: false, oidcEnabled: true, devAuthEnabled: false, adEnabled: true,
   externalUrl: "https://lore.brightwater.example", nativeRepositoryUrl: "lore://lore.brightwater.example",
-  theme: "midnight", language: "en",
+  theme: "midnight", language: "en", mcpEnabled: true,
 };
 
 type RepoSpec = {
@@ -229,7 +229,7 @@ export function grants(id: string): LabeledGrant[] {
 }
 
 export const accessEntries: AccessEntry[] = [
-  { subjectType: "group", subject: "grp-artists", name: "studio-artists", detail: "CN=studio-artists,OU=Groups,DC=brightwater,DC=example", role: "user", disabled: false, createdAt: ago(24 * 100) },
+  { subjectType: "group", subject: "grp-artists", name: "studio-artists", detail: "CN=studio-artists,OU=Groups,DC=brightwater,DC=example", role: "user", disabled: false, mcpDisabled: true, createdAt: ago(24 * 100) },
   { subjectType: "group", subject: "grp-engineers", name: "studio-engineers", detail: "CN=studio-engineers,OU=Groups,DC=brightwater,DC=example", role: "user", disabled: false, createdAt: ago(24 * 100) },
   { subjectType: "group", subject: "grp-leads", name: "studio-leads", detail: "CN=studio-leads,OU=Groups,DC=brightwater,DC=example", role: "admin", disabled: false, createdAt: ago(24 * 100) },
   { subjectType: "user", subject: "u-pavel-guid", name: "Pavel Orlov", detail: "porlov · porlov@brightwater.example", role: "user", disabled: false, createdAt: ago(24 * 40) },
@@ -272,3 +272,14 @@ export const downloads: ClientDownloads = {
     { platform: "linux", kind: "tar", arch: "aarch64", file: "lore-cli-0.2.11-aarch64-unknown-linux-gnu.tar.gz", url: "https://github.com/arutar/lore/releases/download/platform-v0.2.11/lore-cli-0.2.11-aarch64-unknown-linux-gnu.tar.gz", size: 80_073_259, sha256: "ffeeddccbbaa99887766554433221100fedcba98765432100123456789abcdef" },
   ],
 };
+
+// MCP tokens: the administrator's own, and two of other people for the administrator's list.
+export const mcpUrl = "https://lore.brightwater.example/mcp";
+export const mcpTokens: MCPToken[] = [
+  { id: "t-claude", userId: "u-admin", name: "Claude Code on the build machine", hint: "lore_mcp_7Hq2", repositories: [], createdAt: ago(24 * 12), lastUsedAt: ago(0.4) },
+  { id: "t-hermes", userId: "u-admin", name: "Hermes + DeepSeek, release notes", hint: "lore_mcp_c9Lm", repositories: ["hollow-keep", "handbook"], createdAt: ago(24 * 3), expiresAt: ago(-24 * 87), lastUsedAt: ago(26) },
+];
+export const allMcpTokens: MCPToken[] = [
+  ...mcpTokens.map((token) => ({ ...token, userName: "Administrator" })),
+  { id: "t-mark", userId: "u-mark", userName: "Mark Chen", name: "Cursor", hint: "lore_mcp_Pz04", repositories: ["build-pipeline"], createdAt: ago(24 * 20), lastUsedAt: ago(3) },
+];

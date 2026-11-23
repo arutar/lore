@@ -67,6 +67,27 @@ type Store interface {
 	UpdateAccess(ctx context.Context, actorID string, subjectType model.SubjectType, subject string, role model.Role, disabled bool) (model.AccessEntry, error)
 	RemoveAccess(ctx context.Context, actorID string, subjectType model.SubjectType, subject string) error
 
+	// SetUserMCP switches MCP on or off for a local account; SetAccessMCP for an entry on the
+	// access list. Both record the change in the audit log.
+	SetUserMCP(ctx context.Context, actorID, id string, disabled bool) (model.User, error)
+	SetAccessMCP(ctx context.Context, actorID string, subjectType model.SubjectType, subject string, disabled bool) (model.AccessEntry, error)
+
+	// CreateMCPToken stores a token under the SHA-256 of its secret.
+	CreateMCPToken(ctx context.Context, token model.MCPToken, hash string) error
+	// ListMCPTokens returns the account's tokens, newest first; an empty userID lists everyone's.
+	// Revoked tokens aren't listed.
+	ListMCPTokens(ctx context.Context, userID string) ([]model.MCPToken, error)
+	GetMCPToken(ctx context.Context, id string) (model.MCPToken, error)
+	GetMCPTokenByHash(ctx context.Context, hash string) (model.MCPToken, error)
+	// RevokeMCPToken ends a token at once, together with the download links issued through it.
+	RevokeMCPToken(ctx context.Context, actorID, id string) error
+	// TouchMCPToken records when a token was last used.
+	TouchMCPToken(ctx context.Context, id string, at time.Time) error
+	// CreateMCPLink stores a download link under the SHA-256 of its key and drops expired ones.
+	CreateMCPLink(ctx context.Context, hash string, link model.MCPLink) error
+	// GetMCPLink returns a link that hasn't expired at now.
+	GetMCPLink(ctx context.Context, hash string, now time.Time) (model.MCPLink, error)
+
 	ListGrants(ctx context.Context, repositoryID string) ([]model.Grant, error)
 	SetGrant(ctx context.Context, actorID string, grant model.Grant) error
 	RemoveGrant(ctx context.Context, actorID string, grant model.Grant) error

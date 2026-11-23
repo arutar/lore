@@ -15,6 +15,8 @@ export interface User {
   source: string;
   disabled: boolean;
   accessDenied?: boolean;
+  /** MCP is switched off for this local account. */
+  mcpDisabled?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -30,6 +32,23 @@ export interface Session {
   authenticated: boolean;
   user?: User;
   csrfToken?: string;
+  /** The account may use MCP: it's on for this server and not switched off for the account. */
+  mcpAllowed?: boolean;
+}
+
+/** A personal token for the MCP endpoint. The secret itself is shown only when it's created. */
+export interface MCPToken {
+  id: string;
+  userId: string;
+  userName?: string;
+  name: string;
+  /** The start of the secret, to tell tokens apart. */
+  hint: string;
+  /** Repository IDs the token is limited to; empty: every repository its owner may read. */
+  repositories: string[];
+  createdAt: string;
+  expiresAt?: string;
+  lastUsedAt?: string;
 }
 
 /** A client build the server hands out from /downloads, as its manifest.json lists it. */
@@ -59,6 +78,8 @@ export interface PublicConfig {
   nativeRepositoryUrl: string;
   theme: string;
   language: Language;
+  /** The server answers MCP at /mcp. */
+  mcpEnabled?: boolean;
 }
 
 export type Language = "ru" | "en";
@@ -100,6 +121,8 @@ export interface AccessEntry {
   detail?: string;
   role: Role;
   disabled: boolean;
+  /** MCP is switched off for the account, or for the group's members. */
+  mcpDisabled?: boolean;
   createdAt: string;
 }
 

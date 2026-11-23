@@ -271,20 +271,24 @@ func (s *Server) repositoryDownload(w http.ResponseWriter, r *http.Request) {
 
 func writeRepositoryContentError(w http.ResponseWriter, err error) {
 	log.Printf("Repository content request failed: %v", err)
+	status, code, message := contentProblem(err)
+	writeError(w, status, code, message)
+}
+
+// contentProblem explains a failed read of repository content: the HTTP status, the error code
+// and a message for the person or the MCP client that asked.
+func contentProblem(err error) (int, string, string) {
 	switch status.Code(err) {
 	case codes.NotFound:
-		writeError(w, http.StatusNotFound, "content_not_found", "The requested revision or path wasn't found")
+		return http.StatusNotFound, "content_not_found", "The requested revision or path wasn't found"
 	case codes.InvalidArgument:
-		writeError(w, http.StatusBadRequest, "invalid_content_request", "The revision or repository path is invalid")
-	default:
-		if strings.Contains(err.Error(), "wasn't found in revision") {
-			writeError(w, http.StatusNotFound, "content_not_found", "The requested file wasn't found in this revision")
-			return
-		}
-		if strings.Contains(err.Error(), "invalid") {
-			writeError(w, http.StatusBadRequest, "invalid_content_request", "The revision or repository path is invalid")
-			return
-		}
-		writeError(w, http.StatusBadGateway, "content_unavailable", "Couldn't read repository content")
+		return http.StatusBadRequest, "invalid_content_request", "The revision or repository path is invalid"
 	}
+	if strings.Contains(err.Error(), "wasn't found in revision") {
+		return http.StatusNotFound, "content_not_found", "The requested file wasn't found in this revision"
+	}
+	if strings.Contains(err.Error(), "invalid") {
+		return http.StatusBadRequest, "invalid_content_request", "The revision or repository path is invalid"
+	}
+	return http.StatusBadGateway, "content_unavailable", "Couldn't read repository content"
 }

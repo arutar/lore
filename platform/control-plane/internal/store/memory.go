@@ -21,6 +21,8 @@ type Memory struct {
 	settings     model.Settings
 	audit        []model.AuditEvent
 	access       map[string]model.AccessEntry
+	mcpTokens    map[string]mcpTokenRecord
+	mcpLinks     map[string]model.MCPLink
 }
 
 func NewMemory() *Memory {
@@ -30,6 +32,8 @@ func NewMemory() *Memory {
 		grants:       make(map[string]map[string]model.Grant),
 		sessions:     make(map[string]model.Session),
 		access:       make(map[string]model.AccessEntry),
+		mcpTokens:    make(map[string]mcpTokenRecord),
+		mcpLinks:     make(map[string]model.MCPLink),
 	}
 }
 
@@ -282,12 +286,14 @@ func (m *Memory) UpsertUser(_ context.Context, user model.User) (model.User, err
 	if ok {
 		user.Role = existing.Role
 		user.Disabled = existing.Disabled
+		user.MCPDisabled = existing.MCPDisabled
 		user.CreatedAt = existing.CreatedAt
 	} else {
 		if user.Role == "" {
 			user.Role = model.RoleUser
 		}
 		user.Disabled = false
+		user.MCPDisabled = false
 		user.CreatedAt = now
 	}
 	user.UpdatedAt = now
