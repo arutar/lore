@@ -940,7 +940,8 @@ pub struct LoreBranchPushArgs {
 /// | [`LoreEvent::BranchPushRevisionUpdateBegin`](crate::interface::LoreEvent::BranchPushRevisionUpdateBegin) | Emitted when updating a revision on the remote |
 /// | [`LoreEvent::BranchPushRevisionUpdateEnd`](crate::interface::LoreEvent::BranchPushRevisionUpdateEnd) | Emitted when a revision update completes |
 /// | [`LoreEvent::BranchPushFragmentBegin`](crate::interface::LoreEvent::BranchPushFragmentBegin) | Emitted when uploading fragment data begins |
-/// | [`LoreEvent::BranchPushFragmentProgress`](crate::interface::LoreEvent::BranchPushFragmentProgress) | Emitted periodically during fragment upload, and while the server verifies the pushed revision (`server_phase` set) |
+/// | [`LoreEvent::BranchPushFragmentProgress`](crate::interface::LoreEvent::BranchPushFragmentProgress) | Emitted periodically during fragment upload |
+/// | [`LoreEvent::Progress`](crate::interface::LoreEvent::Progress) | Emitted while the server verifies the pushed revision |
 /// | [`LoreEvent::BranchPushFragmentEnd`](crate::interface::LoreEvent::BranchPushFragmentEnd) | Emitted when fragment upload completes |
 /// | [`LoreEvent::BranchPushRevisionPushBegin`](crate::interface::LoreEvent::BranchPushRevisionPushBegin) | Emitted when pushing a revision to the remote begins |
 /// | [`LoreEvent::BranchPushRevisionPushUpdate`](crate::interface::LoreEvent::BranchPushRevisionPushUpdate) | Emitted with progress updates during revision push |

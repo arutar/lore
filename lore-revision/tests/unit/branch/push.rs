@@ -354,6 +354,7 @@ mod offer {
     use lore_base::types::BranchMetadata;
     use lore_base::types::BranchPoint;
     use lore_base::types::RepositoryId;
+    use lore_revision::event::LoreEvent;
     use lore_transport::BranchListResponse;
     use lore_transport::BranchPushResponse;
     use lore_transport::BranchQueryResponse;
@@ -362,17 +363,19 @@ mod offer {
     use lore_transport::Revision;
     use lore_transport::RevisionListResponse;
     use lore_transport::RevisionListStart;
+    use lore_transport::types::PushVerifyProgress;
     use parking_lot::Mutex;
 
     use super::*;
     use crate::branch::with_execution;
 
-    /// A peer that answers each branch push with the next of its answers, and counts the
-    /// branches it creates.
+    /// A peer that answers each branch push with the next of its answers, after reporting its
+    /// verification `progress`, and counts the branches it creates.
     struct Peer {
         answers: Mutex<VecDeque<Result<BranchPushResponse, BranchPushError>>>,
         created: AtomicUsize,
         head: Option<Hash>,
+        progress: Vec<PushVerifyProgress>,
     }
 
     #[async_trait]
@@ -418,6 +421,21 @@ mod offer {
                 .lock()
                 .pop_front()
                 .expect("the peer was not offered more than it answers")
+        }
+
+        async fn branch_push_observed(
+            &self,
+            branch: BranchId,
+            latest: Hash,
+            force: bool,
+            fast_forward_merge: bool,
+            progress: &(dyn Fn(PushVerifyProgress) + Send + Sync),
+        ) -> Result<BranchPushResponse, BranchPushError> {
+            for step in &self.progress {
+                progress(*step);
+            }
+            self.branch_push(branch, latest, force, fast_forward_merge)
+                .await
         }
 
         async fn branch_list(
@@ -475,6 +493,7 @@ mod offer {
                 ),
                 created: AtomicUsize::new(0),
                 head,
+                progress: Vec::new(),
             };
             let result = with_execution(offer_revision(
                 &peer,
@@ -497,6 +516,72 @@ mod offer {
                 assert!(result.is_err());
             }
         }
+    }
+
+    /// The remote's progress verifying the offered revision reaches the client as the generic
+    /// progress event, its step at least preparing, and not as fragment transfer progress.
+    #[tokio::test]
+    async fn verification_progress_is_sent_as_the_progress_event() {
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = sent.clone();
+        let callback: lore_revision::interface::LoreEventCallback =
+            Some(Box::new(move |event: &LoreEvent| {
+                let sent = match event {
+                    LoreEvent::Progress(data) => {
+                        Some((data.server_phase, data.server_restarts, data.server_checked))
+                    }
+                    // Fragment progress would be a mistake; it shows as a phase no step has.
+                    LoreEvent::BranchPushFragmentProgress(_) => Some((u32::MAX, 0, 0)),
+                    _ => None,
+                };
+                sink.lock().expect("the sent events").extend(sent);
+            }));
+        let execution = Arc::new(lore_revision::interface::ExecutionContext::new_client(
+            lore_revision::interface::LoreGlobalArgs::default(),
+            lore_revision::relay::EventDispatcher::new(callback),
+        ));
+        let peer = Peer {
+            answers: Mutex::new([accepted()].into()),
+            created: AtomicUsize::new(0),
+            head: None,
+            progress: vec![
+                PushVerifyProgress {
+                    phase: 0,
+                    checked: 0,
+                    restarts: 0,
+                },
+                PushVerifyProgress {
+                    phase: 2,
+                    checked: 40,
+                    restarts: 1,
+                },
+            ],
+        };
+
+        let result = lore_base::runtime::LORE_CONTEXT
+            .scope(
+                execution.clone(),
+                offer_revision(
+                    &peer,
+                    RepositoryId::default(),
+                    BranchId::default(),
+                    &BranchMetadata::default(),
+                    Hash::default(),
+                    Hash::from([1; 32]),
+                    1,
+                    false,
+                    false,
+                    async || panic!("an accepted offer needs no recovery"),
+                ),
+            )
+            .await;
+        execution.dispatcher.drain().await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            *sent.lock().expect("the sent events"),
+            [(1, 0, 0), (2, 1, 40)]
+        );
     }
 
     fn missing() -> Result<BranchPushResponse, BranchPushError> {
@@ -539,6 +624,7 @@ mod offer {
                 answers: Mutex::new(answers.into()),
                 created: AtomicUsize::new(0),
                 head: None,
+                progress: Vec::new(),
             };
             let recoveries = AtomicUsize::new(0);
 

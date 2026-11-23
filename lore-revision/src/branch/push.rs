@@ -159,16 +159,6 @@ pub struct LoreBranchPushFragmentProgressEventData {
     pub bytes_transferred: u64,
     /// The total number of bytes to transfer.
     pub bytes_total: u64,
-    /// Added by this fork, after every field upstream defines so that readers built against them
-    /// read on: the step the remote is in while it verifies the pushed revision, 1 preparing,
-    /// 2 verifying fragments, 3 merging onto a branch that moved, 4 moving the branch, 5 running
-    /// the post-push hooks. Zero while fragments are transferred, when the fields below are zero
-    /// too. A separate event would make a 257th, more than the event enum may hold.
-    pub server_phase: u32,
-    /// Times the remote restarted the verification after it stalled or hit a transient failure.
-    pub server_restarts: u32,
-    /// Store requests the remote's verification has completed so far.
-    pub server_checked: u64,
 }
 
 /// Data for the event sent after fragments are transferred during push.
@@ -600,9 +590,6 @@ impl PushProgress {
             count: self.count(),
             bytes_transferred: self.put_bytes.load(Ordering::Relaxed),
             bytes_total: self.bytes_queued.load(Ordering::Relaxed),
-            server_phase: 0,
-            server_restarts: 0,
-            server_checked: 0,
         }
     }
 }
@@ -3357,16 +3344,11 @@ async fn offer_revision(
     fast_forward_merge: bool,
     recover: impl AsyncFnOnce() -> Result<(), PushError>,
 ) -> Result<BranchPushResponse, PushError> {
-    // The remote's verification of `revision` reports on the fragment progress event, its
-    // transfer counts zero and its server fields set.
+    // The remote's verification of `revision` reports on the generic progress event.
     let progress = |progress: lore_transport::types::PushVerifyProgress| {
-        event::LoreEvent::BranchPushFragmentProgress(LoreBranchPushFragmentProgressEventData {
+        event::LoreEvent::Progress(event::LoreProgressEventData {
             repository,
             branch,
-            complete: 0,
-            count: 0,
-            bytes_transferred: 0,
-            bytes_total: 0,
             server_phase: progress.phase.max(1),
             server_restarts: progress.restarts,
             server_checked: progress.checked,

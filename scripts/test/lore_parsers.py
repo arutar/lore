@@ -188,11 +188,6 @@ def parse_jsonl(output: str, tag_name: str) -> list[dict]:
         try:
             parsed = json.loads(line)
             if parsed.get("tagName") == tag_name and "data" in parsed:
-                # This fork reports the remote's verification of a pushed revision on the
-                # fragment progress event, with serverPhase set and the transfer counts at
-                # zero; those events aren't fragment transfer progress.
-                if tag_name == "branchPushFragmentProgress" and parsed["data"].get("serverPhase"):
-                    continue
                 entries.append(parsed["data"])
         except json.JSONDecodeError:
             # Skip non-JSON lines (headers, etc.)

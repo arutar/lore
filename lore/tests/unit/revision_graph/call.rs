@@ -188,9 +188,6 @@ fn events_a_verb_sends() -> [LoreEvent; 16] {
             count: 0,
             bytes_transferred: 0,
             bytes_total: 0,
-            server_phase: 0,
-            server_restarts: 0,
-            server_checked: 0,
         }),
         LoreEvent::BranchPushStats(LoreBranchPushStatsEventData::default()),
         LoreEvent::RevisionGraphBranchPushed(LoreRevisionGraphBranchPushedEventData {

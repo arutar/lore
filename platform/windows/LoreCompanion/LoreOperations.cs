@@ -38,15 +38,14 @@ public sealed record CommitCandidate(string Path, string Change, bool Staged, st
 // counts the checks it has done.
 public sealed record CommitProgress(string Phase, ulong Complete = 0, ulong Total = 0, ulong Bytes = 0, string Step = "", uint Restarts = 0);
 
-// The server's progress verifying a push. This fork's lorelib reports it on the fragment progress
-// event (lore_branch_push_fragment_progress_event_data_t), in server_phase, server_restarts and
-// server_checked after every field the LoreVcs package knows: a separate event would take a 257th
-// event id, more than lorelib's event enum may hold. The package hands out only the fields it
-// knows, so this reads the rest from the native event the package holds, at the layout lore.h
-// gives. If a package update moves those fields, progress is just not shown.
+// The server's progress verifying a push. This fork's lorelib reports it on the generic progress
+// event (lore_progress_event_data_t), which upstream sends nowhere: a separate event would take a
+// 257th event id, more than lorelib's event enum may hold. The LoreVcs package knows that event's
+// data only as a placeholder, so this reads the fields from the native event the package holds, at
+// the layout lore.h gives. If a package update changes that event, progress is just not shown.
 internal static class ServerProgressEvent
 {
-    public const LoreEventTag Tag = LoreEventTag.BRANCH_PUSH_FRAGMENT_PROGRESS;
+    public const LoreEventTag Tag = LoreEventTag.PROGRESS;
     private static readonly System.Reflection.FieldInfo? Native = typeof(LoreEventFFI).GetField(
         "loreEvent", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
 
@@ -56,13 +55,12 @@ internal static class ServerProgressEvent
         IntPtr data;
         unsafe { data = (IntPtr)System.Reflection.Pointer.Unbox(pointer); }
         if (data == IntPtr.Zero) return null;
-        // The tag, padding, then the data: repository (16 bytes), branch (16), complete, count,
-        // bytes transferred and bytes total (8 each), then server_phase, server_restarts and
-        // server_checked. A phase of zero is fragment transfer, which the package's own data shows.
-        var phase = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(data, 8 + 64);
+        // The tag, padding, then the data: repository (16 bytes), branch (16), then server_phase,
+        // server_restarts and server_checked.
+        var phase = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(data, 8 + 32);
         if (phase == 0) return null;
-        var restarts = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(data, 8 + 68);
-        var checkedCount = (ulong)System.Runtime.InteropServices.Marshal.ReadInt64(data, 8 + 72);
+        var restarts = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(data, 8 + 36);
+        var checkedCount = (ulong)System.Runtime.InteropServices.Marshal.ReadInt64(data, 8 + 40);
         var step = phase switch { 1 => "preparing", 2 => "checking fragments", 3 => "merging", 4 => "updating the branch", 5 => "running server hooks", _ => "" };
         return new CommitProgress("verify", checkedCount, Step: step, Restarts: restarts);
     }
