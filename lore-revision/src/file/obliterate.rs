@@ -123,9 +123,10 @@ pub(crate) async fn obliterate_file(
         .flatten()
         .unwrap_or(current_revision);
 
-    let state = state::State::deserialize(repository.clone(), staged_revision)
-        .await
-        .forward::<ObliterateError>("Failed to deserialize state")?;
+    let state =
+        state::State::deserialize_staged(repository.clone(), staged_revision, current_revision)
+            .await
+            .forward::<ObliterateError>("Failed to deserialize state")?;
 
     let node_link = state
         .find_node_link(repository.clone(), relative_path.as_str())
@@ -141,6 +142,17 @@ pub(crate) async fn obliterate_file(
     if !node_link.is_valid() {
         return Err(FileNotFound {
             resource: relative_path.to_string(),
+        }
+        .into());
+    }
+
+    // TODO(vri): UCS-18010 - Implement obliterate for links
+    if node_link.crosses_link(&repository, &state) {
+        return Err(NotSupported {
+            operation: format!(
+                "obliterating {relative_path} inside a link - obliterate it by address in the linked \
+                 repository"
+            ),
         }
         .into());
     }
@@ -182,10 +194,19 @@ pub(crate) async fn obliterate_file(
         node_link.node,
         NodeFlags::NoFlags,
         stage_stats,
-        None, // TODO(vri): UCS-18010 - Implement obliterate for links
+        None,
     )
     .await
     .forward::<ObliterateError>("Failed to stage deleted path")?;
+    if state.holds_promoted_moves() {
+        Box::pin(crate::file::stage::stage_promoted_moves_of_call(
+            &repository,
+            &state,
+            None,
+        ))
+        .await
+        .forward::<ObliterateError>("Failed to stage the move of a directory the path is in")?;
+    }
 
     let signature = state
         .serialize(repository.clone(), token)

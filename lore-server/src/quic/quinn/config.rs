@@ -20,6 +20,7 @@ use tracing::info;
 use crate::quic::StreamHandlerFactory;
 use crate::quic::initial_cwnd::InitialCwndBytes;
 
+#[lore_macro::test_pub]
 pub struct QuinnConfig {
     // In observability, what is the label that distinguishes this Quinn
     // server from others?
@@ -99,7 +100,7 @@ pub struct QuinnConfigBuilder {
     pub(crate) initial_cwnd: Option<InitialCwndBytes>,
 }
 
-const DEFAULT_IDLE_TIMEOUT_MILLIS: u64 = 30_000;
+pub(crate) const DEFAULT_IDLE_TIMEOUT_MILLIS: u64 = 30_000;
 const DEFAULT_KEEP_ALIVE_MILLS: u64 = 500;
 const DEFAULT_LISTENERS_COUNT: NonZeroU8 = NonZeroU8::MIN;
 /// Sockets bound when none are configured, on a machine with at least as many processors.

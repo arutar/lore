@@ -21,6 +21,7 @@ use lore::interface::LoreRevisionResolveEventData;
 use lore::interface::LoreRevisionResolveTarget;
 use lore::interface::LoreRevisionSyncProgressEventData;
 use lore::interface::LoreString;
+use lore_base::timestamp;
 use parking_lot::Mutex;
 
 use crate::eprintln;
@@ -262,28 +263,7 @@ pub fn handle_revision_resolve_event(event: &LoreRevisionResolveEventData) {
     }
 }
 
-/// A byte count in the largest unit that leaves it above one.
-///
-/// A raw byte count renders as an integer, a fraction of a byte saying nothing.
-/// Only the scaled units carry decimals, the remainder there distinguishing
-/// 1.02 MiB from 1.98 MiB.
-pub fn format_bytes_to_string(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-
-    let (converted, unit) = if bytes > GIB {
-        ((bytes / MIB) as f64 / 1024.0, "GiB")
-    } else if bytes > MIB {
-        ((bytes / KIB) as f64 / 1024.0, "MiB")
-    } else if bytes > KIB {
-        (bytes as f64 / 1024.0, "KiB")
-    } else {
-        return format!("{bytes} bytes");
-    };
-
-    format!("{converted:.2} {unit}")
-}
+pub use lore_base::units::format_bytes_to_string;
 
 pub fn progress_info_display(progress: &LoreRevisionSyncProgressEventData) -> String {
     let bytes_info = if progress.bytes_update_total > 0 {
@@ -334,6 +314,13 @@ pub fn merge_result_display(progress: &LoreRevisionSyncProgressEventData) -> Str
         "Merged files, {} updated, {} deleted, {} merged, {} conflicted",
         progress.file_update, progress.file_delete, progress.file_automerge, progress.file_conflict
     )
+}
+
+/// `millis`, read as signed milliseconds from the Unix epoch, as an RFC 2822 date and time in
+/// UTC, such as `Sun, 22 Nov 2026 12:45:20 +0000`, or `None` for a time outside the years 0 to
+/// 9999.
+pub fn rfc2822_display(millis: u64) -> Option<String> {
+    timestamp::from_unix_millis(millis as i64).and_then(timestamp::rfc2822)
 }
 
 /// The termination signals, registered separately from the wait on them.

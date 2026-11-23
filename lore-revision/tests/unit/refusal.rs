@@ -24,6 +24,9 @@ use lore_base::types::TypedBytes;
 use lore_error_set::prelude::*;
 use lore_revision::branch;
 use lore_revision::branch::merge::MergeIntoOptions;
+use lore_revision::branch::push::MountPolicy;
+use lore_revision::branch::push::PushRun;
+use lore_revision::branch::push::collect_targets;
 use lore_revision::commit;
 use lore_revision::commit::CommitOptions;
 use lore_revision::file::audit::AuditError;
@@ -59,9 +62,12 @@ use lore_revision::revision::restore::RestoreOptions;
 use lore_revision::stage::StageOptions;
 use lore_revision::state::State;
 use lore_transport::BranchListResponse;
+use lore_transport::BranchPushError;
 use lore_transport::BranchPushResponse;
 use lore_transport::BranchQueryResponse;
+use lore_transport::BranchRecord;
 use lore_transport::Connection;
+use lore_transport::EnvironmentConfig;
 use lore_transport::MetadataSetResult;
 use lore_transport::ProtocolError;
 use lore_transport::Revision;
@@ -69,6 +75,8 @@ use lore_transport::RevisionListResponse;
 use lore_transport::RevisionListStart;
 use lore_transport::SuppliedCredentials;
 use lore_transport::auth::AuthEndpoint;
+use lore_transport::auth::AuthMode;
+use lore_transport::quic::client::CongestionAlgorithm;
 use lore_transport::traits::Admin;
 use lore_transport::traits::Environment;
 use lore_transport::traits::Lock;
@@ -83,6 +91,7 @@ use crate::helper::RepositoryContextCreationArgsExt;
 use crate::helper::TempDir;
 use crate::helper::TestRepository;
 use crate::helper::committed_repository;
+use crate::helper::create_branch_on_instance;
 use crate::helper::default_repository_creation_args;
 use crate::helper::in_memory;
 use crate::helper::path_arguments;
@@ -97,12 +106,24 @@ fn refusal() -> ProtocolError {
     ProtocolError::from(NotAuthorized)
 }
 
-/// A remote revision service that refuses the caller on every request but a branch query where
-/// `latest` is set, which it answers with that latest revision, and counts its branch queries.
+/// What a [`RefusingRevision`] answers a branch query with.
+#[derive(Default, Clone, Copy)]
+enum BranchQueryAnswer {
+    /// The refusal.
+    #[default]
+    Refusal,
+    /// The branch, at this latest revision.
+    Latest(Hash),
+    /// No such branch.
+    NotFound,
+}
+
+/// A remote revision service that refuses the caller on every request but a branch query, which it
+/// answers with `answer`, and counts its branch queries.
 #[derive(Default)]
 struct RefusingRevision {
     queries: AtomicUsize,
-    latest: Option<Hash>,
+    answer: BranchQueryAnswer,
 }
 
 #[async_trait]
@@ -114,7 +135,7 @@ impl Revision for RefusingRevision {
         _: &str,
         _: &str,
         _: &[BranchPoint],
-    ) -> Result<Hash, ProtocolError> {
+    ) -> Result<BranchRecord, ProtocolError> {
         Err(refusal())
     }
 
@@ -128,12 +149,15 @@ impl Revision for RefusingRevision {
         _: Option<&str>,
     ) -> Result<BranchQueryResponse, ProtocolError> {
         self.queries.fetch_add(1, Ordering::SeqCst);
-        let latest = self.latest.ok_or_else(refusal)?;
+        let latest = match self.answer {
+            BranchQueryAnswer::Refusal => return Err(refusal()),
+            BranchQueryAnswer::Latest(latest) => latest,
+            BranchQueryAnswer::NotFound => return Err(ProtocolError::from(NotFound)),
+        };
         Ok(BranchQueryResponse {
             id: branch.unwrap_or_default(),
             latest,
-            metadata: Hash::default(),
-            deleted: false,
+            ..Default::default()
         })
     }
 
@@ -143,11 +167,15 @@ impl Revision for RefusingRevision {
         _: Hash,
         _: bool,
         _: bool,
-    ) -> Result<BranchPushResponse, ProtocolError> {
-        Err(refusal())
+    ) -> Result<BranchPushResponse, BranchPushError> {
+        Err(refusal().into())
     }
 
-    async fn branch_list(&self) -> Result<BranchListResponse, ProtocolError> {
+    async fn branch_list(
+        &self,
+        _: Option<&str>,
+        _: bool,
+    ) -> Result<BranchListResponse, ProtocolError> {
         Err(refusal())
     }
 
@@ -182,11 +210,25 @@ fn refusing_connection(repository: RepositoryId) -> Arc<Connection> {
     )
 }
 
-/// A protocol that refuses the caller the connect of every service but the admin service, where
-/// `admin` is set, which it answers with `admin`.
+/// A protocol whose server advertises no authentication, and which refuses the caller the connect
+/// of every service but these, where set: the admin service, which it answers with `admin`, and
+/// the revision service of the repository `served` names, which it answers with the service beside
+/// it. It records the repository of each revision service connect.
 #[derive(Default)]
 struct RefusingProtocol {
     admin: Option<Arc<dyn Admin>>,
+    served: Option<(RepositoryId, Arc<dyn Revision>)>,
+    revision_connects: parking_lot::Mutex<Vec<RepositoryId>>,
+}
+
+/// A server environment that advertises no authentication and no endpoint of its own.
+struct Unauthenticated;
+
+#[async_trait]
+impl Environment for Unauthenticated {
+    async fn get(&self) -> Result<EnvironmentConfig, ProtocolError> {
+        Ok(EnvironmentConfig::default())
+    }
 }
 
 #[async_trait]
@@ -200,6 +242,7 @@ impl Protocol for RefusingProtocol {
         _: Partition,
         _: usize,
         _: &Arc<SuppliedCredentials>,
+        _: CongestionAlgorithm,
     ) -> Result<Arc<dyn Storage>, ProtocolError> {
         Err(refusal())
     }
@@ -210,10 +253,14 @@ impl Protocol for RefusingProtocol {
         _: &str,
         _: &AuthEndpoint,
         _: &str,
-        _: RepositoryId,
+        repository: RepositoryId,
         _: &Arc<SuppliedCredentials>,
     ) -> Result<Arc<dyn Revision>, ProtocolError> {
-        Err(refusal())
+        self.revision_connects.lock().push(repository);
+        match &self.served {
+            Some((served, revision)) if *served == repository => Ok(revision.clone()),
+            _ => Err(refusal()),
+        }
     }
 
     async fn repository(
@@ -256,13 +303,47 @@ impl Protocol for RefusingProtocol {
         _: Weak<Connection>,
         _: &str,
     ) -> Result<Arc<dyn Environment>, ProtocolError> {
-        Err(refusal())
+        Ok(Arc::new(Unauthenticated))
     }
 }
 
 /// A connection whose services all refuse the caller's connect.
 fn refusing_services() -> Arc<Connection> {
     Connection::detached_protocol(Arc::new(RefusingProtocol::default()))
+}
+
+/// A connection the connection cache holds, which is taken out of the cache when this is dropped.
+struct CachedConnection(Arc<Connection>);
+
+impl Drop for CachedConnection {
+    fn drop(&mut self) {
+        lore_transport::connection::remove_connection(self.0.clone());
+    }
+}
+
+/// A connection over `protocol` to a remote of its own, opened for `repository` as a command opens
+/// one. The connection cache holds it as it holds a command's, so a link or a layer context
+/// connecting from it is handed it, until the [`CachedConnection`] is dropped. The scheme it
+/// registers for `protocol` stays registered, holding `protocol`, until the process ends: the
+/// transport has no way to remove a scheme.
+async fn connected(protocol: Arc<RefusingProtocol>, repository: RepositoryId) -> CachedConnection {
+    // The protocol a scheme names is process-wide, so each protocol takes a scheme of its own.
+    let scheme = format!("refusal-{}", uuid::Uuid::now_v7().simple());
+    lore_transport::connection::add(&scheme, protocol).expect("registering the scheme");
+    CachedConnection(
+        lore_transport::connection::connect(
+            &format!("{scheme}://remote.invalid"),
+            "",
+            repository,
+            1,
+            "",
+            "",
+            AuthMode::Auto,
+            None,
+        )
+        .await
+        .expect("the remote advertises no authentication"),
+    )
 }
 
 /// An admin service that answers every obliterate with its error.
@@ -280,6 +361,7 @@ impl Admin for FailingAdmin {
 fn failing_admin(error: ProtocolError) -> Arc<Connection> {
     Connection::detached_protocol(Arc::new(RefusingProtocol {
         admin: Some(Arc::new(FailingAdmin(error))),
+        ..RefusingProtocol::default()
     }))
 }
 
@@ -351,15 +433,65 @@ async fn refused_instance() -> TestRepository {
     .await
 }
 
-/// A committed instance opened again over a remote that refuses the connect, and the state of its
-/// revision with a link added, stored and anchored nowhere. The instance's directory is removed
-/// with the [`TempDir`].
+/// The repository the linked state of [`linked_committed_instance`] links.
+fn linked_repository() -> RepositoryId {
+    RepositoryId::from([9; 16])
+}
+
+/// [`linked_committed_instance`] opened again over a remote that refuses the connect.
 async fn refused_committed_instance() -> (Arc<RepositoryContext>, Hash, TempDir) {
+    let (repository, linked, tempdir) = linked_committed_instance().await;
+    (
+        reopened(&repository, &tempdir, Err(refusal())),
+        linked,
+        tempdir,
+    )
+}
+
+/// [`linked_committed_instance`] opened again over a remote that serves the instance's repository,
+/// holding no branch of it, and refuses the caller every other repository, beside the protocol that
+/// remote runs and the cached connection to it.
+async fn served_committed_instance() -> (
+    Arc<RepositoryContext>,
+    Hash,
+    TempDir,
+    Arc<RefusingProtocol>,
+    CachedConnection,
+) {
+    let (repository, linked, tempdir) = linked_committed_instance().await;
+    let served: Arc<dyn Revision> = Arc::new(RefusingRevision {
+        answer: BranchQueryAnswer::NotFound,
+        ..RefusingRevision::default()
+    });
+    let protocol = Arc::new(RefusingProtocol {
+        served: Some((repository.id, served)),
+        ..RefusingProtocol::default()
+    });
+    let remote = connected(protocol.clone(), repository.id).await;
+    (
+        reopened(&repository, &tempdir, Ok(remote.0.clone())),
+        linked,
+        tempdir,
+        protocol,
+        remote,
+    )
+}
+
+/// A committed instance, and the state of its revision with a link to [`linked_repository`] added,
+/// stored and anchored nowhere. The instance's directory is removed with the [`TempDir`].
+async fn linked_committed_instance() -> (Arc<RepositoryContext>, Hash, TempDir) {
     let (repository, tempdir) = committed_repository("", &[]).await;
+    let linked = state_linking(&repository, Hash::from([9; 32])).await;
+    (repository, linked, tempdir)
+}
+
+/// The state of `repository`'s current revision with a link to [`linked_repository`] at `pin`
+/// added, stored and anchored nowhere.
+async fn state_linking(repository: &Arc<RepositoryContext>, pin: Hash) -> Hash {
     let token = repository
         .try_write_token()
         .expect("The repository was opened for writing");
-    let (revision, _branch) = lore_revision::instance::load_current_anchor_boxed(&repository)
+    let (revision, _branch) = lore_revision::instance::load_current_anchor_boxed(repository)
         .await
         .expect("loading the current anchor");
     let state = State::deserialize(repository.clone(), revision)
@@ -368,24 +500,19 @@ async fn refused_committed_instance() -> (Arc<RepositoryContext>, Hash, TempDir)
     state
         .link_add(
             repository.clone(),
-            RepositoryId::from([9; 16]),
+            linked_repository(),
             BranchId::default(),
-            Hash::from([9; 32]),
+            pin,
             1,
             LinkFlags::NoFlags,
         )
         .await
         .expect("adding a link");
     state.mark_dirty();
-    let linked = state
+    state
         .serialize(repository.clone(), token)
         .await
-        .expect("storing the linked state");
-    (
-        reopened(&repository, &tempdir, Err(refusal())),
-        linked,
-        tempdir,
-    )
+        .expect("storing the linked state")
 }
 
 /// `repository`, rooted at `tempdir`, opened again over `remote`.
@@ -413,16 +540,7 @@ fn reopened(
 async fn create_feature_branch(
     repository: Arc<RepositoryContext>,
 ) -> Result<(), branch::create::CreateError> {
-    let token = token_of(&repository);
-    branch::create::create(
-        repository,
-        &token,
-        "feature".to_string(),
-        None,
-        String::new(),
-        false,
-    )
-    .await
+    create_branch_on_instance(&repository, "feature", None, "", false).await
 }
 
 fn with_execution<F: Future>(body: F) -> std::pin::Pin<Box<impl Future<Output = F::Output>>> {
@@ -433,7 +551,7 @@ fn with_execution<F: Future>(body: F) -> std::pin::Pin<Box<impl Future<Output = 
 /// read's failure.
 #[tokio::test]
 async fn a_state_read_the_remote_refuses_reports_the_refusal() {
-    with_execution(async {
+    Box::pin(with_execution(async {
         for refusal in [
             ProtocolError::from(NotAuthenticated),
             ProtocolError::from(NotAuthorized),
@@ -449,7 +567,7 @@ async fn a_state_read_the_remote_refuses_reports_the_refusal() {
             };
             assert_eq!(error.ffi_code(), code, "{error:?}");
         }
-    })
+    }))
     .await;
 }
 
@@ -599,14 +717,32 @@ async fn a_refused_branch_metadata_lookup_asks_the_remote_once() {
 /// its metadata looked up on the remote.
 #[tokio::test]
 async fn a_branch_metadata_lookup_past_an_unreadable_local_copy_reports_the_refusal() {
-    with_execution(async {
+    Box::pin(with_execution(async {
         let branch = BranchId::from([1; 16]);
         for (name, repository) in refusing_contexts().await {
             store_unreadable_metadata(&repository, branch).await;
             let error = branch::metadata(repository, branch).await.expect_err(name);
             assert!(error.is_not_authorized(), "{name}: {error:?}");
         }
-    })
+    }))
+    .await;
+}
+
+/// A batch of a line that leaves the local store, over each refusing remote, holds the revisions
+/// the walk of the local store read: the refusal ends the line there.
+#[tokio::test]
+async fn a_batch_over_a_refusing_remote_holds_the_local_revisions() {
+    Box::pin(with_execution(async {
+        for (name, repository) in refusing_contexts().await {
+            let line = crate::branch::write_line(&repository, Hash::from([9; 32]), 2, 2).await;
+
+            let history = lore_revision::find::batch_load_history(repository, line[1])
+                .await
+                .expect(name);
+
+            assert_eq!(history, vec![(3, line[1]), (2, line[0])], "{name}");
+        }
+    }))
     .await;
 }
 
@@ -635,25 +771,71 @@ async fn a_diff_base_on_one_branch_reports_the_refusal_of_its_metadata() {
     .await;
 }
 
-/// A linked repository that refuses the new branch fails the create.
+/// A create looks the new branch's metadata up, on the remote where the instance holds none. The
+/// remote's refusal of the connect, of the revision service's connect or of the query fails the
+/// create before it writes the branch or moves the instance onto it.
 #[tokio::test]
-async fn creating_a_branch_a_linked_repository_refuses_reports_the_refusal() {
+async fn creating_a_branch_the_remote_refuses_writes_nothing() {
     Box::pin(with_execution(async {
-        let (refused, linked, _tempdir) = refused_committed_instance().await;
-        lore_revision::instance::store_staged_anchor(&refused, linked)
+        let (repository, tempdir) = committed_repository("", &[]).await;
+        let anchor = lore_revision::instance::load_current_anchor_boxed(&repository)
             .await
-            .expect("staging the link");
-
-        let error = create_feature_branch(refused)
-            .await
-            .expect_err("the linked repository refuses the connect");
-        assert!(error.is_not_authorized(), "{error:?}");
+            .expect("loading the current anchor");
+        let feature = BranchId::from([5; 16]);
+        let mut differing = Vec::new();
+        for (case, remote) in refusing_remotes(repository.id) {
+            let refused = reopened(&repository, &tempdir, remote);
+            let created =
+                create_branch_on_instance(&refused, "feature", Some(feature), "", false).await;
+            expect_refused(&mut differing, case, created);
+            match branch::load_name_to_id_local(refused.clone(), "feature").await {
+                Err(err) if err.is_branch_not_found() => {}
+                mapped => differing.push(format!("{case}: the name maps to {mapped:?}")),
+            }
+            if branch::exist_local(refused.clone(), feature).await {
+                differing.push(format!("{case}: the branch has metadata"));
+            }
+            let current = lore_revision::instance::load_current_anchor_boxed(&refused).await;
+            if current.as_ref().ok() != Some(&anchor) {
+                differing.push(format!("{case}: the current anchor is {current:?}"));
+            }
+        }
+        assert!(differing.is_empty(), "{differing:#?}");
     }))
     .await;
 }
 
-/// A layer whose linked repository refuses the new branch fails the create, once the instance
-/// holds the branch.
+/// A create makes the new branch in each linked repository, once the instance's own lookups are
+/// answered. A linked repository the remote refuses the caller fails the create with the refusal.
+#[tokio::test]
+async fn creating_a_branch_a_linked_repository_refuses_reports_the_refusal() {
+    Box::pin(with_execution(async {
+        let (instance, _linked, _tempdir, protocol, _remote) = served_committed_instance().await;
+        // The create reads the pinned revision for nested links before it asks the linked
+        // repository for the branch, so the link pins a revision the instance holds.
+        let (revision, _branch) = lore_revision::instance::load_current_anchor_boxed(&instance)
+            .await
+            .expect("loading the current anchor");
+        let linked = state_linking(&instance, revision).await;
+        lore_revision::instance::store_staged_anchor(&instance, linked)
+            .await
+            .expect("staging the link");
+
+        let error = create_feature_branch(instance.clone())
+            .await
+            .expect_err("the remote refuses the linked repository");
+        assert!(error.is_not_authorized(), "{error:?}");
+        assert_eq!(
+            *protocol.revision_connects.lock(),
+            [instance.id, linked_repository()],
+            "the revision services connected"
+        );
+    }))
+    .await;
+}
+
+/// A create makes the new branch in each layer, once the instance holds it. A layer the remote
+/// refuses the caller fails the create with the refusal.
 #[tokio::test]
 async fn creating_a_branch_a_layer_refuses_reports_the_refusal() {
     #[derive(Serialize)]
@@ -662,9 +844,53 @@ async fn creating_a_branch_a_layer_refuses_reports_the_refusal() {
     }
 
     Box::pin(with_execution(async {
-        let (refused, linked, _tempdir) = refused_committed_instance().await;
+        let (instance, _linked, _tempdir, protocol, _remote) = served_committed_instance().await;
+        let (revision, _branch) = lore_revision::instance::load_current_anchor_boxed(&instance)
+            .await
+            .expect("loading the current anchor");
+        let layer_id = RepositoryId::from([8; 16]);
+        lore_revision::util::config::save(
+            &LayerConfig {
+                layers: vec![Layer {
+                    target_path: "layer".to_string(),
+                    source_path: String::new(),
+                    repository: layer_id,
+                    metadata: None,
+                    current: revision,
+                    staged: Hash::default(),
+                }],
+            },
+            layer::layer_config_path(&instance).expect("layer config path"),
+        )
+        .await
+        .expect("writing the layer set");
+
+        let error = create_feature_branch(instance.clone())
+            .await
+            .expect_err("the remote refuses the layer");
+        assert!(error.is_not_authorized(), "{error:?}");
+        let connects = protocol.revision_connects.lock().clone();
+        assert!(connects.contains(&layer_id), "{connects:?}");
+        branch::load_name_to_id_local(instance, "feature")
+            .await
+            .expect("the instance holds the branch");
+    }))
+    .await;
+}
+
+/// A push of the branch alone leaves the instance's layers out: it never reaches the layer's
+/// repository, which a push of its layers connects to as it plans the layer.
+#[tokio::test]
+async fn a_push_of_the_branch_alone_leaves_the_layers_out() {
+    #[derive(Serialize)]
+    struct LayerConfig {
+        layers: Vec<Layer>,
+    }
+
+    Box::pin(with_execution(async {
+        let (instance, _linked, _tempdir, protocol, _remote) = served_committed_instance().await;
         let (revision, current_branch) =
-            lore_revision::instance::load_current_anchor_boxed(&refused)
+            lore_revision::instance::load_current_anchor_boxed(&instance)
                 .await
                 .expect("loading the current anchor");
         let layer_id = RepositoryId::from([8; 16]);
@@ -679,25 +905,28 @@ async fn creating_a_branch_a_layer_refuses_reports_the_refusal() {
                     staged: Hash::default(),
                 }],
             },
-            layer::layer_config_path(&refused).expect("layer config path"),
+            layer::layer_config_path(&instance).expect("layer config path"),
         )
         .await
         .expect("writing the layer set");
-        let layer_repository = refused.to_layer_context(layer_id).await;
-        lore_revision::instance::store_current_anchor(&layer_repository, linked)
-            .await
-            .expect("anchoring the layer on the linked state");
-        lore_revision::instance::store_current_anchor_branch(&layer_repository, current_branch)
-            .await
-            .expect("anchoring the layer branch");
+        let planned = |mounts| {
+            let instance = instance.clone();
+            let protocol = protocol.clone();
+            async move {
+                let run = PushRun {
+                    mounts,
+                    ..PushRun::default()
+                };
+                let _planned =
+                    collect_targets(instance, current_branch, revision, &run, None).await;
+                protocol.revision_connects.lock().contains(&layer_id)
+            }
+        };
 
-        let error = create_feature_branch(refused.clone())
-            .await
-            .expect_err("the layer's linked repository refuses the connect");
-        assert!(error.is_not_authorized(), "{error:?}");
-        branch::load_name_to_id_local(refused, "feature")
-            .await
-            .expect("the instance holds the branch");
+        let alone = planned(MountPolicy::RequireOnRemote).await;
+        let layered = planned(MountPolicy::Push).await;
+
+        assert_eq!((alone, layered), (false, true));
     }))
     .await;
 }
@@ -717,31 +946,39 @@ async fn force_creating_a_branch_the_remote_refuses_reports_the_refusal() {
             .expect("the instance holds the feature branch");
         let refused = reopened(&repository, &tempdir, Err(refusal()));
 
-        let error = branch::create::create(
-            refused.clone(),
-            &token_of(&refused),
-            "renamed".to_string(),
-            Some(feature),
-            String::new(),
-            true,
-        )
-        .await
-        .expect_err("the remote refuses the lookup of the new name");
+        let error = create_branch_on_instance(&refused, "renamed", Some(feature), "", true)
+            .await
+            .expect_err("the remote refuses the lookup of the new name");
         assert!(error.is_not_authorized(), "{error:?}");
+    }))
+    .await;
+}
+
+/// An archive of a branch the instance holds no metadata for reads the metadata on the remote,
+/// whose refusal fails the archive rather than reporting the branch as not found.
+#[tokio::test]
+async fn archiving_a_branch_the_remote_refuses_reports_the_refusal() {
+    Box::pin(with_execution(async {
+        for (name, repository) in refusing_contexts().await {
+            let error = branch::delete(repository, BranchId::from([1; 16]))
+                .await
+                .expect_err(name);
+            assert!(error.is_not_authorized(), "{name}: {error:?}");
+        }
     }))
     .await;
 }
 
 #[tokio::test]
 async fn a_layer_latest_lookup_reports_the_refusal() {
-    with_execution(async {
+    Box::pin(with_execution(async {
         for (name, repository) in refusing_contexts().await {
             let error = lore_revision::layer::latest_revision(repository, BranchId::from([1; 16]))
                 .await
                 .expect_err(name);
             assert!(error.is_not_authorized(), "{name}: {error:?}");
         }
-    })
+    }))
     .await;
 }
 
@@ -828,7 +1065,7 @@ async fn a_refused_read_of_a_remote_latest_state_fails_the_lookup() {
             Err(refusal()),
             repository.id,
             Arc::new(RefusingRevision {
-                latest: Some(Hash::from([7; 32])),
+                answer: BranchQueryAnswer::Latest(Hash::from([7; 32])),
                 ..RefusingRevision::default()
             }),
         );
@@ -884,7 +1121,7 @@ async fn resolving_a_revision_on_the_current_branch_reports_the_refusal() {
             Ok(()),
             repository.id,
             Arc::new(RefusingRevision {
-                latest: Some(latest),
+                answer: BranchQueryAnswer::Latest(latest),
                 ..RefusingRevision::default()
             }),
         );

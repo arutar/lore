@@ -25,6 +25,7 @@ use lore_revision::fs::fuse::inode::ROOT_INO;
 use lore_revision::fs::fuse::operation::FuseOperation;
 use lore_revision::repository::RepositoryContext;
 use lore_revision::util::path::RelativePath;
+use lore_storage::FlushOptions;
 use lore_storage::KeyType;
 use lore_storage::KeyValueStream;
 use lore_storage::MutableStore;
@@ -100,8 +101,8 @@ impl MutableStore for CountingStore {
         self.inner.clone().list(partition, key_type).await
     }
 
-    async fn flush(self: Arc<Self>, sync_data: bool) -> Result<(), StoreError> {
-        self.inner.clone().flush(sync_data).await
+    async fn flush(self: Arc<Self>, options: FlushOptions) -> Result<(), StoreError> {
+        self.inner.clone().flush(options).await
     }
 }
 
@@ -317,8 +318,8 @@ async fn readdirplus_and_read_directory_per_entry_counts() {
                 );
                 assert_eq!(warm, 0, "READDIRPLUS over known inodes allocates nothing");
 
-                // Once a swap stored a time, a listing asks the store once per file and never
-                // for a directory, which keeps the base time.
+                // Once a swap recorded a time, a listing reads it from the instance's records and
+                // asks the store nothing; a directory keeps the base time.
                 let swapped = path.join("f00000000.txt");
                 fs.recorded_times()
                     .store(&fixture.repository, std::iter::once(&swapped), SWAPPED_TIME)
@@ -348,7 +349,8 @@ async fn readdirplus_and_read_directory_per_entry_counts() {
                     assert_eq!(entry.info.mtime(), expected, "{}", entry.name);
                     listed += 1;
                 }
-                assert_eq!(counting.loads.swap(0, Ordering::Relaxed), listed);
+                assert!(listed > 0);
+                assert_eq!(counting.loads.swap(0, Ordering::Relaxed), 0);
             }),
         )
         .await;

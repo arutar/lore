@@ -1160,18 +1160,16 @@ async fn an_unserved_mark_keeps_a_clean_directorys_staged_action() {
         assert!(held.is_staged_move(), "the staged move stands");
         assert!(held.is_dirty());
 
-        // A forced base mark of a dirty node replaces its action, as before.
+        // A forced mark keeps it too.
         mark(
             &state,
             &repository,
             t.c,
-            Mark::dirty(NodeFlags::Dirty, Ext::Keep, true),
+            Mark::dirty(NodeFlags::DirtyDelete, Ext::Keep, true),
         )
         .await;
-        assert_eq!(
-            record(&state, &repository, t.c).await.flags & NodeFlags::ActionBits.bits(),
-            0
-        );
+        let held = record(&state, &repository, t.c).await;
+        assert!(held.is_staged_move() && !held.is_staged_delete());
     })
     .await;
 }
@@ -1307,15 +1305,59 @@ async fn a_scan_chain_with_a_reserved_name_adds_nothing() {
     .await;
 }
 
+/// The scan's directory chain refuses to add below a file or a link, or to end at one: a file
+/// holds no children, and a link's child is the node it exposes in its linked tree. It leaves the
+/// node as it was.
+#[tokio::test]
+async fn a_scan_chain_below_or_at_a_file_or_a_link_adds_nothing() {
+    with_state(|repository, state| async move {
+        let link_node = Node {
+            flags: NodeFlags::Link.bits(),
+            name_hash: hash_string("lnk"),
+            child: 7,
+            ..Default::default()
+        };
+        let link = add(&state, &repository, ROOT_NODE, link_node, "lnk").await;
+        let held_file = add(&state, &repository, ROOT_NODE, file("f"), "f").await;
+        let file_record = record(&state, &repository, held_file).await;
+
+        for (node, path) in [
+            (link, "lnk/new"),
+            (link, "lnk"),
+            (held_file, "f/new"),
+            (held_file, "f"),
+        ] {
+            let error = lore_revision::state::os_diff::ensure_scan_dir_chain(
+                repository.clone(),
+                state.clone(),
+                ROOT_NODE,
+                path,
+            )
+            .await
+            .expect_err("a chain below or at a file or a link is refused");
+            assert!(error.is_node_not_found(), "{path}: {error}");
+            let held = record(&state, &repository, node).await;
+            let expected = if node == link { link_node } else { file_record };
+            assert_eq!(
+                (held.child, held.flags),
+                (expected.child, expected.flags),
+                "the refused chain {path} changed the node"
+            );
+        }
+    })
+    .await;
+}
+
 /// The scan's directory chain refuses a name no add would store, anywhere in its path, before it
-/// adds anything: a separator in a name, or a name over the length bound.
+/// adds anything: a separator in a name, an invalid argument, or a name over the length bound,
+/// `Oversized`.
 #[tokio::test]
 async fn a_scan_chain_with_an_unstorable_name_adds_nothing() {
     with_state(|repository, state| async move {
         let t = chain(&state, &repository).await;
 
         let long = format!("a/b/new/{}", "n".repeat(MAX_NODE_NAME_LEN + 1));
-        for path in ["a/b/new/x\\y", long.as_str()] {
+        for (path, too_long) in [("a/b/new/x\\y", false), (long.as_str(), true)] {
             let error = lore_revision::state::os_diff::ensure_scan_dir_chain(
                 repository.clone(),
                 state.clone(),
@@ -1324,7 +1366,14 @@ async fn a_scan_chain_with_an_unstorable_name_adds_nothing() {
             )
             .await
             .expect_err("an unstorable name is refused");
-            assert!(!error.is_node_not_found(), "{error}");
+            assert!(
+                if too_long {
+                    error.is_oversized()
+                } else {
+                    error.is_invalid_arguments()
+                },
+                "{error}"
+            );
             assert!(
                 state
                     .find_subnode(repository.clone(), t.b, hash_string("new"))
@@ -1418,7 +1467,7 @@ async fn a_chain_skips_empty_names_in_its_path() {
             .expect("lore dirty adds 'a/b/m'");
         assert_eq!(
             (scanned, dirtied),
-            (n, m),
+            (n, lore_revision::file::dirty::ParentChain::Reached(m)),
             "each chain answers its last name's node"
         );
         for dir in [ROOT_NODE, t.a, t.b, n, m] {

@@ -45,12 +45,12 @@ pub struct LoreLockFileAcquireArgs {
 /// |-------|-------------|
 /// | [`LoreEvent::LockFileAcquireBegin`](crate::interface::LoreEvent::LockFileAcquireBegin) | Emitted before each group of lock-acquire results |
 /// | [`LoreEvent::LockFileAcquire`](crate::interface::LoreEvent::LockFileAcquire) | Emitted for each file related to the lock-acquired report |
-pub async fn file_acquire(
+pub fn file_acquire(
     globals: LoreGlobalArgs,
     args: LoreLockFileAcquireArgs,
     callback: LoreEventCallback,
-) -> i32 {
-    dispatch_call(globals, args, callback, file_acquire_local).await
+) -> impl Future<Output = i32> {
+    dispatch_call(globals, args, callback, file_acquire_local)
 }
 
 fn file_acquire_local(
@@ -131,12 +131,12 @@ pub struct LoreLockFileStatusArgs {
 /// |-------|-------------|
 /// | [`LoreEvent::LockFileStatusBegin`](crate::interface::LoreEvent::LockFileStatusBegin) | Emitted before lock status results begin streaming |
 /// | [`LoreEvent::LockFileStatus`](crate::interface::LoreEvent::LockFileStatus) | Emitted for each locked file with owner and lock details |
-pub async fn file_status(
+pub fn file_status(
     globals: LoreGlobalArgs,
     args: LoreLockFileStatusArgs,
     callback: LoreEventCallback,
-) -> i32 {
-    dispatch_call(globals, args, callback, file_status_local).await
+) -> impl Future<Output = i32> {
+    dispatch_call(globals, args, callback, file_status_local)
 }
 
 fn file_status_local(
@@ -165,15 +165,17 @@ fn file_status_local(
 #[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
 #[handler(file_query_local)]
 pub struct LoreLockFileQueryArgs {
-    /// Branch to query locks on
+    /// Branch to query locks on; empty queries every branch, or the current branch where `path`
+    /// is given
     pub branch: LoreString,
-    /// Owner filter; empty matches any owner
+    /// Owner filter; empty matches any owner. Can't be combined with `path`
     pub owner: LoreString,
-    /// Path filter; empty matches any path
+    /// Path filter; empty matches any path. Can't be combined with `owner`
     pub path: LoreString,
 }
 
-/// Queries file locks on a branch, optionally filtered by owner and path.
+/// Queries file locks on a branch, optionally filtered by owner or by path. A query giving both
+/// `owner` and `path` fails with the invalid-arguments error before the remote is asked.
 ///
 /// # Events
 ///
@@ -194,12 +196,12 @@ pub struct LoreLockFileQueryArgs {
 /// |-------|-------------|
 /// | [`LoreEvent::LockFileQueryBegin`](crate::interface::LoreEvent::LockFileQueryBegin) | Emitted before query results begin streaming |
 /// | [`LoreEvent::LockFileQuery`](crate::interface::LoreEvent::LockFileQuery) | Emitted for each file matching the query |
-pub async fn file_query(
+pub fn file_query(
     globals: LoreGlobalArgs,
     args: LoreLockFileQueryArgs,
     callback: LoreEventCallback,
-) -> i32 {
-    dispatch_call(globals, args, callback, file_query_local).await
+) -> impl Future<Output = i32> {
+    dispatch_call(globals, args, callback, file_query_local)
 }
 
 fn file_query_local(
@@ -260,12 +262,12 @@ pub struct LoreLockFileReleaseArgs {
 /// |-------|-------------|
 /// | [`LoreEvent::LockFileReleaseBegin`](crate::interface::LoreEvent::LockFileReleaseBegin) | Emitted before each group of lock-release results |
 /// | [`LoreEvent::LockFileRelease`](crate::interface::LoreEvent::LockFileRelease) | Emitted for each file related to the lock-released report |
-pub async fn file_release(
+pub fn file_release(
     globals: LoreGlobalArgs,
     args: LoreLockFileReleaseArgs,
     callback: LoreEventCallback,
-) -> i32 {
-    dispatch_call(globals, args, callback, file_release_local).await
+) -> impl Future<Output = i32> {
+    dispatch_call(globals, args, callback, file_release_local)
 }
 
 fn file_release_local(

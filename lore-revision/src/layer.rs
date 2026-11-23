@@ -22,6 +22,7 @@ use crate::fs::filesystem_provider::InstanceOperationImpl;
 use crate::fs::filesystem_provider::with_operation;
 use crate::interface::LoreError;
 use crate::interface::LoreString;
+use crate::link;
 use crate::lore::BranchId;
 use crate::lore::Hash;
 use crate::lore::RepositoryId;
@@ -35,6 +36,7 @@ use crate::node::NodeID;
 use crate::node::NodeLink;
 use crate::node::ROOT_NODE;
 use crate::repository;
+use crate::repository::MountKind;
 use crate::repository::RepositoryContext;
 use crate::repository::RepositoryWriteToken;
 use crate::repository::clone;
@@ -292,7 +294,7 @@ impl Layer {
             .forward::<LayerError>("Failed deserializing state")?;
 
         let state_staged = match self.staged_revision() {
-            Some(staged) => State::deserialize(repository.clone(), staged)
+            Some(staged) => State::deserialize_staged(repository.clone(), staged, self.current)
                 .await
                 .forward::<LayerError>("Failed deserializing state")?,
             None => state_current.clone(),
@@ -314,11 +316,36 @@ pub async fn add(
     source_path: RelativePath,
     metadata: Option<&str>,
 ) -> Result<(), LayerError> {
-    let (_state_current, state_staged, current_branch) =
+    let (state_current, state_staged, current_branch) =
         State::deserialize_current_and_staged(repository.clone())
             .await
             .forward::<LayerError>("Failed deserializing state")?;
-    let state_staged = state_staged.unwrap_or_else(|| _state_current.clone());
+    let state_staged = state_staged.unwrap_or_else(|| state_current.clone());
+
+    if let Some(link_path) = link::overlapping_link_mount(
+        &state_current,
+        &state_staged,
+        repository.clone(),
+        &mount_path,
+    )
+    .await
+    .forward::<LayerError>("listing link mounts")?
+    {
+        return Err(MountKind::Layer
+            .overlap(mount_path.as_str(), link_path.as_str())
+            .into());
+    }
+
+    let config_path = layer_config_path(&repository)?;
+    let mut config = load_config(&config_path).await?;
+
+    for layer in config.layers.iter() {
+        if layer.repository == source_repository
+            && layer.target_path.as_str() == mount_path.as_str()
+        {
+            return Err(AlreadyLinked.into());
+        }
+    }
 
     lore_debug!("Resolve repository layer source {source_repository} path {source_path}");
     let layer_repository = repository.to_layer_context(source_repository).await;
@@ -393,7 +420,8 @@ pub async fn add(
                     &branch_stack,
                 )
                 .await
-                .forward::<LayerError>("Failed to create branch in layer repository")?;
+                .forward::<LayerError>("Failed to create branch in layer repository")?
+                .latest;
 
             lore_debug!(
                 "Layer repository branch {branch_name} created at latest revision {layer_latest}"
@@ -448,17 +476,6 @@ pub async fn add(
         ));
     }
 
-    let config_path = layer_config_path(&repository)?;
-    let mut config = load_config(&config_path).await?;
-
-    for layer in config.layers.iter() {
-        if layer.repository == layer_repository.id
-            && layer.target_path.as_str() == mount_path.as_str()
-        {
-            return Err(AlreadyLinked.into());
-        }
-    }
-
     config.layers.push(Layer {
         target_path: mount_path.to_string(),
         source_path: source_path.to_string(),
@@ -490,8 +507,9 @@ pub async fn add(
 
     let mount_states = layer_repository.filter.mount_states(&mount_path);
     // The mount directory and the files cloned under it are in the same filesystem, so one
-    // operation covers both.
-    with_operation(layer_repository.file_system(), async |operation| {
+    // operation covers both, and the layer is saved before it finalizes: an SWFS instance serves
+    // layers from the configuration it finds then (ADR-00042).
+    with_operation::<_, LayerError, _>(layer_repository.file_system(), async |operation| {
         operation
             .create_dir_all(&mount_path)
             .await
@@ -500,13 +518,13 @@ pub async fn add(
         let clone_ctx = CloneContext {
             repository: layer_repository.clone(),
             state: layer_state,
-            operation,
+            operation: operation.clone(),
             options: Arc::new(clone::CloneOptions {
                 ignore_existing: false,
                 ..Default::default()
             }),
             stats: Arc::default(),
-            modified_times: Arc::new(crate::state::RecordedModifiedTimes::default()),
+            modified_times: operation.modified_times(),
         };
         clone::clone_node(
             clone_ctx,
@@ -516,11 +534,16 @@ pub async fn add(
             mount_states,
         )
         .await
-        .forward::<LayerError>("Failed cloning target layer")
+        .forward::<LayerError>("Failed cloning target layer")?;
+
+        save_config(token, &config_path, &config).await?;
+        operation
+            .modified_times()
+            .store(layer_repository.clone())
+            .await;
+        Ok(())
     })
     .await?;
-
-    save_config(token, &config_path, &config).await?;
 
     Ok(())
 }
@@ -637,14 +660,17 @@ pub async fn remove(
         layer_state.clone(),
         source_node_link.node,
     )
-    .await;
+    .await
+    .count;
 
     let mut tracked_files: Vec<RelativePath> = Vec::new();
     let mut tracked_directories: Vec<RelativePath> = Vec::new();
     let mut modified: Vec<String> = Vec::new();
 
     let force = execution_context().globals().force();
-    // The walk reads the same files the removal then deletes, so one operation covers both.
+    // The walk reads the same files the removal then deletes, so one operation covers both, and
+    // the layer is taken out of the configuration before it finalizes: an SWFS instance serves
+    // layers from the configuration it finds then (ADR-00042).
     with_operation(repository.file_system(), async |operation| {
         walk_layer_subtree(
             &operation,
@@ -685,16 +711,15 @@ pub async fn remove(
             purge,
         )
         .await;
-        Ok::<(), LayerError>(())
+
+        config.layers.remove(layer_index);
+        save_config(token, &config_path, &config).await
     })
     .await?;
 
     let modified_count = modified.len() as u64;
     let file_count = tracked_files.len() as u64;
     let directory_count = tracked_directories.len() as u64;
-
-    config.layers.remove(layer_index);
-    save_config(token, &config_path, &config).await?;
 
     event::LoreEvent::LayerRemove(LoreLayerRemoveEventData {
         target_path: LoreString::from(&mount_path),
@@ -899,7 +924,8 @@ pub(crate) async fn list_staged(
             staged_state,
             source_node_link.node,
         )
-        .await;
+        .await
+        .count;
 
         if staged_file_count == 0 {
             continue;
@@ -964,7 +990,8 @@ pub async fn sync(
 }
 
 /// Realizes the layer's target state over its mount, within `operation`, and removes the
-/// directories below the mount that the view excludes and the realize left empty.
+/// directories below the mount that the realize left empty and the view does not place on disk,
+/// the view a `lore sync --view` carries the tree to where `options` names one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_in_operation(
     operation: Arc<InstanceOperationImpl>,
@@ -986,6 +1013,12 @@ pub(crate) async fn sync_in_operation(
     .await;
     let target =
         drawn_subtree_state(&repository_target, &state_target, &source_path, &mount_path).await;
+    let view_change = options.view.is_some().then(|| NodeMapping {
+        repository: target.mapping.repository.clone(),
+        state: target.mapping.state.clone(),
+        path: mount_path.clone(),
+        node: target.mapping.node,
+    });
     let current_tree = NodeMapping {
         repository: current.mapping.repository.clone(),
         state: current.mapping.state.clone(),
@@ -1041,46 +1074,55 @@ pub(crate) async fn sync_in_operation(
     let options = Arc::new(options);
     let changes = Arc::new(changes);
     let force = execution_context().globals().force();
-    let changes = if !changes.is_empty() && !force && !options.reset {
-        lore_info!(
-            "Verifying {} layer changes with local file system",
-            changes.len()
-        );
-        sync::sync_verify_filesystem(
-            repository_target.clone(),
-            Arc::new(sync::SyncVerifyArgs {
-                // Moved in, so verification filters it in place.
+    let crate::fs::realize::VerifiedChanges { changes, kept } =
+        if !changes.is_empty() && !force && !options.reset {
+            lore_info!(
+                "Verifying {} layer changes with local file system",
+                changes.len()
+            );
+            sync::sync_verify_filesystem(
+                repository_target.clone(),
+                Arc::new(sync::SyncVerifyArgs {
+                    // Moved in, so verification filters it in place.
+                    changes,
+                    repository_current,
+                    operation: operation.clone(),
+                    current: current_tree,
+                    options: options.clone(),
+                    carries_modes: true,
+                }),
+            )
+            .await
+            .forward::<LayerError>("Failed to verify file system during layer sync")?
+        } else {
+            crate::fs::realize::VerifiedChanges {
                 changes,
-                repository_current,
-                operation: operation.clone(),
-                current: current_tree,
-                options: options.clone(),
-            }),
-        )
-        .await
-        .forward::<LayerError>("Failed to verify file system during layer sync")?
-    } else {
-        changes
-    };
+                kept: Vec::new(),
+            }
+        };
 
     let dry_run = execution_context().globals().dry_run();
     crate::fs::realize::realize_changes(
         repository_target.clone(),
         operation.clone(),
         changes.clone(),
+        &kept,
+        None, /* No subtrees */
         None,
         dry_run,
-        false, /* Not a merge */
+        None, /* Not a merge */
+        None, /* No view change */
         stats.clone(),
     )
     .await
     .forward::<LayerError>("Failed to sync layer files")?;
     if !dry_run {
-        crate::fs::realize::remove_emptied_excluded_directories(
+        crate::fs::realize::remove_emptied_directories(
             &operation,
             &repository_target,
             &changes,
             &mount_path,
+            view_change.as_ref(),
             &stats,
         )
         .await;
@@ -1146,7 +1188,12 @@ pub async fn latest_revision(
 /// The revision of `layer`, searched back from `latest`, whose `metadata` value matches that of a
 /// revision of `repository` at or below `state`, with that revision. Without `metadata`, `latest`
 /// and `state`'s revision. Fails where a batch of either history fails to load, as
-/// [`find::batch_load_history`] describes.
+/// [`find::batch_load_history`] describes, and where no revision matches, as
+/// [`no_matching_revision`] describes.
+///
+/// Where the source line holds more than one revision, as with `search_nearest`, a round keeps the
+/// layer revisions it compared, so the source revisions a later round adds are compared with them.
+/// Otherwise each round compares only the next layer batch.
 #[allow(clippy::too_many_arguments)]
 pub async fn find_revision_match(
     repository: Arc<RepositoryContext>,
@@ -1259,46 +1306,51 @@ pub async fn find_revision_match(
         }
 
         if target_search_count >= search_limit {
-            return Err(LayerError::internal(
-                "Failed to find matching revision for link metadata",
-            ));
+            return Err(no_matching_revision());
         }
 
+        let mut source_grew = false;
         if search_nearest {
             lore_debug!("Batch load additional revisions for source history");
-            let last_revision = source_revisions
-                .last()
-                .map(|tuple| tuple.0)
-                .unwrap_or_default();
-            let revisions = find::batch_load_history(repository.clone(), last_revision)
-                .await
-                .forward::<LayerError>("loading the next batch of the source history")?;
-            let mut additional = revisions
-                .into_iter()
-                .map(|(_, hash)| (hash, None))
-                .collect();
-            source_revisions.append(&mut additional);
+            let revisions =
+                find::batch_load_history(repository.clone(), last_hash(&source_revisions))
+                    .await
+                    .forward::<LayerError>("loading the next batch of the source history")?;
+            let below = find::below(&revisions, last_hash(&source_revisions));
+            source_grew = !below.is_empty();
+            source_revisions.extend(below.iter().map(|&(_, hash)| (hash, None)));
         }
 
         lore_debug!("Batch load additional revisions for target history");
-        let last_revision = target_revisions
-            .last()
-            .map(|tuple| tuple.0)
-            .unwrap_or_default();
-        let revisions = find::batch_load_history(layer.clone(), last_revision)
+        let revisions = find::batch_load_history(layer.clone(), last_hash(&target_revisions))
             .await
             .forward::<LayerError>("loading the next batch of the layer's history")?;
-        let mut additional: Vec<_> = revisions
-            .into_iter()
-            .map(|(_, hash)| (hash, None))
-            .collect();
-        target_search_count += additional.len();
-        if source_revisions.len() > 1 {
-            target_revisions.append(&mut additional);
-        } else {
-            target_revisions = additional;
+        let additional = find::below(&revisions, last_hash(&target_revisions));
+        if additional.is_empty() && !source_grew {
+            return Err(no_matching_revision());
         }
+        target_search_count += additional.len();
+        if source_revisions.len() <= 1 {
+            target_revisions.clear();
+        }
+        target_revisions.extend(additional.iter().map(|&(_, hash)| (hash, None)));
     }
+}
+
+/// The hash of the last revision of `revisions`, a line [`find_revision_match`] searches, or zero
+/// where it holds none. Read again after a batch load rather than held across it, which would
+/// grow the search's future by the hash.
+fn last_hash(revisions: &[(Hash, Option<Vec<u8>>)]) -> Hash {
+    revisions.last().map_or_default(|tuple| tuple.0)
+}
+
+/// The error [`find_revision_match`] fails with where no revision matches: its search reached the
+/// search limit, or a round added no revision to either line, so a later round would compare
+/// nothing new. Each line adds the part of its batch below the revision the batch was read from
+/// ([`find::below`]), so a line adds none once it ends, or leaves the local store where no remote
+/// lists it.
+fn no_matching_revision() -> LayerError {
+    LayerError::internal("Failed to find matching revision for link metadata")
 }
 
 pub async fn store_layer_current(

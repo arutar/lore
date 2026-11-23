@@ -617,6 +617,7 @@ impl LoreRevisionV1Service {
             self.immutable_store().clone(),
             self.mutable_store().clone(),
             repo_id,
+            lore_revision::state::no_link_traversal(),
         ));
         let registered = pointer(&repo, registration, KeyType::PushJournal).await?;
         let push = match start {
@@ -749,6 +750,7 @@ impl LoreRevisionV1Service {
             worker_request,
             self.repository_authorizer.clone(),
             self.immutable_store().clone(),
+            self.local_tier(),
             self.mutable_store().clone(),
             self.notification().clone(),
             self.hook_dispatcher(),

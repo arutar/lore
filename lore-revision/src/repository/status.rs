@@ -464,9 +464,7 @@ async fn file_size_from_node_change_id(change: &NodeChange) -> Result<u64, Statu
     } else {
         let size = change
             .to
-            .mapping
-            .state
-            .node(change.to.mapping.repository.clone(), change.to.mapping.node)
+            .get_node()
             .await
             .forward::<StatusError>("accessing node path")?
             .size;
@@ -785,32 +783,36 @@ async fn report_staged_changes(
 /// Asked of the drawn subtree rather than the whole state, the same way `layer::list_staged`
 /// counts, because everything outside it belongs to the drawn-from repository and not the layer.
 /// Dirty flags propagate to a node's parents and clearing one propagates the clear back up, so
-/// the source node's children answer for the whole subtree. On any error the answer is "holds
-/// staging": dropping a pin on a question that could not be answered loses staged work.
+/// the source node's children answer for the whole subtree. They are read in the state holding
+/// the source node, a linked one where the source path crosses a link. On any error the answer is
+/// "holds staging": dropping a pin on a question that could not be answered loses staged work.
+#[lore_macro::test_pub]
 async fn layer_holds_staging(layer: &layer::Layer, layer_state: &layer::LayerState) -> bool {
-    let state = &layer_state.state_staged;
-    let repository = &layer_state.repository;
-
-    let Ok(source_node_link) = state
-        .find_node_link(repository.clone(), &layer.source_path)
+    let Ok((source, (repository, state))) = layer_state
+        .state_staged
+        .find_relative_held(
+            layer_state.repository.clone(),
+            ROOT_NODE,
+            &layer.source_path,
+        )
         .await
     else {
         return true;
     };
-    let source_node = source_node_link.node;
-    if !source_node.is_valid_or_root_node_id() {
+    if !source.node.is_valid_or_root_node_id() {
         return true;
     }
 
     if state
-        .node_has_dirty_children(repository.clone(), source_node)
+        .node_has_dirty_children(repository.clone(), source.node)
         .await
         .unwrap_or(true)
     {
         return true;
     }
 
-    state::count_staged_files(repository.clone(), state.clone(), source_node).await > 0
+    let staged = state::count_staged_files(repository, state, source.node).await;
+    staged.count > 0 || !staged.complete
 }
 
 /// Persist the markers `--check-dirty` cleared in the linked states `pending` names, for the links
@@ -911,7 +913,7 @@ async fn report_repository_staged_diff(
         repository.clone(),
         state_staged,
         path,
-        FilterMode::TRACKED,
+        FilterMode::CHANGES,
     )
     .await
     .forward::<StatusError>("computing diff against staged state")?;
@@ -943,7 +945,7 @@ async fn report_layer_staged_diff(
         )
         .await,
         selection.mount_path.clone(),
-        FilterMode::TRACKED,
+        FilterMode::CHANGES,
     )
     .await
     .forward::<StatusError>("computing diff against staged state")?;
@@ -1421,12 +1423,13 @@ async fn on_first_parent_history(
 /// create exist. No scan starts after the first failure, which is the one returned once the
 /// scans in flight have finished.
 ///
-/// What the scans find stale is discarded once all of them have drained, since a discard clears
-/// marks other scans may still be carrying up through the directories they share. It is discarded
-/// whether or not a scan failed: a node a scan found stale is stale whatever stopped another scan,
-/// and left in the tree it would carry marks no file backs. A scan's failure is the error
-/// returned. Discarding is boxed as the cold path: most scans find nothing stale. Answers whether
-/// anything was discarded.
+/// What the scans find stale is discarded, and the unstaged dirty moves they find removed are
+/// returned, once all of them have drained, since a discard clears marks other scans may still be
+/// carrying up through the directories they share. It is discarded whether or not a scan failed: a
+/// node a scan found stale is stale whatever stopped another scan, and left in the tree it would
+/// carry marks no file backs. A scan's failure is the error returned. Discarding is boxed as the
+/// cold path: most scans find nothing stale. Answers whether a scan held a node to discard or
+/// return.
 pub(crate) async fn scan_paths(
     operation: Arc<InstanceOperationImpl>,
     repository: &Arc<RepositoryContext>,
@@ -1493,7 +1496,8 @@ struct ScanTarget {
     /// The path, or `None` for the whole repository.
     path: Option<RelativePath>,
     /// Whether its scan creates the directory nodes above it that the tree lacks: only the
-    /// working tree holds the path, and the filter keeps it.
+    /// working tree holds the path, the filter keeps it, and the deepest node the tree holds on
+    /// it is a directory, short of any link.
     creates_ancestors: bool,
 }
 
@@ -1566,7 +1570,9 @@ async fn resolve_scan_targets(
 }
 
 /// Where `path` stands before it is scanned, or `None` where neither the tree nor the working
-/// tree holds it, which is reported ignored here where `report_ignored` asks.
+/// tree holds it, which is reported ignored here where `report_ignored` asks. Only whether the
+/// tree holds the path is asked, so its last name stops at the first node of it
+/// ([`state::State::find_to_link`]).
 ///
 /// The filter verdict is the one [`state::diff_filesystem`] reaches for the path, asked without
 /// reporting it: the scan reports it, and only a path the scan keeps creates directory nodes.
@@ -1581,10 +1587,33 @@ fn resolve_scan_target(
     report_ignored: bool,
 ) -> impl Future<Output = Option<ScanTarget>> + Send {
     async move {
-        let tracked = state
-            .find_node_link(repository.clone(), path.as_str())
+        let (tracked, missing_below) = match state
+            .find_to_link::<false>(&repository, ROOT_NODE, path.as_str(), false)
             .await
-            .is_ok_and(|node_link| node_link.is_valid());
+        {
+            Ok(state::PathStop {
+                at: state::Stop::End,
+                ..
+            }) => (true, None),
+            Ok(
+                stop @ state::PathStop {
+                    at: state::Stop::Link(_),
+                    ..
+                },
+            ) => (
+                state
+                    .find_relative_from(repository.clone(), path.as_str(), stop)
+                    .await
+                    .is_ok_and(|(node_link, _)| node_link.is_valid()),
+                None,
+            ),
+            Ok(state::PathStop {
+                at: state::Stop::Missing,
+                node,
+                ..
+            }) => (false, Some(node)),
+            Err(_) => (false, None),
+        };
         if tracked {
             return Some(ScanTarget {
                 path: Some(path),
@@ -1613,9 +1642,20 @@ fn resolve_scan_target(
             info.is_some_and(|info| info.is_dir()),
             FilterMode::Full,
         );
+        // The directories leading to a path below a link mount belong to the linked tree, where
+        // its own scan adds them, and none is added below a file. A path that cannot be read
+        // through is left to its own scan too, which fails on it as this would.
+        let creates_ancestors = !excluded
+            && match missing_below {
+                Some(node) => state
+                    .node(repository.clone(), node)
+                    .await
+                    .is_ok_and(|node| node.is_directory()),
+                None => false,
+            };
         Some(ScanTarget {
             path: Some(path),
-            creates_ancestors: !excluded,
+            creates_ancestors,
         })
     }
 }
@@ -1645,7 +1685,8 @@ async fn create_shared_untracked_ancestors(
 
     fan_out::create_shared_ancestors(
         &ancestors,
-        |ancestor, nodes| {
+        |_, _| std::future::ready(Ok(std::iter::repeat(()))),
+        |ancestor, nodes, ()| {
             let (start, below) = match fan_out::longest_ancestor(ancestor, nodes) {
                 Some((prefix, node)) => (*node, &ancestor[prefix.len() + 1..]),
                 None => (ROOT_NODE, ancestor),
@@ -1935,14 +1976,10 @@ pub(crate) async fn status(
         None
     };
 
-    let branch_parent = branch_stack
-        .first()
-        .map(|parent| parent.branch)
-        .unwrap_or_default();
+    let branch_parent = branch_stack.first().map_or_default(|parent| parent.branch);
     let branch_point = branch_stack
         .first()
-        .map(|parent| parent.revision)
-        .unwrap_or_default();
+        .map_or_default(|parent| parent.revision);
 
     let revision_merged_parent_branch = if options.sync_point {
         if branch_point.is_zero() {

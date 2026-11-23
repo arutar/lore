@@ -131,6 +131,7 @@ async fn fixture(
         .returning(|_, _, _, _, _| ());
     let service = LoreRevisionV1Service::new(
         immutable.clone(),
+        None,
         mutable.clone(),
         Arc::new(notifications),
         Arc::new(hooks),
@@ -143,7 +144,10 @@ async fn fixture(
     )
     .with_push_operations(settings);
     let repo = Arc::new(RepositoryContext::new_server_context(
-        immutable, mutable, repository,
+        immutable,
+        mutable,
+        repository,
+        lore_revision::state::no_link_traversal(),
     ));
     Fixture {
         service,

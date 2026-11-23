@@ -10,6 +10,7 @@ use crate::buffer::StableBuf;
 use crate::buffer::StableBufList;
 use crate::buffer::StableBufListMut;
 use crate::pool::SyscallPool;
+use crate::pool::SyscallTask;
 use crate::pool::retry_on_interrupt;
 
 /// Segments per vectored syscall, matching the `IOV_MAX` of 1024 on Linux
@@ -229,15 +230,27 @@ impl PsyncDriver {
             .await
     }
 
-    pub(crate) async fn write_file_segments<B: StableBufList>(
+    pub(crate) async fn write_file_segments<B: StableBufList, C: Send + 'static>(
         &self,
         options: std::fs::OpenOptions,
         path: PathBuf,
         buffers: B,
         durable: bool,
+        completion: C,
     ) -> std::io::Result<()> {
         SyscallPool::global()
-            .submit(move || write_segments(options.open(path)?, buffers, durable))
+            .submit(move || {
+                let written = options
+                    .open(&path)
+                    .and_then(|file| write_segments(file, buffers, durable));
+                if written.is_ok() && durable {
+                    // Best-effort, as after an atomic write: the directory entry matters only to a
+                    // file this write created.
+                    let _ = sync_parent_dir(&path);
+                }
+                drop(completion);
+                written
+            })
             .await
     }
 
@@ -321,6 +334,21 @@ impl PsyncDriver {
             .await
     }
 
+    pub(crate) async fn names_one_entry(
+        &self,
+        from: PathBuf,
+        to: PathBuf,
+    ) -> std::io::Result<Option<bool>> {
+        SyscallPool::global()
+            .submit(move || {
+                let Some(from) = entry_identity(&from)? else {
+                    return Ok(None);
+                };
+                Ok(Some(entry_identity(&to)? == Some(from)))
+            })
+            .await
+    }
+
     pub(crate) async fn file_metadata(
         &self,
         file: Arc<File>,
@@ -328,19 +356,71 @@ impl PsyncDriver {
         SyscallPool::global().submit(move || file.metadata()).await
     }
 
+    pub(crate) async fn is_at(&self, file: Arc<File>, path: PathBuf) -> std::io::Result<bool> {
+        SyscallPool::global()
+            .submit(move || Ok(entry_identity(&path)? == Some(handle_file_id(&file)?)))
+            .await
+    }
+
+    /// Sets the length of `file`, which [`crate::holes::make_sparse`] marks sparse first where
+    /// `sparse`, in one job on the pool.
     pub(crate) async fn set_len<C: Send + 'static>(
         &self,
         file: Arc<File>,
         len: u64,
+        sparse: bool,
         completion: C,
     ) -> std::io::Result<()> {
         SyscallPool::global()
             .submit(move || {
+                if sparse {
+                    crate::holes::make_sparse(&file);
+                }
                 let set = retry_on_interrupt(|| file.set_len(len));
                 drop(completion);
                 set
             })
             .await
+    }
+
+    /// Runs [`crate::holes::empty`] on the syscall pool, in one job. Returns the pool's task, as
+    /// [`Self::next_data`] does.
+    pub(crate) fn empty(file: Arc<File>, len: u64) -> SyscallTask<std::io::Result<()>> {
+        SyscallPool::global().submit(move || crate::holes::empty(&file, len))
+    }
+
+    /// Runs [`crate::holes::next_data`] on the syscall pool. Returns the pool's task rather than
+    /// awaiting it: a forwarding `async fn` would add a level to every future awaiting this one,
+    /// which the compiler walks to prove that future `Send`.
+    pub(crate) fn next_data(
+        file: Arc<File>,
+        offset: u64,
+        mut cursor: crate::DataCursor,
+    ) -> SyscallTask<(
+        std::io::Result<Option<std::ops::Range<u64>>>,
+        crate::DataCursor,
+    )> {
+        SyscallPool::global().submit(move || {
+            let found = crate::holes::next_data(&file, offset, &mut cursor);
+            (found, cursor)
+        })
+    }
+
+    /// Runs [`crate::holes::punch_holes`] on the syscall pool, as [`Self::next_data`] runs its
+    /// lookup.
+    #[cfg(target_vendor = "apple")]
+    pub(crate) fn punch_holes(
+        file: Arc<File>,
+        holes: Vec<std::ops::Range<u64>>,
+    ) -> SyscallTask<std::io::Result<()>> {
+        SyscallPool::global().submit(move || crate::holes::punch_holes(&file, &holes))
+    }
+
+    /// Runs [`crate::holes::holds_holes`] on the syscall pool, as [`Self::next_data`] runs its
+    /// lookup.
+    #[cfg(target_vendor = "apple")]
+    pub(crate) fn holds_holes(file: Arc<File>) -> SyscallTask<bool> {
+        SyscallPool::global().submit(move || crate::holes::holds_holes(&file))
     }
 
     pub(crate) async fn rename(&self, from: PathBuf, to: PathBuf) -> std::io::Result<()> {
@@ -409,6 +489,30 @@ impl PsyncDriver {
     ) -> std::io::Result<()> {
         SyscallPool::global()
             .submit(move || remove_tree_keeping(path, boundary, &reserved))
+            .await
+    }
+
+    pub(crate) async fn remove_dir_all_in_background(
+        &self,
+        path: PathBuf,
+        aside: Option<PathBuf>,
+        make_writable: bool,
+    ) -> (PathBuf, std::io::Result<()>) {
+        SyscallPool::global()
+            .run_on_own_thread("lore-io-background-removal", move || {
+                remove_tree_in_background(
+                    path,
+                    aside,
+                    |from, to| std::fs::rename(from, to),
+                    |tree| {
+                        if make_writable {
+                            remove_tree_making_it_writable(tree)
+                        } else {
+                            std::fs::remove_dir_all(tree)
+                        }
+                    },
+                )
+            })
             .await
     }
 
@@ -556,6 +660,239 @@ fn remove_non_directory(
     }
 }
 
+/// Removes the directory at `path` at background disk priority, as
+/// [`IoDriver::remove_dir_all_in_background`](crate::IoDriver::remove_dir_all_in_background)
+/// describes, with `rename` renaming a directory and `remove_tree` removing a tree.
+#[lore_macro::test_pub]
+fn remove_tree_in_background(
+    path: PathBuf,
+    aside: Option<PathBuf>,
+    rename: impl FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+    remove_tree: impl Fn(&std::path::Path) -> std::io::Result<()>,
+) -> (PathBuf, std::io::Result<()>) {
+    let _background = crate::priority::BackgroundIo::begin();
+    let Some(aside) = aside else {
+        let removed = forgive_missing_tree(remove_tree(&path));
+        return (path, removed);
+    };
+    match is_mount_folder(&path) {
+        Ok(false) => {}
+        Ok(true) => {
+            let volume_root = is_volume_root(&path);
+            let removed = remove_contents(&path, &remove_tree, |entry| {
+                volume_root && is_volume_system_entry(entry)
+            });
+            return (path, removed);
+        }
+        Err(err) => return (path, forgive_missing_tree(Err(err))),
+    }
+    match rename(&path, &aside) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return (path, Ok(())),
+        Err(err) if is_mount_point_refusal(&err) => {
+            let removed = remove_in_place(&path, &remove_tree);
+            return (path, removed);
+        }
+        Err(err) => return (path, Err(err)),
+    }
+    let removed = forgive_missing_tree(remove_tree(&aside));
+    (aside, removed)
+}
+
+/// Answers a removal of a tree that is not there as done.
+fn forgive_missing_tree(removed: std::io::Result<()>) -> std::io::Result<()> {
+    match removed {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        removed => removed,
+    }
+}
+
+/// Removes what the directory at `path` holds, then the directory. A mount point keeps its
+/// directory, which the system refuses to remove while it is mounted. A path that does not exist
+/// is `Ok`, as is an entry removed by someone else during the removal.
+fn remove_in_place(
+    path: &std::path::Path,
+    remove_tree: &impl Fn(&std::path::Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    remove_contents(path, remove_tree, |_| false)?;
+    match std::fs::remove_dir(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound || is_mount_point_refusal(&err) => {
+            Ok(())
+        }
+        removed => removed,
+    }
+}
+
+/// Removes what the directory at `path` holds, except each entry `kept` answers for, and keeps the
+/// directory. A path that does not exist is `Ok`, as is an entry removed by someone else during
+/// the removal.
+fn remove_contents(
+    path: &std::path::Path,
+    remove_tree: &impl Fn(&std::path::Path) -> std::io::Result<()>,
+    kept: impl Fn(&std::fs::DirEntry) -> bool,
+) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        entries => entries?,
+    };
+    for entry in entries {
+        let entry = entry?;
+        if kept(&entry) {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        let child = entry.path();
+        let removed = if file_type.is_dir() {
+            remove_tree(&child)
+        } else {
+            remove_non_directory(&child, file_type)
+        };
+        match removed {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            removed => removed?,
+        }
+    }
+    Ok(())
+}
+
+/// Whether the directory at `path` is a mount folder, which a rename would move without the
+/// files it leads to. On Windows that is a directory that is a reparse point with the
+/// mount-point tag, a volume mounted in a folder or a junction: a rename moves the reparse point
+/// itself, and a removal of the renamed name removes only the reparse point. Unix has none; a
+/// mount point there refuses the rename.
+#[cfg(target_family = "unix")]
+#[lore_macro::test_pub]
+fn is_mount_folder(_path: &std::path::Path) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+/// Whether the directory at `path` is a mount folder, as the Unix version describes, read from
+/// the name itself through a handle opened without following a reparse point.
+#[cfg(target_family = "windows")]
+#[lore_macro::test_pub]
+fn is_mount_folder(path: &std::path::Path) -> std::io::Result<bool> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_TAG_INFO;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::FileAttributeTagInfo;
+    use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandleEx;
+    use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let mut info = FILE_ATTRIBUTE_TAG_INFO {
+        FileAttributes: 0,
+        ReparseTag: 0,
+    };
+    // SAFETY: the handle is open for the call, and `info` is a `FILE_ATTRIBUTE_TAG_INFO` of the
+    // size passed, which the call writes.
+    let queried = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileAttributeTagInfo,
+            (&raw mut info).cast(),
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if queried == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let reparse_directory = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
+    Ok(info.FileAttributes & reparse_directory == reparse_directory
+        && info.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT)
+}
+
+/// Whether the mount folder at `path` leads to the root of a volume, where the system keeps
+/// entries of its own that deny access. Unix has no mount folder.
+#[cfg(target_family = "unix")]
+#[lore_macro::test_pub]
+fn is_volume_root(_path: &std::path::Path) -> bool {
+    false
+}
+
+/// Whether the directory at `path` is the root of a volume, a drive or a volume mounted in a
+/// folder, which `GetVolumeNameForVolumeMountPointW` names. A junction to an ordinary directory
+/// is not. Where the system cannot answer, the directory is taken as not a volume root.
+#[cfg(target_family = "windows")]
+#[lore_macro::test_pub]
+fn is_volume_root(path: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
+
+    const BACKSLASH: u16 = b'\\' as u16;
+    let mut mount_point: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if mount_point.last() != Some(&BACKSLASH) {
+        mount_point.push(BACKSLASH);
+    }
+    mount_point.push(0);
+    // A volume name is `\\?\Volume{GUID}\`: 49 characters and the terminator.
+    let mut volume_name = [0u16; 50];
+    // SAFETY: `mount_point` is a terminated wide string, and `volume_name` holds the number of
+    // characters passed, which the call writes at most.
+    let named = unsafe {
+        GetVolumeNameForVolumeMountPointW(
+            mount_point.as_ptr(),
+            volume_name.as_mut_ptr(),
+            volume_name.len() as u32,
+        )
+    };
+    named != 0
+}
+
+/// Whether `entry` is one the system keeps at the root of a volume. Unix has none.
+#[cfg(target_family = "unix")]
+fn is_volume_system_entry(_entry: &std::fs::DirEntry) -> bool {
+    false
+}
+
+/// Whether `entry` is one the system keeps at the root of a volume, such as
+/// `System Volume Information` and `$RECYCLE.BIN`, which deny access to a removal: an entry both
+/// hidden and system.
+#[cfg(target_family = "windows")]
+fn is_volume_system_entry(entry: &std::fs::DirEntry) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    entry
+        .metadata()
+        .is_ok_and(|metadata| is_hidden_system(metadata.file_attributes()))
+}
+
+/// Whether `attributes` mark an entry both hidden and system.
+#[cfg(target_family = "windows")]
+#[lore_macro::test_pub]
+fn is_hidden_system(attributes: u32) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_SYSTEM;
+
+    let hidden_system = FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM;
+    attributes & hidden_system == hidden_system
+}
+
+/// Whether a rename or removal of a directory failed because the directory is a mount point:
+/// `EXDEV` or `EBUSY` from a rename out of it or a removal of it.
+#[cfg(target_family = "unix")]
+#[lore_macro::test_pub]
+fn is_mount_point_refusal(err: &std::io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(libc::EXDEV | libc::EBUSY))
+}
+
+/// Whether a rename of a directory failed because the directory is a mount point:
+/// `ERROR_NOT_SAME_DEVICE`, which a rename of a volume's mount point gives.
+#[cfg(target_family = "windows")]
+#[lore_macro::test_pub]
+fn is_mount_point_refusal(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_NOT_SAME_DEVICE as i32)
+}
+
 // A case-sensitive filesystem holds the name it was given, so a path that
 // resolves is a path spelled the way the filesystem holds it, and one that does
 // not is a name it does not hold - either way an answer. Following links matches
@@ -587,8 +924,8 @@ fn is_pattern_unit(unit: u16) -> bool {
 ///
 /// A plain path is capped at `MAX_PATH` by the calls themselves: past that they
 /// want the `\\?\` verbatim prefix, which is a rewrite of the path rather than a
-/// longer buffer - `lore_base::fs::win_path` does that, and lore-io does not
-/// depend on lore-base. A path that arrives already verbatim may be longer, so
+/// longer buffer, which [`crate::win_path::to_extended_wide`] makes and these
+/// calls do not. A path that arrives already verbatim may be longer, so
 /// there is room for one, and anything past even that is left to what `std`
 /// answers, since `std` prefixes on its own.
 #[cfg(target_family = "windows")]
@@ -731,6 +1068,158 @@ fn holds_name_exactly_impl(_path: &std::path::Path) -> Option<bool> {
     None
 }
 
+/// Removes the tree at `path`, as `std::fs::remove_dir_all` does. Where a directory in it denies
+/// the removal, as one without its owner's write permission does on Unix, the owner is given read,
+/// write and search permission on every directory in the tree, and the removal is tried once more.
+#[lore_macro::test_pub]
+fn remove_tree_making_it_writable(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            make_directories_owner_writable(path)?;
+            std::fs::remove_dir_all(path)
+        }
+        removed => removed,
+    }
+}
+
+/// Gives the owner read, write and search permission on the directory at `path` and on every
+/// directory below it. A link listed in the tree is not followed, and a directory gone meanwhile is
+/// left out. A directory replaced by a link between its stat and its change would be followed;
+/// the tree is one that a removal has renamed aside, which no other process writes.
+#[cfg(target_family = "unix")]
+fn make_directories_owner_writable(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    const OWNER_ALL: u32 = 0o700;
+    let mut waiting = vec![path.to_path_buf()];
+    while let Some(directory) = waiting.pop() {
+        let mode = match std::fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.is_dir() => metadata.permissions().mode(),
+            Ok(_) => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        if mode & OWNER_ALL != OWNER_ALL {
+            std::fs::set_permissions(
+                &directory,
+                std::fs::Permissions::from_mode((mode & 0o7777) | OWNER_ALL),
+            )?;
+        }
+        let entries = match std::fs::read_dir(&directory) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            entries => entries?,
+        };
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                waiting.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Nothing to do: Windows removes an entry whatever the attributes of the directory that holds
+/// it, and `std::fs::remove_dir_all` clears a read-only file's attribute itself.
+#[cfg(target_family = "windows")]
+#[allow(clippy::unnecessary_wraps)]
+fn make_directories_owner_writable(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Whether `err`, from reaching what a path names, says it names nothing: no entry is there, or a
+/// file stands where a directory leads to it.
+fn names_nothing(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
+/// The device and inode numbers of the file `path` names, symbolic links followed, and `None`
+/// where it names nothing.
+#[cfg(target_family = "unix")]
+fn entry_identity(path: &std::path::Path) -> std::io::Result<Option<(u64, u64)>> {
+    use std::os::unix::fs::MetadataExt;
+
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some((metadata.dev(), metadata.ino()))),
+        Err(err) if names_nothing(&err) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// The device and inode numbers of the file `file` has open.
+#[cfg(target_family = "unix")]
+fn handle_file_id(file: &File) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata()?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+/// The volume serial number and file ID of the file `path` names, symbolic links followed, and
+/// `None` where it names nothing, read through a handle opened for its attributes alone.
+///
+/// The 128-bit ID is the one `FileIdInfo` answers with, and where the volume does not answer it,
+/// the 64-bit file index `GetFileInformationByHandle` answers with, which `std` and the `same-file`
+/// crate read a file's identity from.
+#[cfg(target_family = "windows")]
+fn entry_identity(path: &std::path::Path) -> std::io::Result<Option<(u64, [u8; 16])>> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+
+    let file = match std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(err) if names_nothing(&err) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    handle_file_id(&file).map(Some)
+}
+
+/// The volume serial number and file ID of the file `file` has open, read as [`entry_identity`]
+/// reads them.
+#[cfg(target_family = "windows")]
+fn handle_file_id(file: &File) -> std::io::Result<(u64, [u8; 16])> {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ID_INFO;
+    use windows_sys::Win32::Storage::FileSystem::FileIdInfo;
+    use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle;
+    use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandleEx;
+
+    let mut info = FILE_ID_INFO::default();
+    // SAFETY: the handle is open for the call, and `info` is a `FILE_ID_INFO` of the size passed,
+    // which the call writes.
+    let queried = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            (&raw mut info).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if queried != 0 {
+        return Ok((info.VolumeSerialNumber, info.FileId.Identifier));
+    }
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle is open for the call, and `info` is the structure the call writes.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    let mut identifier = [0u8; 16];
+    identifier[..8].copy_from_slice(&index.to_le_bytes());
+    Ok((u64::from(info.dwVolumeSerialNumber), identifier))
+}
+
 /// Adds the owner's write permission to the directory `path` names itself, through a handle that
 /// `O_NOFOLLOW` keeps from opening a symbolic link and `O_DIRECTORY` from opening anything but a
 /// directory.
@@ -777,6 +1266,12 @@ fn make_owner_writable_impl(path: &std::path::Path) -> std::io::Result<()> {
 /// What `std::fs::metadata` answers for `path`.
 pub(crate) fn std_stat(path: &std::path::Path) -> std::io::Result<crate::Stat> {
     std::fs::metadata(path).map(|metadata| crate::Stat::from(&metadata))
+}
+
+/// What [`IoDriver::stat`](crate::IoDriver::stat) answers for `path`, read on the calling
+/// thread, for a caller on a blocking thread that reads many paths. Blocking.
+pub fn stat_blocking(path: &std::path::Path) -> std::io::Result<crate::Stat> {
+    stat_impl(path)
 }
 
 #[cfg(not(target_family = "windows"))]
@@ -905,6 +1400,109 @@ fn write_segments<B: StableBufList>(file: File, buffers: B, durable: bool) -> st
         file.sync_all()?;
     }
     Ok(())
+}
+
+/// Flushes `file`'s data and metadata past its drive's cache: through `fcntl(F_FULLFSYNC)` on
+/// macOS, where a flush otherwise stops at that cache, and through `fsync` on other Unix systems.
+/// `File::sync_all` makes the same call on macOS; this makes it itself, so a test can count it.
+#[cfg(target_os = "macos")]
+pub(crate) fn sync_full(file: &File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    #[cfg(feature = "test-util")]
+    test_util::FULL_SYNCS.with(|count| count.set(count.get() + 1));
+    // SAFETY: the descriptor is open for the duration of the call.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Flushes `file`'s data and metadata past its drive's cache: through `fcntl(F_FULLFSYNC)` on
+/// macOS, where a flush otherwise stops at that cache, and through `fsync` on other Unix systems.
+#[cfg(all(target_family = "unix", not(target_os = "macos")))]
+pub(crate) fn sync_full(file: &File) -> std::io::Result<()> {
+    file.sync_all()
+}
+
+/// Flushes the directory `path` to disk, so the entries created, renamed or removed in it survive
+/// a power loss, through [`sync_full`].
+/// Windows has no call that flushes a directory, so there it does nothing. Blocking.
+#[cfg(target_family = "unix")]
+pub fn sync_dir(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let dir = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(path)?;
+    sync_full(&dir)
+}
+
+/// Flushes the directory `path` to disk. Windows has no call that flushes a directory, so this
+/// does nothing. Blocking.
+#[cfg(target_family = "windows")]
+pub fn sync_dir(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Flushes the directory that holds `path` through [`sync_dir`], the working directory for a
+/// bare name.
+pub(crate) fn sync_dir_of(path: &std::path::Path) -> std::io::Result<()> {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => sync_dir(parent),
+        Some(_) => sync_dir(std::path::Path::new(".")),
+        None => Ok(()),
+    }
+}
+
+/// Creates the directory `path`, but none of its parents, so a missing parent fails with
+/// `NotFound`. An existing directory at `path` is success, as [`forgive_existing_dir`] has it.
+/// Blocking.
+pub fn create_dir_in_existing_parent(path: &std::path::Path) -> std::io::Result<()> {
+    forgive_existing_dir(std::fs::create_dir(path), path)
+}
+
+/// Creates the directory `path` and its missing parents, on Unix with mode `0o700` before the
+/// umask, so that no other account can add to them, and flushes each directory it creates one in
+/// through [`sync_dir`]. An existing directory at `path` is success. Blocking.
+pub fn create_dir_all_private(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_family = "unix")]
+    let builder = {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder
+    };
+    #[cfg(not(target_family = "unix"))]
+    let builder = std::fs::DirBuilder::new();
+    create_dir_and_parents(&builder, path)
+}
+
+/// Creates `path` through `builder`, after its missing parents, and flushes each directory it
+/// creates one in. Recurses once per missing parent, as `std::fs::create_dir_all` does.
+fn create_dir_and_parents(
+    builder: &std::fs::DirBuilder,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    let created = match builder.create(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            else {
+                return Err(err);
+            };
+            create_dir_and_parents(builder, parent)?;
+            builder.create(path)
+        }
+        created => created,
+    };
+    match created {
+        Ok(()) => sync_dir_of(path),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(target_family = "unix")]
@@ -1090,4 +1688,19 @@ fn write_vectored_impl<B: StableBufList>(
         offset += done as u64;
     }
     Ok(total)
+}
+
+/// The count of flushes [`sync_full`] makes through `F_FULLFSYNC`, per thread.
+#[cfg(all(target_os = "macos", feature = "test-util"))]
+pub mod test_util {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(super) static FULL_SYNCS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// How many `F_FULLFSYNC` flushes this thread has made.
+    pub fn full_syncs_on_this_thread() -> usize {
+        FULL_SYNCS.with(Cell::get)
+    }
 }

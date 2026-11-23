@@ -4,17 +4,23 @@
 //!
 //! The backend surface is the set of operations [`DriverInner`]'s match arms call: `open`,
 //! `read_at`, `read_exact_at`, `read_vectored_at`, `write_at`, `write_all_at`,
-//! `write_vectored_at`, `open_read_head`, `read_file_bytes`, `write_file_bytes`,
-//! `write_file_segments`, `sync`, `metadata`, `stat`, `symlink_stat`, `file_metadata`,
-//! `holds_name_exactly`, `rename`, `copy`, `remove_file`, `read_dir`, `create_dir_all`,
-//! `set_permissions`, `make_owner_writable`, `remove_dir` and `remove_dir_all`. A backend
-//! implements all twenty-six as inherent methods on its own type.
+//! `write_vectored_at`, `open_read_head`, `read_file_bytes`, `write_file_bytes`, `sync`,
+//! `metadata`, `stat`, `symlink_stat`, `file_metadata`, `holds_name_exactly`, `rename`, `copy`,
+//! `remove_file`, `read_dir`, `create_dir_all`, `set_permissions`, `make_owner_writable`,
+//! `remove_dir` and `remove_dir_all`. A backend implements all twenty-five as inherent methods on
+//! its own type.
 //!
-//! Every operation dispatches, including the metadata ones a completion backend will keep on the
+//! Those twenty-five dispatch, including the metadata ones a completion backend will keep on the
 //! syscall pool anyway — a ring-submitted `statx` is punted to a kernel worker making the same
 //! blocking call, so it buys no parallelism. Routing them anyway is what makes a backend able to
-//! override any operation and a driver instance self-contained, rather than partly bypassed. It
+//! override any of them and a driver instance self-contained, rather than partly bypassed. It
 //! also leaves [`crate::pool`] reachable only from the backends.
+//!
+//! The operations every backend runs the same way go to the psync backend directly, outside the
+//! backend surface, and a backend cannot override them: `write_file_segments_atomic`,
+//! `write_file_segments`, `set_len`, `empty`, `next_data`, `is_at_raw`, `remove_dir_all_keeping`
+//! and `names_one_entry` run on the syscall pool, and `remove_dir_all_in_background` on a thread
+//! of its own.
 //!
 //! There is no trait, and none is needed to make that complete: adding a variant to
 //! [`DriverInner`] makes every match here non-exhaustive, and filling those arms in requires
@@ -43,6 +49,7 @@ use crate::file::IoFile;
 use crate::file::OpenOptions;
 #[cfg(target_family = "windows")]
 use crate::iocp::IocpDriver;
+use crate::pool::SyscallTask;
 use crate::psync::PsyncDriver;
 #[cfg(target_os = "linux")]
 use crate::uring::UringDriver;
@@ -342,42 +349,26 @@ impl IoDriver {
             .await
     }
 
-    /// Creates (or truncates, per `options`) `path` and writes the
-    /// gathered contents of all segments in a single backend dispatch —
-    /// open, vectored write, optional sync-all, close. The whole-file
-    /// write twin of [`open_read_head`](Self::open_read_head) for
-    /// multi-segment payloads.
+    /// The storage layer's whole-file write in place, as a single job on the syscall pool, whatever
+    /// the backend: creates or truncates `path` (per `options`), writes the gathered contents of all
+    /// segments, and with `durable` syncs file data and metadata and best-effort syncs the parent
+    /// directory. Unlike [`Self::write_file_segments_atomic`], a process stopped part way, or a
+    /// write that fails, can leave `path` holding part of the contents.
     ///
-    /// Releases the segments after the gather, as
-    /// [`write_file_segments_atomic`](Self::write_file_segments_atomic) does.
-    pub async fn write_file_segments<B: StableBufList>(
+    /// Releases the segments after the gather, and drops `completion` on the thread running the
+    /// operation once the operation has ended, whether or not the call is still awaited, as
+    /// [`Self::write_file_segments_atomic`] does.
+    pub async fn write_file_segments<B: StableBufList, C: Send + 'static>(
         &self,
-        path: impl AsRef<Path>,
+        path: impl Into<PathBuf>,
         options: &OpenOptions,
         buffers: B,
         durable: bool,
+        completion: C,
     ) -> std::io::Result<()> {
-        let std_options = options.to_std();
-        let path = path.as_ref().to_path_buf();
-        match &*self.inner {
-            DriverInner::Psync(driver) => {
-                driver
-                    .write_file_segments(std_options, path, buffers, durable)
-                    .await
-            }
-            #[cfg(target_os = "linux")]
-            DriverInner::Uring(driver) => {
-                driver
-                    .write_file_segments(std_options, path, buffers, durable)
-                    .await
-            }
-            #[cfg(target_family = "windows")]
-            DriverInner::Iocp(driver) => {
-                driver
-                    .write_file_segments(std_options, path, buffers, durable)
-                    .await
-            }
-        }
+        PsyncDriver
+            .write_file_segments(options.to_std(), path.into(), buffers, durable, completion)
+            .await
     }
 
     /// The metadata of `path`.
@@ -477,6 +468,24 @@ impl IoDriver {
             #[cfg(target_family = "windows")]
             DriverInner::Iocp(driver) => driver.holds_name_exactly(path).await,
         }
+    }
+
+    /// Whether `to` names the entry `from` does, as another spelling of its name does on a file
+    /// system that folds case: `None` where `from` names nothing, and `false` where `to` names
+    /// nothing or another entry. A path through a file names nothing. One entry is one file,
+    /// symbolic links followed: the same device and inode numbers on Unix, the same volume serial
+    /// number and file ID on Windows. Both paths are read in one job, so the answer is about one
+    /// moment.
+    ///
+    /// Takes the paths by value so a caller building them for the call hands them over rather than
+    /// having them copied. Every backend runs this on the syscall pool, so it goes there directly,
+    /// as [`Self::write_file_segments_atomic`] does.
+    pub async fn names_one_entry(
+        &self,
+        from: impl Into<PathBuf>,
+        to: impl Into<PathBuf>,
+    ) -> std::io::Result<Option<bool>> {
+        PsyncDriver.names_one_entry(from.into(), to.into()).await
     }
 
     pub async fn rename(
@@ -644,6 +653,42 @@ impl IoDriver {
             .await
     }
 
+    /// Removes the directory at `path` at background disk priority. With `aside`, renames it
+    /// there first, so `path` is free early, or removes it in place where `path` is a mount point
+    /// and cannot be renamed. Without `aside`, removes `path` where it is. Returns the directory
+    /// it removed from, which holds what is left on failure.
+    ///
+    /// The rename refusing tells a mount point: `EXDEV` or `EBUSY` on Unix,
+    /// `ERROR_NOT_SAME_DEVICE` on Windows. A mount point removed in place keeps its own empty
+    /// directory where the system refuses to remove it. On Windows a directory that is a reparse
+    /// point with the mount-point tag, a volume mounted in a folder or a junction, is not renamed,
+    /// since the rename would move the reparse point without the files it leads to: the files are
+    /// removed through it, and the reparse point is kept. Where it leads to the root of a volume,
+    /// the entries there that are both hidden and system, which the system keeps and which deny
+    /// access, are kept too. With `make_writable`, where a directory in the tree denies the removal,
+    /// as one without its owner's write permission does on Unix, every directory in the tree is
+    /// made readable, writable and searchable by its owner, and the removal is tried once more. A
+    /// directory already gone counts as removed, and a missing `path` leaves `aside` as it is. To
+    /// repeat a call that failed after renaming the directory, which it says by returning `aside`,
+    /// pass `aside` as `path` and no `aside`: whatever is at `path` by then is not the directory the
+    /// first call renamed.
+    ///
+    /// The removal takes minutes for millions of files, so it runs on a thread of its own, outside
+    /// the syscall pool and its cap, at background disk priority, and the thread ends with it.
+    /// Where the system refuses a thread, the job runs on the syscall pool, and the pool thread
+    /// restores its priority before it runs another. Every backend runs this the same way, so it
+    /// goes to the thread directly, as [`Self::write_file_segments_atomic`] goes to the pool.
+    pub async fn remove_dir_all_in_background(
+        &self,
+        path: impl Into<PathBuf>,
+        aside: Option<PathBuf>,
+        make_writable: bool,
+    ) -> (PathBuf, std::io::Result<()>) {
+        PsyncDriver
+            .remove_dir_all_in_background(path.into(), aside, make_writable)
+            .await
+    }
+
     pub(crate) async fn file_metadata_raw(
         &self,
         file: Arc<File>,
@@ -658,14 +703,55 @@ impl IoDriver {
     }
 
     /// Every backend runs this on the syscall pool, so it goes there directly, as
+    /// [`Self::names_one_entry`] does.
+    pub(crate) async fn is_at_raw(&self, file: Arc<File>, path: PathBuf) -> std::io::Result<bool> {
+        PsyncDriver.is_at(file, path).await
+    }
+
+    /// Every backend runs this on the syscall pool, so it goes there directly, as
     /// [`Self::write_file_segments_atomic`] does.
     pub(crate) async fn set_len_raw<C: Send + 'static>(
         &self,
         file: Arc<File>,
         len: u64,
+        sparse: bool,
         completion: C,
     ) -> std::io::Result<()> {
-        PsyncDriver.set_len(file, len, completion).await
+        PsyncDriver.set_len(file, len, sparse, completion).await
+    }
+
+    /// Every backend runs this on the syscall pool, as [`Self::set_len_raw`]. Returns the pool's
+    /// task, which runs whether or not it is awaited, as [`Self::next_data_raw`] does.
+    pub(crate) fn empty_raw(file: Arc<File>, len: u64) -> SyscallTask<std::io::Result<()>> {
+        PsyncDriver::empty(file, len)
+    }
+
+    /// Every backend runs this on the syscall pool, as [`Self::set_len_raw`]. Returns the pool's
+    /// task, which runs whether or not it is awaited, as do the other hole calls.
+    pub(crate) fn next_data_raw(
+        file: Arc<File>,
+        offset: u64,
+        cursor: crate::DataCursor,
+    ) -> SyscallTask<(
+        std::io::Result<Option<std::ops::Range<u64>>>,
+        crate::DataCursor,
+    )> {
+        PsyncDriver::next_data(file, offset, cursor)
+    }
+
+    /// Every backend runs this on the syscall pool, as [`Self::next_data_raw`].
+    #[cfg(target_vendor = "apple")]
+    pub(crate) fn punch_holes_raw(
+        file: Arc<File>,
+        holes: Vec<std::ops::Range<u64>>,
+    ) -> SyscallTask<std::io::Result<()>> {
+        PsyncDriver::punch_holes(file, holes)
+    }
+
+    /// Every backend runs this on the syscall pool, as [`Self::next_data_raw`].
+    #[cfg(target_vendor = "apple")]
+    pub(crate) fn holds_holes_raw(file: Arc<File>) -> SyscallTask<bool> {
+        PsyncDriver::holds_holes(file)
     }
 
     /// Reads an entire file into pooled memory as a single backend

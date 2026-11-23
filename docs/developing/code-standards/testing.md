@@ -200,7 +200,9 @@ pub mod oodle_migration;
 
 `cfg(test)` is set only when cargo compiles the crate itself as a test. The tests in `tests/unit/` link the library as built normally, so a `#[cfg(test)]` item or a `#[cfg_attr(test, ...)]` in library code is not there for them. When moving inline tests out, change each one to `feature = "test-util"`.
 
-Used this way the feature adds access and nothing else: wider visibility, accessors, constructors, and wrappers over code that already exists. Helper code stays in `tests/unit/` and its dependencies in `[dev-dependencies]`. Release builds never see it: cargo applies a dev-dependency's features only to builds that include the dev-dependencies. Do not make an item `pub` unconditionally for a test. It becomes API other crates can reach, and the compiler stops reporting it once it falls out of use.
+Used this way the feature adds access and nothing else: wider visibility, accessors, constructors, and wrappers over code that already exists. Helper code stays in `tests/unit/` and its dependencies in `[dev-dependencies]`. Release builds never see the feature: cargo applies a dev-dependency's features only to builds that include the dev-dependencies. Don't make an item `pub` unconditionally for a test. It becomes API other crates can reach, and the compiler stops reporting it once it falls out of use.
+
+A crate may stop or fail its own code at a test point, so that its race tests run in every unit run. Make the point a call under `#[cfg(feature = "test-util")]` that returns at once unless a test armed it. lore-storage's `park_packfile_write` and `park_store_write`, and lore-revision's `test_util::BranchStep`, are such points. Put the scheduling points that the State's node operations need under `state-stress` instead, as the scenarios above describe.
 
 ---
 
@@ -208,7 +210,7 @@ Used this way the feature adds access and nothing else: wider visibility, access
 
 **Frameworks:** `tokio`, `mockall`, `async-trait`
 
-Every async test in a crate that depends on `lore-base` runs its body in `LORE_CONTEXT.scope()`, so the code under test has the execution context it has in production:
+In `lore-revision` and the crates that depend on it, every async test of code that relies on its caller to set `LORE_CONTEXT`, directly or through the code it calls, runs its body in `LORE_CONTEXT.scope()`. The code under test then has the execution context it has in production:
 
 ```rust
 #[tokio::test]
@@ -220,6 +222,8 @@ async fn test_example() {
         .await;
 }
 ```
+
+Only those crates can build an `ExecutionContext`, the type of the value `LORE_CONTEXT` carries in production, since `lore-revision` defines it.
 
 ### Test independence
 
@@ -297,6 +301,8 @@ the Rust equivalent of the smoke tests' `--keep-test-data`. The prefix is all
 there is to identify one afterwards, so give it the test's name wherever several
 tests in a module would otherwise share it.
 
+A test that moves the external root needs its global directory and its targets on one volume Lore verifies as local and durable, and outside any Lore working tree. It makes them in the base `lore_io::test_util::verified_scratch_base` finds, through `verified_temp_dir` in `lore-revision/tests/helper.rs`, or with the `verified_volume` marker in the smoke tests: the system temp directory where it qualifies, else the build's temp directory, else `lore-test-scratch` beside the outermost working tree that holds the build. The last lies outside pytest's base temp directory, so the session sweep doesn't reach it: the process that chose it removes it once empty as it exits, a Rust test binary only on Unix. Where no candidate qualifies, the test fails, naming each.
+
 `tempfile` is the implementation and a dependency of `lore-base` only. Do not add
 it to another crate: a second guard type is a second set of rules, and it does not
 honour `LORE_KEEP_TEST_DATA`.
@@ -336,7 +342,7 @@ Fixed sleeps are acceptable only for time-based behavior such as TTL expiry, or 
 
 - `new_lore_repo` — Creates a new test repository.
 - `scratch_dir` — Hands out a path beside the repositories for the test to create
-  something at: a shared store, a clone target, a moved instance.
+  something at: a shared store, a path to clone into, a moved instance.
 - `lore_executable_path` — Path to the Lore client binary.
 - `auto_lore_local_server` — Auto starts the server for the session.
 
@@ -435,6 +441,69 @@ service process, so the client relaying to it blocks until the per-test timeout
 kills the worker. A machine without the driver should deselect the tests with
 `-m "smoke and not swfs"`.
 
+The Rust tests that mount SWFS, such as `lore-revision/tests/swfs_freeze.rs`,
+compile for Windows x86-64 only and have the same two preconditions. A machine
+without the driver sets `LORE_TEST_NO_SWFS=1`, and they return at once, passing
+without testing anything. A new Rust test that mounts SWFS must check
+that variable first.
+
+### Running the FUSE tests
+
+The tests that mount FUSE run on Linux, with `/dev/fuse` open to the user running
+them and `fusermount3` on `PATH`. Without either, the smoke tests in
+`test_fuse.py` skip, and the Rust tests return at once, passing without testing
+anything, as they do when `LORE_TEST_SKIP_FUSE` is set.
+
+A Rust test that mounts FUSE is declared in a module named `needs_fuse`, in one of
+the packages `lore_fuse::test_support::FUSE_TEST_PACKAGES` names, and starts with
+`lore_fuse::skip_without_fuse!()`, which panics in a test declared anywhere else.
+The filter `needs_fuse::` then selects every test that mounts, so CI runs them
+alone in a container that has `/dev/fuse`:
+
+```bash
+cargo test --release -p lore-fuse -p lore-revision -- needs_fuse::
+```
+
+The FUSE tests of `lore-integration-tests` also need its `integration_tests`
+feature and the services its integration tests use.
+
+A test that writes through a shared mapping of a mount its own process serves
+writes from a child process. In the test's process, the page fault waits for a
+WRITE the process's own session serves while it holds the mapping's lock, and a
+`fork` elsewhere in the process meanwhile keeps the session's threads from taking
+a page fault, so the WRITE is never served.
+
+### Running the machine server's container tests
+
+The tests in `test_uds_containers.py` run a machine server with a container on
+each of its sockets. They run on Linux only, and skip unless both of these hold:
+
+- `docker` is on `PATH` and reaches the Docker daemon as the user running the
+  tests.
+- `LORE_UDS_CONTAINER_IMAGE` names a Docker image present locally, such as
+  `ubuntu:26.04`. The suite does not pull it. The containers run the `lore` and
+  `uds-bench` binaries built on the host from a read-only mount, so the image
+  must be able to run them.
+
+The tests also need the `uds-bench` example of `lore-server`, and fail without
+it. The example builds only with the crate's `uds-bench` feature, so test and
+clippy runs leave it out. The tests take it from `examples/uds-bench` beside the
+client binary, where Cargo builds it, or from the path `LORE_UDS_BENCH_BINARY`
+names. `LORE_UDS_CONTAINERS`
+sets how many containers reach the machine server through `LORE_UDS_SOCKET`, 8
+by default and at least 2. One more container mounts a socket without the
+variable.
+
+```bash
+cargo build --release -p lore-client -p lore-server --bin lore --bin loreserver
+cargo build --release -p lore-server --features uds-bench --example uds-bench
+LORE_UDS_CONTAINER_IMAGE=ubuntu:26.04 uv run pytest scripts/test/test_uds_containers.py \
+    --lore-client-binary=release --lore-server-binary=release
+```
+
+The tests carry the `slow` marker and share one rig of servers and containers,
+which their `xdist_group` keeps on one worker.
+
 ### Running every test through one service
 
 `LORE_TEST_SHARED_SERVICE=1` starts one service from the build under test before
@@ -444,8 +513,8 @@ that service, except in the tests that manage a service of their own through
 `runs_in_process(reason)`, whose commands stay in their own process. The
 executable the relayed commands name for starting a service doesn't exist, so a
 service that stops partway fails the tests that follow instead of being replaced,
-the commands of a virtual clone included. Naming none would not do that: a
-virtual clone's commands start a service from the `lore` that ran them.
+the commands of a virtual instance included. Naming none would not do that: a
+virtual instance's commands start a service from the `lore` that ran them.
 
 ```bash
 LORE_TEST_SHARED_SERVICE=1 uv run pytest scripts/test/ -m smoke -n 4
@@ -470,43 +539,45 @@ LORE_SERVICE_SOCKET=lore_service-smoke LORE_GLOBAL_PATH=$service_dir \
 LORE_TEST_SERVICE_SOCKET=lore_service-smoke uv run pytest scripts/test/ -m smoke -n 4
 ```
 
-Each call carries the test's `LORE_GLOBAL_PATH` and `LORE_AUTH_PATH`, which the
-service reads in place of its own, so the tests stay isolated from each other.
-No process in a run uses the machine's token store or the OS keyring: each test
-keeps its token store and key in its own directory, and each worker stands in
-for the machine's settings and credentials with a temporary directory of its
-own, so runs side by side share neither. A call doesn't carry
-`LORE_AUTH_STORE`, and outside a call the service reads its own paths, so start
-it as the harness starts its shared service: with a directory of its own for
-both paths and `LORE_AUTH_STORE=fallback`.
+Each call carries the test's `LORE_GLOBAL_PATH`, `LORE_AUTH_PATH` and
+`LORE_AUTH_STORE`, which the service reads in place of its own, so the tests
+stay isolated from each other. No process in a run uses the machine's token
+store or the OS keyring: each test keeps its token store and key in its own
+directory, and each worker stands in for the machine's settings and credentials
+with a temporary directory of its own, so runs side by side share neither. A
+call that leaves `LORE_AUTH_STORE` unset uses the secure store, never the
+service's own, so the harness sets `LORE_AUTH_STORE=fallback` for every test
+process. Outside a call the service reads its own paths, so start it as the
+harness starts its shared service: with a directory of its own for both paths
+and `LORE_AUTH_STORE=fallback`.
 
-### Running every test over virtual clones
+### Running every test over virtual instances
 
 `LORE_TEST_VFS` names a VFS that every repository a test creates or clones
 through the harness takes where the test names none, so the suite runs over
-virtual clones. The service mounts a virtual clone, so the run needs one:
+virtual instances. The service mounts a virtual instance, so the run needs one:
 
 ```bash
 LORE_TEST_SHARED_SERVICE=1 LORE_TEST_VFS=fuse uv run pytest scripts/test/ -m smoke -n 4
 ```
 
-A bare, untracked or dry-run clone stays as the test asks, since a virtual
-clone has no such form. A virtual clone stays mounted past the test that made
-it, so the harness detaches every Lore mount below a test's directories before
-removing them.
+A test that clones bare, untracked or as a dry run keeps that form, since a
+virtual instance has no such form. A virtual instance stays mounted past the test
+that made it, so the harness detaches every Lore mount below a test's directories
+before removing them.
 
-A virtual clone always uses a shared store. A repository the run makes virtual,
+A virtual instance always uses a shared store. A repository the run makes virtual,
 where the test asks for no shared store, gets a store of its own beside it
 (`--shared-store-path <path>.store`). That keeps it apart from the test's other
 repositories, as the store in its own `.lore` did: a branch it commits to
 doesn't advance in theirs.
 
-A test that cannot run over a virtual clone keeps the VFS it names, or none,
+A test that cannot run over a virtual instance keeps the VFS it names, or none,
 with `@pytest.mark.own_vfs("<why>")`. The reason names what the test does that a
-virtual clone does not: it links or layers a repository, deletes or moves an
+virtual instance does not: it links or layers a repository, deletes or moves an
 instance's directory, reads the store in a repository's own `.lore`, or asserts
 what a plain status reports of an ordinary working tree, where a status on a
-virtual clone always scans.
+virtual instance always scans.
 
 ### Per-test timeout
 
@@ -533,12 +604,13 @@ is legitimately slower.
 | `@pytest.mark.swfs` | Tests that need the EpicVFS driver, which is available only on Windows machines where it is installed. Deselect with `-m "smoke and not swfs"` if you don't have the driver. |
 | `@pytest.mark.slow` | Slow running tests |
 | `@pytest.mark.disable_auto_server` | Tests requiring the `--disable-auto-server` flag |
+| `@pytest.mark.verified_volume` | Tests that move the external root: their global directory and scratch paths go on a volume Lore verifies, outside any Lore working tree, as [Scratch space on disk](#scratch-space-on-disk) describes |
 
 ---
 
 ## 5. Load tests
 
-Lore has a load-testing suite that exercises concurrent clone, commit, sync, lock, and compaction workloads. It runs on internal infrastructure and isn't part of the open-source repository, so its harness and scenarios aren't documented here.
+Lore has a load-testing suite that exercises concurrent cloning, commit, sync, lock, and compaction workloads. It runs on internal infrastructure and isn't part of the open-source repository, so its harness and scenarios aren't documented here.
 
 ---
 
@@ -553,7 +625,7 @@ Wall-clock benchmarks on a shared machine vary by more than the regressions wort
 1. **Target risk, not line count** — spend test effort on business logic; leave plumbing and trivial code with few or no tests.
 2. **Test every fix and every behavior change** with a test that fails without it (see [What a change tests](#what-a-change-tests)).
 3. **All Lore commands must have smoke tests** in `scripts/test/`.
-4. **Use `LORE_CONTEXT.scope()`** for every async Rust test in a crate that depends on `lore-base`.
+4. **Use `LORE_CONTEXT.scope()`** for every async Rust test in `lore-revision` or a crate that depends on it, of code that relies on its caller to set `LORE_CONTEXT`.
 5. **Keep tests independent** — Avoid `#[serial]` and test dependencies; use isolated fixtures.
 6. **Poll instead of sleeping** for async state; reserve fixed sleeps for time-based behavior or sub-20ms task startup.
 7. **Use the `new_lore_repo` fixture** for smoke tests, and `scratch_dir` for anything

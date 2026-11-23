@@ -215,7 +215,8 @@ pub struct Maintenance;
 #[ffi_code(31)]
 pub struct SlowDown;
 
-/// No Lore service could be reached, and none could be started.
+/// No Lore service could be reached, and none could be started, or the service socket answered
+/// that no service runs while the external directories of its virtual instances move.
 ///
 /// Distinct from [`NotConnected`], which reports a remote: a caller that relays
 /// its calls through the local service handles this differently, because it is
@@ -243,7 +244,7 @@ pub struct ServiceUnavailable {
 pub struct NothingStaged;
 
 #[derive(Debug, Clone, Error, FfiError)]
-#[error("Branch has been advanced by another instance, sync and re-stage to commit")]
+#[error("The branch's latest revision has moved on; sync to bring in its new revisions")]
 #[ffi_code(41)]
 pub struct BranchAdvanced;
 

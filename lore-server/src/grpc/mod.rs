@@ -36,6 +36,7 @@ pub use grpc_internal_server::GrpcInternalServerBuilder;
 use lore_base::types::Context;
 use lore_base::types::Hash;
 use lore_revision::branch::BranchError;
+use lore_revision::commit::CommitError;
 use lore_revision::diff::DiffError;
 use lore_revision::find::FindError;
 use lore_revision::immutable::ImmutableError;
@@ -44,11 +45,13 @@ use lore_revision::lore::RepositoryId;
 use lore_revision::metadata::MetadataError;
 use lore_revision::metadata::branch::BranchMetadataError;
 use lore_revision::metadata::repository::RepositoryMetadataError;
+use lore_revision::notification::NotificationSender;
 use lore_revision::repository::RepositoryError;
 use lore_revision::repository::RepositoryWriteToken;
 use lore_revision::repository::ServerContext;
 use lore_revision::state::StateError;
 use lore_storage::StoreError;
+use lore_telemetry::InstrumentProvider;
 use lore_transport::grpc::CORRELATION_ID_HEADER;
 use lore_transport::grpc::PARTITION_ID_KEY;
 use lore_transport::grpc::REPOSITORY_ID_KEY;
@@ -76,7 +79,11 @@ use crate::authnz::repository_authorizer::RawToken;
 use crate::authnz::repository_authorizer::RepositoryAuthorizer;
 use crate::authnz::repository_authorizer::VerifiedToken;
 use crate::authnz::repository_authorizer::VerifiedTokenOwned;
+use crate::authnz::repository_authorizer::is_denial;
 use crate::authnz::repository_authorizer::permits_with;
+use crate::hooks::HookContext;
+use crate::hooks::HookDispatcher;
+use crate::hooks::HookPoint;
 use crate::hooks::traits::HookError;
 use crate::hooks::traits::StatusCode;
 use crate::protocol::attribute_map::AttributeMap;
@@ -298,6 +305,113 @@ pub fn get_write_token() -> RepositoryWriteToken {
     RepositoryWriteToken::server(&LORE_SERVER)
 }
 
+/// The notification sender, the post hooks' dispatcher and context, and the instrument provider a
+/// branch create or delete uses once its write succeeds.
+pub(crate) struct BranchWriteFollowUp<P> {
+    pub(crate) notification_sender: Arc<dyn NotificationSender>,
+    pub(crate) hook_dispatcher: Arc<HookDispatcher>,
+    pub(crate) hook_context: HookContext,
+    pub(crate) instrument_provider: P,
+}
+
+/// Creates `branch` in `repository`, as `lore_revision::branch::create` does without a dry run or
+/// linked repositories, in a task that runs to its end ([`run_detached`]). Once the create
+/// succeeds, the task sends its notification, spawns its post hooks and counts it, with what
+/// `follow_up` holds. A request dropped part way stops neither the create between its writes nor
+/// what follows it.
+///
+/// Not an `async fn`, which would hold its arguments until its first poll, and spawn only then.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_branch_detached(
+    repository: Arc<lore_revision::repository::RepositoryContext>,
+    branch: lore_revision::lore::BranchId,
+    name: String,
+    category: String,
+    creator: String,
+    created: u64,
+    stack: Vec<lore_base::types::BranchPoint>,
+    follow_up: BranchWriteFollowUp<impl InstrumentProvider + Send + 'static>,
+) -> impl Future<Output = Result<Result<Context, BranchError>, Status>> {
+    run_detached("branch create", async move {
+        let repository_id = repository.id;
+        let branch = lore_revision::branch::create(
+            repository,
+            &get_write_token(),
+            branch,
+            name.as_str(),
+            category.as_str(),
+            creator.as_str(),
+            created,
+            stack,
+            false,
+            false,
+        )
+        .await?;
+        follow_up
+            .notification_sender
+            .branch_created(repository_id, branch)
+            .await;
+        follow_up
+            .hook_dispatcher
+            .spawn_post(HookPoint::BranchCreate, follow_up.hook_context);
+        follow_up
+            .instrument_provider
+            .counter("num_branches_created")
+            .add(1, &[]);
+        Ok::<_, BranchError>(branch)
+    })
+}
+
+/// Archives `branch` in `repository`, as `lore_revision::branch::delete` does, in a task that runs
+/// to its end ([`run_detached`]). Once the archive succeeds, the task sends its notification,
+/// spawns its post hooks and counts it, with what `follow_up` holds. A request dropped part way
+/// stops neither a settle nor an archive between its writes, nor what follows them.
+///
+/// Not an `async fn`, which would hold its arguments until its first poll, and spawn only then.
+pub(crate) fn delete_branch_detached(
+    repository: Arc<lore_revision::repository::RepositoryContext>,
+    branch: lore_revision::lore::BranchId,
+    follow_up: BranchWriteFollowUp<impl InstrumentProvider + Send + 'static>,
+) -> impl Future<Output = Result<Result<(), BranchError>, Status>> {
+    run_detached("branch delete", async move {
+        let repository_id = repository.id;
+        lore_revision::branch::delete(repository, branch).await?;
+        follow_up
+            .notification_sender
+            .branch_deleted(repository_id, branch)
+            .await;
+        follow_up
+            .hook_dispatcher
+            .spawn_post(HookPoint::BranchDelete, follow_up.hook_context);
+        follow_up
+            .instrument_provider
+            .counter("num_branches_deleted")
+            .add(1, &[]);
+        Ok::<_, BranchError>(())
+    })
+}
+
+/// Spawns `task`, named `what` in errors, in the current span, and answers its output. A request
+/// dropped part way, at its deadline or by its client, drops only the task's `JoinHandle`, which
+/// detaches the task, so the task isn't stopped between its writes. A task that panics fails as
+/// internal, with a warning.
+///
+/// Not an `async fn`, which would hold `task` in its future as well as spawn it: the task starts
+/// at the call, and the answer holds only its handle.
+fn run_detached<T: Send + 'static>(
+    what: &'static str,
+    task: impl Future<Output = T> + Send + 'static,
+) -> impl Future<Output = Result<T, Status>> {
+    let handle = lore_base::lore_spawn!(tracing::Instrument::in_current_span(task));
+    async move {
+        handle.await.map_err(|err| {
+            warn_error_to_status(&err, |err| {
+                Status::internal(format!("The {what}'s task failed: {err}"))
+            })
+        })
+    }
+}
+
 pub(crate) fn metadata_to_attribute(
     metadata: &MetadataMap,
     extensions: &Extensions,
@@ -379,12 +493,12 @@ impl RepositoryAdministration {
 
 /// Answered from the grants the partition-access layer enumerated for
 /// `repository` when the request carries them, else from one enumeration,
-/// else per action.
+/// else per action. `Err` when a check failed rather than denied.
 pub async fn repository_administration(
     authorizer: &Arc<dyn RepositoryAuthorizer>,
     extensions: &Extensions,
     repository: RepositoryId,
-) -> RepositoryAdministration {
+) -> Result<RepositoryAdministration, Status> {
     let token = get_verified_token(extensions);
     let enumerated;
     let grants = if let Some(grants) = extensions
@@ -393,38 +507,44 @@ pub async fn repository_administration(
     {
         Some(&grants.grants)
     } else {
-        let Ok(grants) = authorizer.granted_actions(token.as_ref(), repository).await else {
-            return RepositoryAdministration::Denied;
-        };
-        enumerated = grants;
+        match authorizer.granted_actions(token.as_ref(), repository).await {
+            Ok(grants) => enumerated = grants,
+            Err(status) if is_denial(&status) => return Ok(RepositoryAdministration::Denied),
+            Err(status) => return Err(status),
+        }
         enumerated.as_ref()
     };
     let permits = async |action| {
         permits_with(&**authorizer, grants, token.as_ref(), repository, action).await
     };
-    if permits(Action::Owner).await || permits(Action::Admin).await {
-        RepositoryAdministration::Permitted
-    } else if !permits(Action::Write).await {
-        RepositoryAdministration::Denied
-    } else if token.is_none() {
-        RepositoryAdministration::Permitted
-    } else {
-        RepositoryAdministration::CreatorOnly
-    }
+    Ok(
+        if permits(Action::Owner).await? || permits(Action::Admin).await? {
+            RepositoryAdministration::Permitted
+        } else if !permits(Action::Write).await? {
+            RepositoryAdministration::Denied
+        } else if token.is_none() {
+            RepositoryAdministration::Permitted
+        } else {
+            RepositoryAdministration::CreatorOnly
+        },
+    )
 }
 
 /// Whether `user_id` may administer `repository`, recorded as created by
-/// `creator`, per [`RepositoryAdministration`].
+/// `creator`, per [`RepositoryAdministration`]. `Err` when a check failed
+/// rather than denied.
 pub async fn may_administer_repository(
     authorizer: &Arc<dyn RepositoryAuthorizer>,
     extensions: &Extensions,
     repository: RepositoryId,
     creator: &str,
     user_id: &str,
-) -> bool {
-    repository_administration(authorizer, extensions, repository)
-        .await
-        .permits(creator, user_id)
+) -> Result<bool, Status> {
+    Ok(
+        repository_administration(authorizer, extensions, repository)
+            .await?
+            .permits(creator, user_id),
+    )
 }
 
 /// The creator recorded in `repository`'s metadata. Reads only, so it does
@@ -451,15 +571,21 @@ pub async fn repository_creator(
 }
 
 /// Refuses with `permission_denied` unless the caller may administer
-/// `repository`. The recorded creator is read only when the decision rests
-/// on it.
-pub async fn require_repository_administration(
+/// `repository` or holds [`Action::SetProtected`]. The recorded creator is
+/// read only when the decision rests on it.
+pub async fn require_branch_protection_administration(
     authorizer: &Arc<dyn RepositoryAuthorizer>,
     extensions: &Extensions,
     repository: Arc<lore_revision::repository::RepositoryContext>,
     user_id: &str,
 ) -> Result<(), Status> {
-    let permitted = match repository_administration(authorizer, extensions, repository.id).await {
+    if authorizer
+        .permits(extensions, repository.id, Action::SetProtected)
+        .await?
+    {
+        return Ok(());
+    }
+    let permitted = match repository_administration(authorizer, extensions, repository.id).await? {
         RepositoryAdministration::Permitted => true,
         RepositoryAdministration::CreatorOnly => repository_creator(repository).await? == user_id,
         RepositoryAdministration::Denied => false,
@@ -468,7 +594,9 @@ pub async fn require_repository_administration(
         Ok(())
     } else {
         info!(user_id, "Repository administration refused");
-        Err(Status::permission_denied("Not repository owner"))
+        Err(Status::permission_denied(
+            "Not permitted to change branch protection",
+        ))
     }
 }
 
@@ -483,7 +611,7 @@ pub async fn require_action<T>(
     let repository = get_repository(request.metadata())?;
     if authorizer
         .permits(request.extensions(), repository, action)
-        .await
+        .await?
     {
         Ok(())
     } else {
@@ -644,6 +772,7 @@ macro_rules! impl_filter_slow_down {
 impl_filter_slow_down!(
     BranchError,
     BranchMetadataError,
+    CommitError,
     DiffError,
     FindError,
     ImmutableError,

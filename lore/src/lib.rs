@@ -19,6 +19,7 @@ pub mod notification;
 pub mod remote;
 pub mod repository;
 pub mod revision;
+pub mod revision_graph;
 pub mod revision_tree;
 pub mod service;
 pub mod shared_store;
@@ -35,6 +36,8 @@ pub use lore_base::version::LORE_LIBRARY_VERSION;
 /// Whole crate rather than a prelude: `#[error_set]` expands to paths rooted at the crate, so a
 /// consumer aliases this into scope as `lore_error_set`.
 pub use lore_error_set as error_set;
+pub use lore_revision::global::AuthSettings;
+pub use lore_revision::global::load_auth_settings;
 
 /// Time allowed for each wait shutdown drives from a synchronous caller: the drains before the
 /// runtime shutdown, whose timeout in `lore_revision::interface::shutdown` it matches, and the
@@ -61,7 +64,7 @@ pub fn shutdown() -> bool {
 
     // Garbage collection stops alongside the drains rather than before them, so neither
     // takes the other's share of the budget. A tree writes through the stores its parent
-    // owns, so trees drain before storage handles. The storage close sequence (mark
+    // owns, so trees drain before storage handles. The storage drain sequence (mark
     // invalid, drain in-flight, spawn flush) must run inside an async context
     // to await the per-handle drains, and this function is synchronous wherever it is called
     // from — see `shutdown_block_on` for the three cases and why a `current_thread` caller
@@ -152,9 +155,10 @@ pub fn size_threads_for_relaying() {
 
 /// Sizes this process's thread pools for a command that opens `connections` storage
 /// connections to its remote, 0 for the default of one: a network thread for each connection, up
-/// to half of the async and network threads together, taken from the async threads. A configured
-/// network thread count takes precedence. Returns false, and changes nothing, once a runtime
-/// exists, as in a process that relays its calls, or once a count was set.
+/// to half of the async and network threads together, taken from the async threads. A process
+/// that names the machine server's socket opens one, whatever it asks for. A configured network
+/// thread count takes precedence. Returns false, and changes nothing, once a runtime exists, as in
+/// a process that relays its calls, or once a count was set.
 ///
 /// Call it before the first Lore operation, and before building a runtime of your own.
 pub fn size_threads_for_connections(connections: u32) -> bool {
@@ -165,14 +169,16 @@ pub fn size_threads_for_connections(connections: u32) -> bool {
 
 /// Sizes this process's thread pools for running the service: as many network threads as
 /// [`size_threads_for_connections`] gives the most storage connections a command opens to a
-/// remote, added to the async threads rather than taken from them. The service carries the
-/// commands of many callers at once, and can't know in advance how many connections they will ask
-/// for.
+/// remote, one for a service that names the machine server's socket, added to the async threads
+/// rather than taken from them. The service carries the commands of many callers at once, and
+/// can't know in advance how many connections they will ask for.
 ///
 /// Call it before the first Lore operation, and before building a runtime of your own.
 pub fn size_threads_for_service() -> bool {
     size_threads_for(NetConnections::Served(
-        lore_transport::connection::MAX_STORAGE_CONNECTIONS,
+        lore_transport::connection::storage_connection_count(
+            lore_transport::connection::MAX_STORAGE_CONNECTIONS,
+        ),
     ))
 }
 

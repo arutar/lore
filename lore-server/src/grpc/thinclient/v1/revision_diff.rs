@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Epic Games, Inc.
 // SPDX-License-Identifier: MIT
-use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use lore_base::lore_spawn;
 use lore_base::runtime::LORE_CONTEXT;
 use lore_base::types::Hash;
@@ -21,6 +19,7 @@ use lore_revision::lore::BranchId;
 use lore_revision::lore::RepositoryId;
 use lore_revision::repository::RepositoryContext;
 use lore_revision::revision::DiffItem;
+use lore_revision::revision::LinkSettlement;
 use lore_revision::state::State;
 use lore_telemetry::tracing::fields::BRANCH_ID;
 use lore_telemetry::tracing::fields::REPOSITORY_ID;
@@ -36,6 +35,7 @@ use tracing::Instrument;
 use tracing::debug;
 use tracing::warn;
 
+use super::helpers::PartitionTable;
 use super::helpers::diff_conflict_from_pair;
 use super::helpers::identifier_for_signature;
 use super::helpers::link_pin_change_to_diff_change;
@@ -78,7 +78,9 @@ pub struct RevisionDiffConfig {
     /// `BranchError::Oversized` before target's walk runs.
     pub source_cap: usize,
     /// Permit count for the parallel history-walk semaphore inside
-    /// `revision::diff3_with_source_cap`. `None` falls back to
+    /// `revision::diff3_with_source_cap`, and for the revision
+    /// comparisons of its walks of the history lines for deleted paths.
+    /// `None` falls back to
     /// `lore_revision::revision::DEFAULT_HISTORY_WALK_CONCURRENCY`.
     pub history_walk_concurrency: Option<usize>,
 }
@@ -139,10 +141,12 @@ pub async fn handler(
     let autoresolve = req.autoresolve;
 
     let execution = setup_execution(module_path!(), correlation_id, user_id);
-    let repository = Arc::new(
-        RepositoryContext::new_server_context(immutable_store, mutable_store, repository_id)
-            .with_link_read(can_read),
-    );
+    let repository = Arc::new(RepositoryContext::new_server_context(
+        immutable_store,
+        mutable_store,
+        repository_id,
+        can_read,
+    ));
 
     LORE_CONTEXT
         .scope(execution, async move {
@@ -531,6 +535,7 @@ async fn run_three_way(
             config.history_walk_concurrency,
             // The display diff reports every changed path individually.
             None,
+            LinkSettlement::Tree,
             producer_tx,
         ))
         .await
@@ -777,50 +782,24 @@ async fn send_payload(
     SendOutcome::Sent
 }
 
-/// Per-stream map of linked-repository `RepositoryId` to its assigned
-/// index. The parent repository is index 0 and never stored here.
-#[lore_macro::test_pub]
-struct PartitionTable {
-    parent_repository_id: RepositoryId,
-    entries: HashMap<RepositoryId, u32>,
-}
-
 impl PartitionTable {
-    #[lore_macro::test_pub]
-    fn new(parent_repository_id: RepositoryId) -> Self {
-        Self {
-            parent_repository_id,
-            entries: HashMap::new(),
-        }
-    }
-
     /// Resolve `partition` to its index, sending a `DiffPartition` on
     /// first sighting (before the index is returned, so the announcement
     /// always precedes the change that references it). `Err` only when
-    /// the receiver is gone; the table is left unchanged in that case.
+    /// the receiver is gone.
     #[lore_macro::test_pub]
     async fn resolve_or_announce(
         &mut self,
         partition: RepositoryId,
         tx: &mpsc::Sender<Result<RevisionDiffResponse, Status>>,
     ) -> Result<u32, SendOutcome> {
-        if partition == self.parent_repository_id {
-            return Ok(0);
+        let (index, announcement) = self.resolve(partition);
+        if let Some(announcement) = announcement
+            && let SendOutcome::ReceiverDropped =
+                send_payload(tx, Payload::Partition(announcement)).await
+        {
+            return Err(SendOutcome::ReceiverDropped);
         }
-        if let Some(&index) = self.entries.get(&partition) {
-            return Ok(index);
-        }
-        let index = (self.entries.len() as u32) + 1;
-        let announcement = Payload::Partition(thin_client_v1::DiffPartition {
-            index,
-            link_partition: Bytes::from(partition),
-        });
-        match send_payload(tx, announcement).await {
-            SendOutcome::Sent => {
-                self.entries.insert(partition, index);
-                Ok(index)
-            }
-            SendOutcome::ReceiverDropped => Err(SendOutcome::ReceiverDropped),
-        }
+        Ok(index)
     }
 }

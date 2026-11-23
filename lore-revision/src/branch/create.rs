@@ -14,6 +14,8 @@ use crate::layer;
 use crate::lore::BranchId;
 use crate::lore::Context;
 use crate::lore_debug;
+use crate::lore_info;
+use crate::repository::BranchSwitchOptions;
 use crate::repository::RepositoryContext;
 use crate::repository::RepositoryWriteToken;
 use crate::state::State;
@@ -93,6 +95,11 @@ impl EventError for CreateError {
     }
 }
 
+/// Creates the branch `branch` off the instance's current branch and makes it current. Where
+/// [`branch::create_at`] fails with [`BranchAlreadyExists`], so does the create, unless `force`
+/// replaces the branch. Its refusals and [`InvalidArguments`] are forwarded, and its other failures
+/// are reported as `Internal`; the create a forced replace retries forwards every failure. A
+/// restored branch is switched to, at the revision it left off at.
 pub async fn create(
     repository: Arc<RepositoryContext>,
     token: &RepositoryWriteToken,
@@ -115,17 +122,15 @@ pub async fn create(
     let user_id = execution_context().user_id().await;
     let dry_run = execution_context().globals().dry_run();
 
-    // Gather the parent branch stack
     let parent_metadata = branch::metadata(repository.clone(), current_branch)
         .await
         .forward::<CreateError>("loading parent branch metadata")?;
-    let mut stack = branch::stack(&parent_metadata);
-    stack.insert(
-        0,
+    let stack = branch::child_stack(
         BranchPoint {
             branch: current_branch,
             revision: current_revision,
         },
+        &parent_metadata,
     );
 
     // Create the branch
@@ -158,13 +163,42 @@ pub async fn create(
             } else if force {
                 match branch::resolve(repository.clone(), branch.as_str()).await {
                     Ok(resolved) => {
-                        if let Err(err) = branch::delete(repository.clone(), resolved.id).await {
-                            lore_debug!("Failed to delete existing local branch: {err}");
-                        }
-                        if let Ok(remote) = repository.remote().await {
-                            let _ =
-                                branch::delete_remote(remote.clone(), repository.id, resolved.id)
-                                    .await;
+                        // A mapping the branch's metadata doesn't account for is released alone:
+                        // archiving the branch would archive it under its own name.
+                        let stale = match branch::release_unless(
+                            repository.clone(),
+                            resolved.id,
+                            branch.as_str(),
+                            branch::accounts_for_name,
+                        )
+                        .await
+                        {
+                            Ok(stale) => stale,
+                            Err(err) if err.is_branch_not_found() => false,
+                            Err(err) => {
+                                return Err(err).forward::<CreateError>(
+                                    "releasing the name for force-recreate",
+                                );
+                            }
+                        };
+                        if stale {
+                            lore_info!(
+                                "Released the name {branch}, which mapped to branch {} named otherwise",
+                                resolved.id
+                            );
+                        } else {
+                            if let Err(err) = branch::delete(repository.clone(), resolved.id).await
+                            {
+                                lore_debug!("Failed to delete existing local branch: {err}");
+                            }
+                            if let Ok(remote) = repository.remote().await {
+                                let _ = branch::delete_remote(
+                                    remote.clone(),
+                                    repository.id,
+                                    resolved.id,
+                                )
+                                .await;
+                            }
                         }
 
                         // Retry the creation
@@ -215,7 +249,9 @@ pub async fn create(
                 return Err(CreateError::from(BranchAlreadyExists { branch }));
             }
         }
-        Err(err) if is_refusal(&err) => return Err(err).forward::<CreateError>("creating branch"),
+        Err(err) if is_refusal(&err) || err.is_invalid_arguments() => {
+            return Err(err).forward::<CreateError>("creating branch");
+        }
         Err(err) => return Err(CreateError::internal_with_context(err, "creating branch")),
     };
 
@@ -228,9 +264,24 @@ pub async fn create(
     )
     .await?;
 
-    // Linked branches can move the new branch past the current revision, and the working copy
-    // stands on the branch's head.
+    // Linked branches can move the new branch past the current revision.
     let (head, staged) = match created {
+        Some(created) if created.restored && !dry_run => {
+            // A restore is rare, so the switch is boxed rather than held by every create.
+            return Box::pin(crate::repository::branch_switch(
+                repository.clone(),
+                token,
+                branch.clone(),
+                BranchSwitchOptions::default(),
+            ))
+            .await
+            .map(|_| ())
+            .forward_any_with::<CreateError, _>(|| {
+                format!(
+                    "switching to the restored branch, which `lore branch switch {branch}` retries"
+                )
+            });
+        }
         Some(created) if !created.head.is_zero() => (created.head, created.staged),
         _ => (current_revision, None),
     };
@@ -285,13 +336,12 @@ async fn layer_branch_create(
         let parent_metadata = branch::metadata(repository.clone(), current_branch)
             .await
             .forward::<CreateError>("loading layer parent branch metadata")?;
-        let mut stack = branch::stack(&parent_metadata);
-        stack.insert(
-            0,
+        let stack = branch::child_stack(
             BranchPoint {
                 branch: current_branch,
                 revision: current_revision.revision(),
             },
+            &parent_metadata,
         );
 
         match branch::create(

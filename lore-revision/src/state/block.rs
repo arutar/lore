@@ -228,6 +228,13 @@ impl NodeFlags {
             LoreNodeType::Directory
         }
     }
+
+    /// Whether the flags hold a merge conflict not resolved, as [`Node::is_staged_merge_unresolved`]
+    /// reads a node's.
+    pub fn is_staged_merge_unresolved(&self) -> bool {
+        self.contains(NodeFlags::StagedMergeConflict)
+            && !self.contains(NodeFlags::StagedMergeResolved)
+    }
 }
 
 bitflags! {
@@ -541,15 +548,42 @@ impl Node {
         (self.flags & NodeFlags::DirtyCopy) == NodeFlags::DirtyCopy.bits()
     }
 
+    /// Whether the node is marked dirty for a change of its own, an action bit with no staged change
+    /// to claim it, as a directory marked dirty as added or moved is, rather than by the bare `Dirty`
+    /// bit a mark below carries up.
+    pub fn is_dirty_in_own_right(&self) -> bool {
+        self.is_dirty() && !self.is_staged() && self.action_bits() != 0
+    }
+
+    /// Whether a staged move that takes a node out of this directory stages it for the commit's
+    /// rehash: one a commit or a realize gave an address, carrying no dirty change of its own. One
+    /// with no address stays unstaged, for the commit to drop, which a staged bit would make it
+    /// keep. A staged bit beside a change of its own would read the change as staged; the commit
+    /// stages such a directory for its rehash once the change is left out.
+    pub fn stages_when_left(&self) -> bool {
+        !self.address.is_zero() && !self.is_dirty_in_own_right()
+    }
+
     /// Check if node is dirty or staged (has any lifecycle change)
     pub fn is_dirty_or_staged(&self) -> bool {
         self.is_dirty() || self.is_staged()
     }
 
     /// Check if node carries the add action, staged or dirty: the two halves share their action
-    /// bits, which hold one change at a time
+    /// bits, which hold one change at a time, but for an add taken back, which a merge stages at a
+    /// path this branch lacks: it carries the add and the deletion
     pub fn is_added(&self) -> bool {
         self.is_staged_add() || self.is_dirty_add()
+    }
+
+    /// Whether the node, which the working tree no longer holds, leaves the staged tree as a
+    /// reverted add rather than being marked deleted: a node marked dirty as added, a staged add
+    /// marked dirty among them, and a node marked dirty as copied and not staged. No revision
+    /// holds such a node where it stands. A node a merge staged is none of them: a parent of the
+    /// merge holds it.
+    pub fn reverts_as_add(&self) -> bool {
+        !self.is_staged_merge()
+            && (self.is_dirty_add() || (self.is_dirty_copy() && !self.is_staged()))
     }
 
     /// Check if node carries the delete action, staged or dirty
@@ -918,6 +952,63 @@ pub struct NodeBlockDataV0 {
 
 impl ReadBoxFromImmutable for NodeBlockDataV0 {}
 block_payload_on_tree_heap!(NodeBlockDataV0, ZeroHeapAlloc, CloneHeapAlloc);
+
+/// A node block as the store holds it, in the format its content's size names
+/// ([`read_stored_node_block`]).
+pub enum StoredNodeBlock {
+    Current(HeapBox<NodeBlockData>),
+    V2(HeapBox<NodeBlockDataV2>),
+    V0(HeapBox<NodeBlockDataV0>),
+}
+
+/// Reads the node block at `address` in the format its size names. A read the storage refuses as
+/// `Oversized`, content larger than the current format, or fails as internal, as it fails content
+/// smaller than it, is read again in the older format of that size ([`read_older_node_block`]).
+/// Any other error is the store's. The fallback is boxed, as only an older repository's blocks and
+/// internal failures take it.
+///
+/// Not an `async fn`, which would hold a second copy of its arguments.
+#[allow(clippy::manual_async_fn)]
+pub fn read_stored_node_block(
+    repository: Arc<RepositoryContext>,
+    address: Address,
+) -> impl Future<Output = Result<StoredNodeBlock, ImmutableError>> + Send {
+    async move {
+        let failed =
+            match NodeBlockData::read_box_from_immutable(repository.clone(), address, true).await {
+                Ok(block) => return Ok(StoredNodeBlock::Current(block)),
+                Err(failed) => failed,
+            };
+        if failed.is_oversized() || failed.is_internal() {
+            Box::pin(read_older_node_block(repository, address, failed)).await
+        } else {
+            Err(failed)
+        }
+    }
+}
+
+/// Reads the node block at `address` in the older format of its size, the read in the current
+/// format having failed with `failed`: as a [`NodeBlockDataV0`], the one format larger, where
+/// `failed` refused the content as `Oversized`, otherwise as a [`NodeBlockDataV2`], the one
+/// smaller. Content the second read refuses as larger is of neither size, and `failed` stands: a
+/// failure of the first read itself, or content of no block format.
+#[lore_macro::test_pub]
+async fn read_older_node_block(
+    repository: Arc<RepositoryContext>,
+    address: Address,
+    failed: ImmutableError,
+) -> Result<StoredNodeBlock, ImmutableError> {
+    if failed.is_oversized() {
+        return NodeBlockDataV0::read_box_from_immutable(repository, address, true)
+            .await
+            .map(StoredNodeBlock::V0);
+    }
+    match NodeBlockDataV2::read_box_from_immutable(repository, address, true).await {
+        Ok(block) => Ok(StoredNodeBlock::V2(block)),
+        Err(err) if err.is_oversized() => Err(failed),
+        Err(err) => Err(err),
+    }
+}
 
 /// A node in the revision tree, 128 bytes (32 bit index, max 4G nodes)
 #[repr(C)]
@@ -3118,57 +3209,43 @@ impl NodeBlock {
         self.name_deserialized.load(Ordering::Relaxed)
     }
 
-    /// Reads the node block at `address`, falling back to the older block formats when it does not
-    /// read as the current one. The fallback is boxed, as only older repositories and failed reads
-    /// take it.
-    pub async fn deserialize(
+    /// Reads the node block at `address` ([`read_stored_node_block`]), converting a block of an
+    /// older format to the current one.
+    ///
+    /// Not an `async fn`, which would hold a second copy of its arguments.
+    #[allow(clippy::manual_async_fn)]
+    pub fn deserialize(
         repository: Arc<RepositoryContext>,
         state: &State,
         address: Address,
-    ) -> Result<Arc<NodeBlock>, StateError> {
-        // Normal path, expect latest data format version
-        if let Ok(block_data) =
-            NodeBlockData::read_box_from_immutable(repository.clone(), address, true).await
-        {
-            if block_data.version > NodeBlockFormat::Nametable as u32 {
-                return Err(StateError::internal(format!(
-                    "New revision state node block format encountered, please update your urc client: version {}",
-                    block_data.version
-                )));
+    ) -> impl Future<Output = Result<Arc<NodeBlock>, StateError>> + Send + '_ {
+        async move {
+            let stored = read_stored_node_block(repository.clone(), address)
+                .await
+                .forward::<StateError>("Deserialize node block failed")?;
+            match stored {
+                StoredNodeBlock::Current(block_data) => {
+                    if block_data.version > NodeBlockFormat::Nametable as u32 {
+                        return Err(StateError::internal(format!(
+                            "New revision state node block format encountered, please update your urc client: version {}",
+                            block_data.version
+                        )));
+                    }
+                    Ok(NodeBlock::new(block_data))
+                }
+                StoredNodeBlock::V2(block_data_v2) => {
+                    lore_debug!("Converting v2 block data format when deserializing block");
+                    let block_data = Self::convert_block_v2(repository, block_data_v2)?;
+                    Ok(NodeBlock::new(block_data))
+                }
+                StoredNodeBlock::V0(block_data_v0) => {
+                    lore_trace!("Converting v0 block data format when deserializing block");
+                    let (block_data, name) =
+                        Self::convert_block_v0(repository, state, block_data_v0).await?;
+                    Ok(NodeBlock::new_with_name(block_data, name))
+                }
             }
-            Ok(NodeBlock::new(block_data))
-        } else {
-            Box::pin(Self::deserialize_other_version(repository, state, address)).await
         }
-    }
-
-    pub async fn deserialize_other_version(
-        repository: Arc<RepositoryContext>,
-        state: &State,
-        address: Address,
-    ) -> Result<Arc<NodeBlock>, StateError> {
-        // Try load old data format
-        if let Ok(block_data_v0) =
-            NodeBlockDataV0::read_box_from_immutable(repository.clone(), address, true).await
-        {
-            lore_trace!("Converting v0 block data format when deserializing block");
-            let (block_data, name) =
-                Self::convert_block_v0(repository.clone(), state, block_data_v0).await?;
-
-            return Ok(NodeBlock::new_with_name(block_data, name));
-        };
-
-        let block_data_v2 =
-            match NodeBlockDataV2::read_box_from_immutable(repository.clone(), address, true).await
-            {
-                Ok(data) => Ok(data),
-                Err(err) => Err(err).forward::<StateError>("Deserialize node block failed"),
-            }?;
-
-        lore_debug!("Converting v2 block data format when deserializing block");
-        let block_data = Self::convert_block_v2(repository.clone(), block_data_v2)?;
-
-        Ok(NodeBlock::new(block_data))
     }
 
     pub async fn convert_block_v0(
@@ -3776,14 +3853,19 @@ impl NodeLink {
         }
     }
 
+    /// Whether this node lies outside `state` of `repository`, in another repository or revision,
+    /// so a lookup crossed a link to reach it.
+    pub fn crosses_link(&self, repository: &RepositoryContext, state: &State) -> bool {
+        self.is_valid_or_root()
+            && (repository.id != self.repository || state.revision() != self.revision)
+    }
+
     pub async fn resolve(
         &self,
         repository: Arc<RepositoryContext>,
         state: Arc<State>,
     ) -> Result<(Arc<RepositoryContext>, Arc<State>), StateError> {
-        if self.is_valid_or_root()
-            && (repository.id != self.repository || state.revision() != self.revision)
-        {
+        if self.crosses_link(&repository, &state) {
             self.open(&repository).await
         } else {
             Ok((repository, state))
@@ -3886,6 +3968,12 @@ impl NodeFileMetadata {
     /// Get the node index from a full node ID
     pub fn index(node: NodeID) -> usize {
         Self::index_clamp(node & NODE_INDEX_MASK) as usize
+    }
+
+    /// The slot `lore file history` follows to the change before this revision: 0, or 1 where slot 0
+    /// names no revision.
+    pub fn history_slot(&self) -> usize {
+        if self.revision[0].is_zero() { 1 } else { 0 }
     }
 }
 

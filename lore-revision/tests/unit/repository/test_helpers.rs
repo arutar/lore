@@ -3,21 +3,93 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use lore_base::env::CallEnvironment;
+use lore_base::env::GLOBAL_PATH_VAR;
+use lore_base::error::Disconnected;
+use lore_base::test_util::TempDir;
 use lore_base::types::Address;
 use lore_base::types::Fragment;
 use lore_base::types::FragmentFlags;
 use lore_base::types::FragmentReference;
 use lore_revision::filter::Filter;
+use lore_revision::interface::ExecutionContext;
+use lore_revision::interface::LoreGlobalArgs;
+use lore_revision::lore::RepositoryId;
 use lore_revision::node::Node;
 use lore_revision::node::NodeFlags;
+use lore_revision::protocol::RemoteConnections;
+use lore_revision::protocol::RemoteEndpoint;
+use lore_revision::relay::EventDispatcher;
+use lore_revision::repository::RemoteState;
 use lore_revision::repository::RepositoryContext;
 use lore_revision::repository::RepositoryWriteToken;
+use lore_revision::test_util::context_built;
+use lore_revision::test_util::context_with_state;
 use lore_storage::hash;
+use lore_transport::Connection;
+use lore_transport::ProtocolError;
 use zerocopy::FromZeros;
 use zerocopy::IntoBytes;
 
 use crate::helper::RepositoryContextCreationArgsExt;
 use crate::helper::default_repository_creation_args;
+use crate::immutable::serving::Serving;
+use crate::immutable::serving::serving_remote;
+
+/// An endpoint whose connection for `partition` reaches a remote that holds nothing
+/// ([`serving_remote`] over an empty repository), so a read of it misses and is not retried, and
+/// that connection, which counts the session pools started on it
+/// ([`Connection::storage_session_starts`]).
+pub async fn counted_endpoint(partition: RepositoryId) -> (Arc<RemoteEndpoint>, Arc<Connection>) {
+    let empty = context_with_state(RemoteState::Offline).await;
+    let connection = Connection::detached(vec![serving_remote(&empty, Serving::default())]);
+    let connections = RemoteConnections::with_connection(partition, connection.clone());
+    (Arc::new(RemoteEndpoint::over(connections)), connection)
+}
+
+/// A remote URL of its own that reaches `connection`, which the process's connection cache holds as
+/// the connection the URL's first connect opened, for the call's credential store.
+pub fn cached_remote_url(connection: Arc<Connection>) -> String {
+    let url = format!("lore://remote-{}.invalid", uuid::Uuid::now_v7());
+    let (parsed, _) = lore_transport::connection::parse(&url).expect("the URL parses");
+    let auth_mode = lore_revision::lore::execution_context().globals().auth_mode;
+    lore_transport::connection::add_connection(parsed.as_str(), "", false, auth_mode, connection);
+    url
+}
+
+/// An execution whose call names `auth` as its credential store, in the global directory the tests
+/// share.
+pub fn with_auth_path(auth: &TempDir) -> Arc<ExecutionContext> {
+    Arc::new(
+        ExecutionContext::new_client(LoreGlobalArgs::default(), EventDispatcher::no_dispatch())
+            .with_environment(CallEnvironment {
+                values: [
+                    std::env::var(GLOBAL_PATH_VAR).ok(),
+                    Some(auth.path().display().to_string()),
+                    None,
+                ],
+            }),
+    )
+}
+
+/// A context on the zero partition, set up by `build`, whose connect failed, so it is not offline
+/// and each read carries a session.
+pub async fn built_context(
+    build: impl FnOnce(RepositoryContext) -> RepositoryContext,
+) -> Arc<RepositoryContext> {
+    context_built(
+        RemoteState::Failed(ProtocolError::from(Disconnected)),
+        build,
+    )
+    .await
+}
+
+/// Whether `error`, or an error among its sources, is a `T`.
+pub fn caused_by<T: std::error::Error + 'static>(
+    error: &(dyn std::error::Error + 'static),
+) -> bool {
+    std::iter::successors(Some(error), |error| error.source()).any(|error| error.is::<T>())
+}
 
 /// A repository over in-memory stores and no remote, writing its working tree at `path`.
 pub async fn working_tree_repository(path: &Path) -> Arc<RepositoryContext> {

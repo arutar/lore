@@ -1,44 +1,47 @@
 // SPDX-FileCopyrightText: 2026 Epic Games, Inc.
 // SPDX-License-Identifier: MIT
-#![allow(clippy::disallowed_methods)] // Test fixtures rename files in the working tree directly.
 
 //! `lore branch merge` of a move on one branch against changes to the moved node on the other,
-//! as the working tree and the merge revision hold it.
+//! as the working tree and the merge revision hold it, `lore revision cherry-pick` and
+//! `lore revision revert` of a move below a directory renamed only in case, and
+//! `lore branch merge into` and `lore revision restore` of a move that edits the moved file.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use lore_base::types::Address;
+use lore_base::types::Hash;
 use lore_revision::branch;
-use lore_revision::file;
+use lore_revision::change;
+use lore_revision::filter::FilterMode;
+use lore_revision::metadata::MetadataInherit;
 use lore_revision::node::ROOT_NODE;
-use lore_revision::stage::StageCaseChange;
-use lore_revision::stage::StageOptions;
+use lore_revision::revision::cherry_pick::CherryPickOptions;
+use lore_revision::revision::cherry_pick::cherry_pick_boxed;
+use lore_revision::revision::revert::RevertOptions;
+use lore_revision::revision::revert::revert_boxed;
+use lore_revision::revision::sync;
+use lore_revision::state::State;
+use lore_revision::state::diff_collect;
 
+use super::instance::Edit;
 use super::instance::Instance;
+use super::instance::RENAMES_BELOW;
+use super::instance::commit_edits;
 use super::instance::create_branch;
 use super::instance::current;
-use super::instance::merge_feature;
+use super::instance::merge_branch;
 use super::instance::names_along;
 use super::instance::renamed;
+use super::instance::renamed_all;
 use super::instance::revision_state;
 use super::instance::run;
-use super::instance::stage_and_commit;
 use super::instance::switch_to;
 use super::instance::working_tree;
-use super::instance::write;
+use crate::helper::test_filter;
 
 /// The files every fixture starts from, each holding its own path.
 const TREE: [&str; 4] = ["Dir/a.txt", "Dir/b.txt", "Dir/Sub/c.txt", "Top.txt"];
-
-/// An edit a branch makes to the working tree.
-#[derive(Clone, Copy, Debug)]
-enum Edit {
-    /// Renames the first path to the second.
-    Move(&'static str, &'static str),
-    /// Writes the content to the file at the path.
-    Write(&'static str, &'static str),
-    /// Deletes the file or the directory at the path.
-    Delete(&'static str),
-}
 
 /// A move the tests make on one branch: the node it moves and where to, and a file at or below the
 /// node with the path the move gives it.
@@ -85,42 +88,8 @@ fn moving(moved: &Moved, content: Option<&'static str>) -> Vec<Edit> {
     edits
 }
 
-/// Makes `edits` in the working tree, stages each move as one, and commits them.
-async fn commit_edits(instance: &Instance, edits: &[Edit], message: &str) {
-    for edit in edits {
-        match *edit {
-            Edit::Move(from, to) => {
-                let (from, to) = (instance.path.join(from), instance.path.join(to));
-                std::fs::rename(&from, &to).expect("rename");
-                file::stage::stage_move(
-                    instance.repository.clone(),
-                    &instance.write_token,
-                    from.to_string_lossy().into_owned(),
-                    to.to_string_lossy().into_owned(),
-                    StageOptions {
-                        case_change: StageCaseChange::Rename,
-                        scan: true,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .expect("Failed to stage the move");
-            }
-            Edit::Write(path, content) => write(instance, path, content),
-            Edit::Delete(path) => {
-                let absolute = instance.path.join(path);
-                if absolute.is_dir() {
-                    std::fs::remove_dir_all(absolute).expect("Failed to delete");
-                } else {
-                    std::fs::remove_file(absolute).expect("Failed to delete");
-                }
-            }
-        }
-    }
-    stage_and_commit(instance, &instance.path, message).await;
-}
-
-/// The paths the staged revision marks as in conflict, and the paths of the files it holds.
+/// The paths the staged revision marks as in conflict, a deletion's included, and the paths of the
+/// files it holds.
 async fn staged(instance: &Instance) -> (Vec<String>, Vec<String>) {
     let revision = lore_revision::instance::load_staged_revision(&instance.repository)
         .await
@@ -139,9 +108,6 @@ async fn staged(instance: &Instance) -> (Vec<String>, Vec<String>) {
                 .node(instance.repository.clone(), child)
                 .await
                 .expect("Failed to read a node");
-            if node.is_staged_delete() {
-                continue;
-            }
             let name = state
                 .node_name_clone(instance.repository.clone(), child)
                 .await
@@ -153,6 +119,9 @@ async fn staged(instance: &Instance) -> (Vec<String>, Vec<String>) {
             };
             if node.is_staged_merge_conflict() {
                 conflicts.push(path.clone());
+            }
+            if node.is_staged_delete() {
+                continue;
             }
             if node.is_directory() {
                 pending.push((child, path));
@@ -178,7 +147,7 @@ async fn merge(
     commit_edits(instance, feature, "Feature").await;
     switch_to(instance, branch::DEFAULT_DEFAULT_NAME).await;
     commit_edits(instance, main, "Main").await;
-    let committed = merge_feature(instance).await;
+    let committed = merge_branch(instance, "feature").await;
     (committed, working_tree(&instance.path))
 }
 
@@ -221,6 +190,418 @@ async fn an_edit_against_a_move_merges_both() {
             )
             .await;
         }
+    }
+}
+
+/// A branch renaming a directory only in case and editing a file merges with one moving that file,
+/// within the directory, out of it or into it, whichever of the two is merged into the other: the
+/// working tree and the merge revision hold the file where the move put it, below the directory's
+/// new spelling where it stays below the directory, with the content the edit gave it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_against_a_move_across_a_case_only_rename_merges_all() {
+    const RENAME_C: [Edit; 2] = [
+        Edit::Move("Dir/Sub", "Dir/sub"),
+        Edit::Write("Dir/sub/c.txt", "edited"),
+    ];
+    const RENAME_TOP: [Edit; 2] = [
+        Edit::Move("Dir/Sub", "Dir/sub"),
+        Edit::Write("Top.txt", "edited"),
+    ];
+    const MOVE_C: [Edit; 1] = [Edit::Move("Dir/Sub/c.txt", "Dir/Sub/d.txt")];
+    const MOVE_C_OUT: [Edit; 1] = [Edit::Move("Dir/Sub/c.txt", "Dir/d.txt")];
+    const MOVE_TOP: [Edit; 1] = [Edit::Move("Top.txt", "Dir/Sub/Top.txt")];
+    type Case = (
+        &'static [Edit],
+        &'static [Edit],
+        &'static [(&'static str, &'static str)],
+    );
+    const CASES: [Case; 3] = [
+        (
+            &RENAME_C,
+            &MOVE_C,
+            &[
+                ("Dir/a.txt", "Dir/a.txt"),
+                ("Dir/b.txt", "Dir/b.txt"),
+                ("Dir/sub/d.txt", "edited"),
+                ("Top.txt", "Top.txt"),
+            ],
+        ),
+        (
+            &RENAME_C,
+            &MOVE_C_OUT,
+            &[
+                ("Dir/a.txt", "Dir/a.txt"),
+                ("Dir/b.txt", "Dir/b.txt"),
+                ("Dir/d.txt", "edited"),
+                ("Top.txt", "Top.txt"),
+            ],
+        ),
+        (
+            &RENAME_TOP,
+            &MOVE_TOP,
+            &[
+                ("Dir/a.txt", "Dir/a.txt"),
+                ("Dir/b.txt", "Dir/b.txt"),
+                ("Dir/sub/Top.txt", "edited"),
+                ("Dir/sub/c.txt", "Dir/Sub/c.txt"),
+            ],
+        ),
+    ];
+    for (renaming, moving, merged) in &CASES {
+        for (feature, main) in [(*renaming, *moving), (*moving, *renaming)] {
+            run(
+                "an_edit_against_a_move_across_a_case_only_rename_merges_all",
+                &TREE,
+                move |instance| async move {
+                    let (committed, tree) = merge(&instance, feature, main).await;
+                    let context = format!("{feature:?} into {main:?}");
+                    assert!(committed, "{context}: the merge did not commit");
+                    let expected: BTreeMap<String, Vec<u8>> = merged
+                        .iter()
+                        .map(|(path, content)| (path.to_string(), content.as_bytes().to_vec()))
+                        .collect();
+                    assert_eq!(tree, expected, "{context}");
+                    let (edited, _) = merged
+                        .iter()
+                        .find(|(_, content)| *content == "edited")
+                        .expect("an edited file");
+                    let names = names_along(&instance, current(&instance).await, edited).await;
+                    assert_eq!(names.join("/"), *edited, "{context}");
+                },
+            )
+            .await;
+        }
+    }
+}
+
+/// The case-only rename of `Dir` the tests below make on one branch.
+const RENAME_DIR: Edit = Edit::Move("Dir", "dir");
+
+/// The case-only rename of `Dir/Sub` the tests below make on one branch.
+const RENAME_SUB: Edit = Edit::Move("Dir/Sub", "Dir/sub");
+
+/// `tree`, each file holding its own path, with the renames `renames` made one after another, and
+/// the file at `edited`, spelled as the renames leave it, moved to `merged_at` and holding
+/// `edited`.
+fn renamed_and_edited(
+    tree: &[&str],
+    renames: &[(&str, &str)],
+    edited: &str,
+    merged_at: &str,
+) -> BTreeMap<String, Vec<u8>> {
+    let files: BTreeMap<String, Vec<u8>> = tree
+        .iter()
+        .map(|path| (path.to_string(), path.as_bytes().to_vec()))
+        .collect();
+    let mut files = renamed(&renamed_all(&files, renames), edited, merged_at);
+    files.insert(merged_at.to_string(), b"edited".to_vec());
+    files
+}
+
+/// Merges `feature` into `main` as [`merge`] does, and checks that the merge commits, that the
+/// working tree holds `expected` with no path spelling a directory with a name of `stale`, and that
+/// the merge revision spells `merged_at` as the working tree does.
+async fn assert_merges_spelled(
+    instance: &Instance,
+    (feature, main): (&[Edit], &[Edit]),
+    expected: &BTreeMap<String, Vec<u8>>,
+    merged_at: &str,
+    stale: &[&str],
+) {
+    let (committed, tree) = merge(instance, feature, main).await;
+    let context = format!("{feature:?} into {main:?}");
+    assert!(committed, "{context}: the merge did not commit");
+    assert!(
+        !tree
+            .keys()
+            .any(|path| path.split('/').any(|name| stale.contains(&name))),
+        "{context}: {tree:?}"
+    );
+    assert_eq!(&tree, expected, "{context}");
+    let names = names_along(instance, current(instance).await, merged_at).await;
+    assert_eq!(names.join("/"), merged_at, "{context}");
+}
+
+/// A branch editing a file merges with one moving the file into `Dir/Sub` or within it, where one
+/// branch renames `Dir` only in case and the other `Dir/Sub`, whichever branch renames which and
+/// whichever is merged into the other: the working tree and the merge revision hold the file below
+/// both new spellings, with the content the edit gave it, and no path spells either old one.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_against_a_move_across_nested_case_only_renames_merges_all() {
+    type Case = ([Edit; 2], [Edit; 2], &'static str, &'static str);
+    const CASES: [Case; 4] = [
+        (
+            [RENAME_SUB, Edit::Write("Top.txt", "edited")],
+            [RENAME_DIR, Edit::Move("Top.txt", "dir/Sub/Top.txt")],
+            "Top.txt",
+            "dir/sub/Top.txt",
+        ),
+        (
+            [RENAME_SUB, Edit::Write("Dir/sub/c.txt", "edited")],
+            [RENAME_DIR, Edit::Move("dir/Sub/c.txt", "dir/Sub/d.txt")],
+            "dir/sub/c.txt",
+            "dir/sub/d.txt",
+        ),
+        (
+            [RENAME_DIR, Edit::Write("Top.txt", "edited")],
+            [RENAME_SUB, Edit::Move("Top.txt", "Dir/sub/Top.txt")],
+            "Top.txt",
+            "dir/sub/Top.txt",
+        ),
+        (
+            [RENAME_DIR, Edit::Write("dir/Sub/c.txt", "edited")],
+            [RENAME_SUB, Edit::Move("Dir/sub/c.txt", "Dir/sub/d.txt")],
+            "dir/sub/c.txt",
+            "dir/sub/d.txt",
+        ),
+    ];
+    for (editing, moving, edited, merged_at) in &CASES {
+        for branches in [(&editing[..], &moving[..]), (&moving[..], &editing[..])] {
+            run(
+                "an_edit_against_a_move_across_nested_case_only_renames_merges_all",
+                &TREE,
+                move |instance| async move {
+                    let renames = [("Dir", "dir"), ("dir/Sub", "dir/sub")];
+                    let expected = renamed_and_edited(&TREE, &renames, edited, merged_at);
+                    let stale = ["Dir", "Sub"];
+                    assert_merges_spelled(&instance, branches, &expected, merged_at, &stale).await;
+                },
+            )
+            .await;
+        }
+    }
+}
+
+/// A branch renaming `Dir` only in case and editing `Dir/Sub/c.txt` merges with one renaming
+/// `Dir/Sub` only in case, whichever is merged into the other: the working tree and the merge
+/// revision hold the file below both new spellings, with the content the edit gave it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_below_case_only_renames_on_both_branches_merges_both() {
+    const EDITING: [Edit; 2] = [RENAME_DIR, Edit::Write("dir/Sub/c.txt", "edited")];
+    const RENAMING: [Edit; 1] = [RENAME_SUB];
+    for branches in [(&EDITING[..], &RENAMING[..]), (&RENAMING[..], &EDITING[..])] {
+        run(
+            "an_edit_below_case_only_renames_on_both_branches_merges_both",
+            &TREE,
+            move |instance| async move {
+                let renames = [("Dir", "dir"), ("dir/Sub", "dir/sub")];
+                let at = "dir/sub/c.txt";
+                let expected = renamed_and_edited(&TREE, &renames, at, at);
+                assert_merges_spelled(&instance, branches, &expected, at, &["Dir", "Sub"]).await;
+            },
+        )
+        .await;
+    }
+}
+
+/// [`TREE`] with a directory `Deep` in `Dir/Sub`.
+const DEEP_TREE: [&str; 5] = [
+    "Dir/a.txt",
+    "Dir/b.txt",
+    "Dir/Sub/c.txt",
+    "Dir/Sub/Deep/e.txt",
+    "Top.txt",
+];
+
+/// Three directories, one inside the next, renamed only in case on alternating branches: one
+/// branch renames `Dir` and `Dir/Sub/Deep`, the other `Dir/Sub`. Either merges into the other,
+/// where one of the two edits a file in `Deep` and the other leaves it or moves it within `Deep`:
+/// the working tree and the merge revision hold the file below the three new spellings, with the
+/// content the edit gave it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_below_case_only_renames_alternating_over_three_levels_merges_all() {
+    const RENAME_DEEP: Edit = Edit::Move("dir/Sub/Deep", "dir/Sub/deep");
+    type Case = (&'static [Edit], &'static [Edit], &'static str);
+    const CASES: [Case; 3] = [
+        (
+            &[RENAME_SUB],
+            &[
+                RENAME_DIR,
+                RENAME_DEEP,
+                Edit::Write("dir/Sub/deep/e.txt", "edited"),
+            ],
+            "dir/sub/deep/e.txt",
+        ),
+        (
+            &[RENAME_SUB, Edit::Write("Dir/sub/Deep/e.txt", "edited")],
+            &[RENAME_DIR, RENAME_DEEP],
+            "dir/sub/deep/e.txt",
+        ),
+        (
+            &[RENAME_SUB, Edit::Write("Dir/sub/Deep/e.txt", "edited")],
+            &[
+                RENAME_DIR,
+                RENAME_DEEP,
+                Edit::Move("dir/Sub/deep/e.txt", "dir/Sub/deep/f.txt"),
+            ],
+            "dir/sub/deep/f.txt",
+        ),
+    ];
+    for (renaming_sub, renaming_dir, merged_at) in &CASES {
+        for branches in [
+            (*renaming_sub, *renaming_dir),
+            (*renaming_dir, *renaming_sub),
+        ] {
+            run(
+                "an_edit_below_case_only_renames_alternating_over_three_levels_merges_all",
+                &DEEP_TREE,
+                move |instance| async move {
+                    let renames = [
+                        ("Dir", "dir"),
+                        ("dir/Sub", "dir/sub"),
+                        ("dir/sub/Deep", "dir/sub/deep"),
+                    ];
+                    let expected =
+                        renamed_and_edited(&DEEP_TREE, &renames, "dir/sub/deep/e.txt", merged_at);
+                    let stale = ["Dir", "Sub", "Deep"];
+                    assert_merges_spelled(&instance, branches, &expected, merged_at, &stale).await;
+                },
+            )
+            .await;
+        }
+    }
+}
+
+/// A branch making each of [`RENAMES_BELOW`] reaches the switch back to main, which leaves the
+/// working tree as main holds it, and the merge into main after an edit there, which leaves it as
+/// the two branches hold it: neither leaves a path below a directory's other spelling.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_below_a_case_only_rename_reaches_the_switch_back_and_the_merge() {
+    for (edits, renames) in &RENAMES_BELOW {
+        run(
+            "a_move_below_a_case_only_rename_reaches_the_switch_back_and_the_merge",
+            &TREE,
+            move |instance| async move {
+                let before = working_tree(&instance.path);
+                create_branch(&instance, "feature").await;
+                commit_edits(&instance, edits, "Feature").await;
+                switch_to(&instance, branch::DEFAULT_DEFAULT_NAME).await;
+                assert_eq!(working_tree(&instance.path), before, "{edits:?}: switched");
+                commit_edits(&instance, &[Edit::Write("Dir/b.txt", "main")], "Main").await;
+                assert!(
+                    merge_branch(&instance, "feature").await,
+                    "{edits:?}: the merge did not commit"
+                );
+                let mut expected = before.clone();
+                expected.insert("Dir/b.txt".to_string(), b"main".to_vec());
+                assert_eq!(
+                    working_tree(&instance.path),
+                    renamed_all(&expected, renames),
+                    "{edits:?}: merged"
+                );
+            },
+        )
+        .await;
+    }
+}
+
+/// A revision making each of [`RENAMES_BELOW`], cherry-picked onto main and reverted there, carries
+/// the working tree to what the revision holds and back: neither leaves a path below a directory's
+/// other spelling.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_below_a_case_only_rename_reaches_a_cherry_pick_and_a_revert() {
+    for (edits, renames) in &RENAMES_BELOW {
+        run(
+            "a_move_below_a_case_only_rename_reaches_a_cherry_pick_and_a_revert",
+            &TREE,
+            move |instance| async move {
+                let before = working_tree(&instance.path);
+                create_branch(&instance, "feature").await;
+                let picked = commit_edits(&instance, edits, "Feature").await;
+                switch_to(&instance, branch::DEFAULT_DEFAULT_NAME).await;
+                cherry_pick_boxed(
+                    instance.repository.clone(),
+                    &instance.write_token,
+                    picked,
+                    CherryPickOptions {
+                        message: "Cherry-pick".to_string(),
+                        no_commit: false,
+                        inherit_metadata: MetadataInherit::default(),
+                    },
+                )
+                .await
+                .expect("Failed to cherry-pick");
+                assert_eq!(
+                    working_tree(&instance.path),
+                    renamed_all(&before, renames),
+                    "{edits:?}: cherry-picked"
+                );
+                revert_boxed(
+                    instance.repository.clone(),
+                    &instance.write_token,
+                    current(&instance).await,
+                    RevertOptions {
+                        message: "Revert".to_string(),
+                        no_commit: false,
+                    },
+                )
+                .await
+                .expect("Failed to revert");
+                assert_eq!(working_tree(&instance.path), before, "{edits:?}: reverted");
+            },
+        )
+        .await;
+    }
+}
+
+/// A branch renaming `Dir/Sub` only in case, alone, with an edit below it, or a branch renaming
+/// `Dir/a.txt` only in case, merges into one renaming `Dir` and the same directory or file to the
+/// same names: the two renames of one node are one, and the working tree and the merge revision
+/// hold the files below both new spellings.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_case_only_rename_below_another_rename_merges() {
+    type Case = (
+        &'static [Edit],
+        &'static [Edit],
+        &'static [(&'static str, &'static str)],
+        &'static str,
+        Option<&'static str>,
+        &'static [&'static str],
+    );
+    const RENAMES: [(&str, &str); 2] = [("Dir", "dir"), ("dir/Sub", "dir/sub")];
+    const CASES: [Case; 3] = [
+        (
+            &[RENAME_SUB],
+            &[RENAME_DIR, Edit::Move("dir/Sub", "dir/sub")],
+            &RENAMES,
+            "dir/sub/c.txt",
+            None,
+            &["Dir", "Sub"],
+        ),
+        (
+            &[RENAME_SUB, Edit::Write("Dir/sub/c.txt", "edited")],
+            &[RENAME_DIR, Edit::Move("dir/Sub", "dir/sub")],
+            &RENAMES,
+            "dir/sub/c.txt",
+            Some("edited"),
+            &["Dir", "Sub"],
+        ),
+        (
+            &[Edit::Move("Dir/a.txt", "Dir/A.txt")],
+            &[RENAME_DIR, Edit::Move("dir/a.txt", "dir/A.txt")],
+            &[("Dir", "dir"), ("dir/a.txt", "dir/A.txt")],
+            "dir/A.txt",
+            None,
+            &["Dir", "a.txt"],
+        ),
+    ];
+    for (feature, main, renames, checked, content, stale) in &CASES {
+        run(
+            "the_same_case_only_rename_below_another_rename_merges",
+            &TREE,
+            move |instance| async move {
+                let tree: BTreeMap<String, Vec<u8>> = TREE
+                    .iter()
+                    .map(|path| (path.to_string(), path.as_bytes().to_vec()))
+                    .collect();
+                let mut expected = renamed_all(&tree, renames);
+                if let Some(content) = content {
+                    expected.insert(checked.to_string(), content.as_bytes().to_vec());
+                }
+                assert_merges_spelled(&instance, (feature, main), &expected, checked, stale).await;
+            },
+        )
+        .await;
     }
 }
 
@@ -651,7 +1032,7 @@ async fn edits_at_both_ends_of_a_move_conflict_at_both() {
                 staged(&instance).await,
                 (
                     vec!["Dir/a.txt".to_string(), "Dir/b.txt".to_string()],
-                    ["Dir/Sub/c.txt", "Dir/a.txt", "Dir/b.txt", "Top.txt"]
+                    ["Dir/Sub/c.txt", "Dir/b.txt", "Top.txt"]
                         .iter()
                         .map(|path| path.to_string())
                         .collect()
@@ -708,4 +1089,215 @@ async fn a_directory_delete_against_a_case_only_rename_keeps_its_files() {
         )
         .await;
     }
+}
+
+/// A move or a delete of a file, and a rename only in case of a directory, below a directory both
+/// branches rename only in case to one name, take the node from where the working tree holds it:
+/// the merged working tree holds the node where the change put it, or no longer, and nothing at its
+/// old path.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_or_delete_below_a_rename_both_branches_make_reaches_the_working_tree() {
+    type Case = (
+        Edit,
+        Edit,
+        &'static [(&'static str, &'static str)],
+        Option<&'static str>,
+    );
+    const CASES: [Case; 3] = [
+        (
+            Edit::Move("Dir/Sub", "Dir/sub"),
+            Edit::Move("Dir/sub/c.txt", "Dir/sub/d.txt"),
+            &[("Dir/Sub", "Dir/sub"), ("Dir/sub/c.txt", "Dir/sub/d.txt")],
+            None,
+        ),
+        (
+            Edit::Move("Dir/Sub", "Dir/sub"),
+            Edit::Delete("Dir/sub/c.txt"),
+            &[("Dir/Sub", "Dir/sub")],
+            Some("Dir/sub/c.txt"),
+        ),
+        (
+            Edit::Move("Dir", "dir"),
+            Edit::Move("dir/Sub", "dir/sub"),
+            &[("Dir", "dir"), ("dir/Sub", "dir/sub")],
+            None,
+        ),
+    ];
+    for (rename, change, renames, deleted) in CASES {
+        run(
+            "a_move_or_delete_below_a_rename_both_branches_make_reaches_the_working_tree",
+            &TREE,
+            move |instance| async move {
+                create_branch(&instance, "feature").await;
+                switch_to(&instance, branch::DEFAULT_DEFAULT_NAME).await;
+                commit_edits(&instance, &[rename], "Main").await;
+                switch_to(&instance, "feature").await;
+                commit_edits(&instance, &[rename, change], "Feature").await;
+                switch_to(&instance, branch::DEFAULT_DEFAULT_NAME).await;
+                let tree: BTreeMap<String, Vec<u8>> = TREE
+                    .iter()
+                    .map(|path| (path.to_string(), path.as_bytes().to_vec()))
+                    .collect();
+                let mut expected = renamed_all(&tree, renames);
+                if let Some(deleted) = deleted {
+                    expected.remove(deleted);
+                }
+                assert!(
+                    merge_branch(&instance, "feature").await,
+                    "{change:?}: the merge did not commit"
+                );
+                assert_eq!(working_tree(&instance.path), expected, "{change:?}");
+            },
+        )
+        .await;
+    }
+}
+
+/// A move of a file the view excludes that also edits it merges with the edit: the merge revision
+/// holds the file where the move put it with the content the moving branch gave it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edited_move_out_of_view_takes_the_edit() {
+    run(
+        "an_edited_move_out_of_view_takes_the_edit",
+        &TREE,
+        |mut instance| async move {
+            create_branch(&instance, "feature").await;
+            let feature =
+                commit_edits(&instance, &moving(&MOVES[0], Some("edited")), "Feature").await;
+            switch_to(&instance, branch::DEFAULT_DEFAULT_NAME).await;
+            commit_edits(&instance, &[Edit::Write("Dir/b.txt", "main")], "Main").await;
+            instance.repository = Arc::new(
+                instance
+                    .repository
+                    .to_filter_context(Arc::new(test_filter(&[], &["/Dir"]))),
+            );
+            assert!(
+                merge_branch(&instance, "feature").await,
+                "the merge committed"
+            );
+
+            assert_eq!(
+                address_at(
+                    &instance,
+                    &revision_state(&instance, current(&instance).await).await,
+                    MOVES[0].to
+                )
+                .await,
+                address_at(
+                    &instance,
+                    &revision_state(&instance, feature).await,
+                    MOVES[0].to
+                )
+                .await
+            );
+        },
+    )
+    .await;
+}
+
+/// The address of the node `state` holds at `path`.
+async fn address_at(instance: &Instance, state: &Arc<State>, path: &str) -> Address {
+    let node = state
+        .find_node_link(instance.repository.clone(), path)
+        .await
+        .expect("Failed to find the node")
+        .node;
+    state
+        .node(instance.repository.clone(), node)
+        .await
+        .expect("Failed to read the node")
+        .address
+}
+
+/// The tree of `onto` with the 2-way diff from `onto` to `revision` staged on it as
+/// `lore revision restore` stages it, or as `lore branch merge into` stages it where `merge` says:
+/// the diff realized on the tree alone.
+async fn staged_onto(instance: &Instance, onto: Hash, revision: Hash, merge: bool) -> Arc<State> {
+    let (onto, revision) = (
+        revision_state(instance, onto).await,
+        revision_state(instance, revision).await,
+    );
+    let mut changes = diff_collect(
+        instance.repository.clone(),
+        onto.clone(),
+        instance.repository.clone(),
+        revision,
+        None,
+        FilterMode::View,
+    )
+    .await
+    .expect("Failed to diff the revisions");
+    change::sort_by_path(&mut changes);
+    let staged = revision_state(instance, onto.revision()).await;
+    sync::realize_changes(
+        instance.repository.clone(),
+        Arc::new(changes),
+        Some(staged.clone()),
+        true,
+        merge.then_some(onto),
+        Arc::new(sync::SyncRealizeStats::default()),
+    )
+    .await
+    .expect("Failed to realize the changes on the tree");
+    staged
+}
+
+/// `lore branch merge into` of a branch that moved and edited a file stages the file where the
+/// move put it with the content the moving branch gave it.
+#[tokio::test(flavor = "multi_thread")]
+async fn merging_an_edited_move_into_a_branch_takes_the_edit() {
+    run(
+        "merging_an_edited_move_into_a_branch_takes_the_edit",
+        &TREE,
+        |instance| async move {
+            let base = current(&instance).await;
+            create_branch(&instance, "feature").await;
+            let feature =
+                commit_edits(&instance, &moving(&MOVES[0], Some("edited")), "Feature").await;
+            assert_eq!(
+                address_at(
+                    &instance,
+                    &staged_onto(&instance, base, feature, true).await,
+                    MOVES[0].to
+                )
+                .await,
+                address_at(
+                    &instance,
+                    &revision_state(&instance, feature).await,
+                    MOVES[0].to
+                )
+                .await
+            );
+        },
+    )
+    .await;
+}
+
+/// `lore revision restore` of a revision from before a move that edited the file stages the file
+/// where the revision held it with the content it held.
+#[tokio::test(flavor = "multi_thread")]
+async fn restoring_across_an_edited_move_takes_the_restored_content() {
+    run(
+        "restoring_across_an_edited_move_takes_the_restored_content",
+        &TREE,
+        |instance| async move {
+            let restored = current(&instance).await;
+            let moved = commit_edits(&instance, &moving(&MOVES[0], Some("edited")), "Move").await;
+            assert_eq!(
+                address_at(
+                    &instance,
+                    &staged_onto(&instance, moved, restored, false).await,
+                    MOVES[0].from
+                )
+                .await,
+                address_at(
+                    &instance,
+                    &revision_state(&instance, restored).await,
+                    MOVES[0].from
+                )
+                .await
+            );
+        },
+    )
+    .await;
 }

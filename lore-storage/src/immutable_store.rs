@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use lore_base::types::HealResult;
 use lore_error_set::prelude::*;
 
 use crate::Address;
@@ -47,6 +48,17 @@ pub enum StoreError {
     Maintenance,
     NoRemote,
     NotSupported,
+}
+
+impl StoreError {
+    /// Whether this is a store's answer for content it does not hold: `AddressNotFound`,
+    /// `PayloadNotFound` or `NotFound`.
+    pub fn is_absent(&self) -> bool {
+        matches!(
+            self,
+            Self::AddressNotFound(_) | Self::PayloadNotFound(_) | Self::NotFound(_)
+        )
+    }
 }
 
 /// Validate that a fragment's sizes appear valid. Use before allocating or
@@ -348,11 +360,16 @@ fn refuse_inconsistency(fragment: &Fragment) -> Result<(), StoreError> {
 /// Checks:
 /// - `size_payload` is a non-zero multiple of `size_of::<FragmentReference>()`
 /// - Payload buffer length matches `size_payload`
-/// - At least two references are present
+/// - At least two references are present, or one that is a hole
 /// - `offset_content` is strictly increasing
 /// - `first_offset + size_content` does not overflow u64
 /// - `last_offset` is strictly inside the content window
 ///   `[first_offset, first_offset + size_content)`
+/// - No hole follows a hole, and in a list holding a hole, which is a list of leaves, every other
+///   reference spans at most [`FRAGMENT_SIZE_THRESHOLD`](crate::FRAGMENT_SIZE_THRESHOLD)
+///
+/// A hole is a reference with the zero hash: it names no fragment, and stands for a range holding
+/// no data, from its offset to the next reference's, which reads as zeros.
 pub fn validate_fragment_list(
     fragment: &Fragment,
     payload: &bytes::Bytes,
@@ -379,24 +396,15 @@ pub fn validate_fragment_list(
     let aligned = payload.clone().to_aligned::<FragmentReference>();
     let references = aligned.as_type_slice::<FragmentReference>();
 
-    if references.len() < 2 {
+    let one_hole = references.len() == 1 && references[0].is_hole();
+    if references.len() < 2 && !one_hole {
         return Err(StoreError::internal(format!(
             "fragmented fragment has fewer than 2 references ({})",
             references.len()
         )));
     }
 
-    for i in 1..references.len() {
-        if references[i].offset_content <= references[i - 1].offset_content {
-            return Err(StoreError::internal(format!(
-                "fragmented fragment offsets are not strictly increasing at index {i}"
-            )));
-        }
-    }
-
     let first = references[0].offset_content;
-    let last = references[references.len() - 1].offset_content;
-
     let content_end = first.checked_add(fragment.size_content).ok_or_else(|| {
         StoreError::internal(format!(
             "fragmented fragment first offset {first} + size_content {} overflows u64",
@@ -404,9 +412,50 @@ pub fn validate_fragment_list(
         ))
     })?;
 
-    if last >= content_end {
+    let fragment_size = crate::FRAGMENT_SIZE_THRESHOLD as u64;
+    let mut holes = references[0].is_hole();
+    let mut first_oversized = None;
+    for i in 1..references.len() {
+        let (previous, reference) = (&references[i - 1], &references[i]);
+        if reference.offset_content <= previous.offset_content {
+            return Err(StoreError::internal(format!(
+                "fragmented fragment offsets are not strictly increasing at index {i}"
+            )));
+        }
+        if reference.is_hole() {
+            if previous.is_hole() {
+                return Err(StoreError::internal(format!(
+                    "fragmented fragment holds a hole following a hole at index {i}"
+                )));
+            }
+            holes = true;
+        }
+        if first_oversized.is_none()
+            && !previous.is_hole()
+            && reference.offset_content - previous.offset_content > fragment_size
+        {
+            first_oversized = Some(i - 1);
+        }
+    }
+
+    let last_index = references.len() - 1;
+    let last = references[last_index];
+    if last.offset_content >= content_end {
         return Err(StoreError::internal(format!(
-            "fragmented fragment last offset {last} is outside content window [{first}, {content_end})"
+            "fragmented fragment last offset {} is outside content window [{first}, {content_end})",
+            last.offset_content
+        )));
+    }
+    if first_oversized.is_none()
+        && !last.is_hole()
+        && content_end - last.offset_content > fragment_size
+    {
+        first_oversized = Some(last_index);
+    }
+
+    if holes && let Some(i) = first_oversized {
+        return Err(StoreError::internal(format!(
+            "fragmented fragment with holes has a reference at index {i} larger than a fragment"
         )));
     }
 
@@ -477,6 +526,9 @@ pub fn claim_for_task(
     }
 }
 
+/// What a store keeps for a correlation id while the hold lives, given up as it drops.
+pub type CorrelationHold = Box<dyn Any + Send + Sync>;
+
 #[async_trait]
 pub trait ImmutableStore: Any + Send + Sync {
     /// Check if this store is backed by local disk
@@ -520,6 +572,13 @@ pub trait ImmutableStore: Any + Send + Sync {
     /// for a store with nothing on disk. A wrapper delegates it as it delegates
     /// [`Self::hold_for_command`].
     fn store_lock(&self) -> Option<Arc<crate::local::store_lock::StoreLock>> {
+        None
+    }
+
+    /// Keeps what this store holds for calls under `correlation_id`, such as its sessions with a
+    /// remote, until this and every other hold on `correlation_id` have dropped. `None` for a store
+    /// that keeps nothing per correlation id; a wrapper delegates it.
+    fn hold_correlation(&self, _correlation_id: &str) -> Option<CorrelationHold> {
         None
     }
 
@@ -758,12 +817,16 @@ pub trait ImmutableStore: Any + Send + Sync {
         let _ = terminate;
     }
 
+    /// The GC limits and load totals of a store with background GC, `None` for one without.
+    fn gc_counters(&self) -> Option<Arc<crate::maintenance::GcCounters>> {
+        None
+    }
+
     /// Get maximum supported query batch size, if any
     fn max_query_batch(&self) -> Option<usize>;
 
-    /// Flush any pending writes to durable storage.
-    /// When `sync_data` is true, data is synced to the storage media (fsync).
-    async fn flush(self: Arc<Self>, sync_data: bool) -> Result<(), StoreError>;
+    /// Flush any pending writes to durable storage, as `options` asks.
+    async fn flush(self: Arc<Self>, options: crate::FlushOptions) -> Result<(), StoreError>;
 
     /// Get number of fragments in store, if available
     async fn fragment_count(self: Arc<Self>) -> Option<usize> {
@@ -772,6 +835,22 @@ pub trait ImmutableStore: Any + Send + Sync {
 
     /// Verify the integrity of the store. If `heal` is true, attempt to repair any issues found.
     async fn verify(self: Arc<Self>, heal: bool) -> Result<(), StoreError>;
+
+    /// Checks this store's copy of `address` in `partition` and repairs it where it is corrupt, as
+    /// a reader that found the payload corrupt on receipt asks. A store with no copy it can repair
+    /// answers [`HealResult::NotAttempted`]; a wrapper delegates it.
+    async fn heal(
+        self: Arc<Self>,
+        _partition: Partition,
+        _address: Address,
+    ) -> Result<HealResult, StoreError> {
+        Ok(HealResult::NotAttempted)
+    }
+
+    /// Waits until a write of `address` in `partition` to a local tier, which a read here started,
+    /// has ended, so a check of the local copy that follows sees what the write left. A store that
+    /// writes nothing from its reads has nothing to wait for; a wrapper delegates it.
+    async fn settle(self: Arc<Self>, _partition: Partition, _address: Address) {}
 
     /// Copy a fragment from one `(partition, address)` tuple to another within the same store.
     ///

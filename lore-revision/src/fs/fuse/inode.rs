@@ -11,6 +11,7 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use dashmap::mapref::one::Ref;
 use dashmap::mapref::one::RefMut;
+use lore_base::text::fold_eq;
 use lore_base::types::Address;
 use lore_fuse::abi::ForgetOne;
 use smallvec::SmallVec;
@@ -18,7 +19,6 @@ use smallvec::SmallVec;
 use crate::fs::fuse::inode_number::Identity;
 use crate::fs::fuse::inode_number::IdentityKind;
 use crate::fs::fuse::inode_number::derive_inode_number;
-use crate::fs::fuse::inode_number::fold_eq;
 use crate::fs::fuse::inode_number::identity_matches;
 use crate::fs::fuse::inode_number::rehash;
 use crate::node::NodeID;
@@ -39,6 +39,9 @@ pub enum InodeKind {
         /// Whether the directory was added under `write/`, whose host directory answers its
         /// mode and times.
         local: bool,
+        /// Whether the directory is a link, whose content the mount does not serve and which
+        /// no write changes.
+        link: bool,
     },
     File {
         address: Address,
@@ -60,6 +63,7 @@ impl InodeKind {
             view_line: 0,
             node,
             local: false,
+            link: false,
         }
     }
 
@@ -80,6 +84,11 @@ impl InodeKind {
     /// Whether this is a file whose bytes live under `write/`.
     pub fn is_local_file(&self) -> bool {
         matches!(self, Self::File { local: true, .. })
+    }
+
+    /// Whether this is a link.
+    pub fn is_link(&self) -> bool {
+        matches!(self, Self::Dir { link: true, .. })
     }
 }
 
@@ -614,8 +623,7 @@ impl InodeTable {
     fn candidates(&self, parent: u64, name_hash: u64) -> SmallVec<[u64; 4]> {
         self.children
             .get(&(parent, name_hash))
-            .map(|inos| inos.iter().copied().collect())
-            .unwrap_or_default()
+            .map_or_default(|inos| inos.iter().copied().collect())
     }
 
     fn index_child(&self, parent: u64, name_hash: u64, ino: u64) {

@@ -87,11 +87,63 @@ pub struct FilterLine {
     /// Fewest path components this line can match, so a prefix shorter than that
     /// is skipped without running the glob. A whole-path query folds over every
     /// ancestor, and most lines cannot possibly match the shallow ones.
-    min_depth: u32,
-    /// The glob is compared to the path as text rather than evaluated as a
-    /// glob. Most lines in a real filter are literal paths or names, and this
-    /// runs for every line on every path a walk visits.
-    literal: bool,
+    min_depth: u16,
+    /// How the glob is decided against the text it is matched to.
+    compare: Compare,
+    /// Most path components a directory this line names can have, or `0` where
+    /// the line names none: an exclusion, the subtree companion of an inclusion,
+    /// which stands for its rule's verdict inherited below it, or any line of an
+    /// ignore file.
+    names_depth: u16,
+}
+
+/// `depth` as a [`FilterLine`] depth bound, saturated at `u16::MAX`, deeper than any path: two
+/// bounds of 16 bits keep a line at 32 bytes, which a step reads for every line it takes.
+fn line_depth(depth: u32) -> u16 {
+    u16::try_from(depth).unwrap_or(u16::MAX)
+}
+
+/// How a [`FilterLine`]'s glob is decided against the text it is matched to, settled when the
+/// line is compiled. Most lines in a real filter are literal paths or names, or names ending in
+/// literal text such as `*.tmp`, and a step decides every line it takes.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+enum Compare {
+    /// Evaluated as a glob.
+    #[default]
+    Glob,
+    /// Compared as text.
+    Text,
+    /// A name rule of `*` and literal text, compared as the ending of the name.
+    Suffix,
+}
+
+impl Compare {
+    /// How the glob `glob` is decided, where `literal` says it is plain text ([`is_literal`]).
+    fn of(glob: &str, filename: bool, literal: bool) -> Self {
+        if literal {
+            Self::Text
+        } else if filename
+            && glob
+                .strip_prefix('*')
+                .is_some_and(|rest| is_literal(rest) && !rest.contains(['{', '}']))
+        {
+            Self::Suffix
+        } else {
+            Self::Glob
+        }
+    }
+}
+
+impl FilterLine {
+    /// Whether the glob matches `path`, or `name` for a name rule, as [`Compare`] decides it.
+    fn hits(&self, path: &str, name: &str) -> bool {
+        let text = if self.filename { name } else { path };
+        match self.compare {
+            Compare::Text => self.glob == text,
+            Compare::Suffix => text.ends_with(&self.glob[1..]),
+            Compare::Glob => glob_match::glob_match(self.glob.as_str(), text),
+        }
+    }
 }
 
 impl FilterInstance {
@@ -104,7 +156,7 @@ impl FilterInstance {
                     && a.negated == b.negated
                     && a.directory == b.directory
                     && a.filename == b.filename
-                    && a.literal == b.literal
+                    && a.compare == b.compare
             })
     }
 }
@@ -115,16 +167,21 @@ pub enum FilterError {
 }
 
 /// Where a walk has got to: the verdict for the directory it is standing in,
-/// and the line that produced it.
+/// the line that produced it, and whether a line names it.
 ///
 /// `decided_at` names the line that produced the verdict, and floors two
 /// searches: [`FilterInstance::step`] skips the lines before it, so a rule that
 /// already lost at an excluded ancestor cannot win below it, and the
 /// re-inclusion index's `RuleIndex::below` ignores re-inclusions before it, so
-/// a rule that lost cannot force a descent either.
+/// a rule that lost cannot force a descent either. For an excluded directory a
+/// re-inclusion can reach below, it is the last line that excludes the
+/// directory, since every re-inclusion authored before that line lost there.
+///
+/// `named` describes the directory the state was last stepped at: see [`named`](Self::named).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FilterState {
     excluded: bool,
+    named: bool,
     decided_at: u32,
 }
 
@@ -132,12 +189,23 @@ impl FilterState {
     /// The state at the repository root, where nothing is excluded yet.
     pub const ROOT: Self = Self {
         excluded: false,
+        named: false,
         decided_at: 0,
     };
 
     /// Whether the path this state describes is excluded.
     pub fn excluded(&self) -> bool {
         self.excluded
+    }
+
+    /// Whether the directory this state was last stepped at is included and an inclusion line
+    /// naming it is the last line to decide it, whether or not it was included before that line.
+    /// A directory included by its ancestor's verdict, or by an inclusion's subtree companion, is
+    /// not named. A walk step that leaves the state unstepped, as one whose mode leaves out its
+    /// filter does, passes the parent's value on.
+    #[inline]
+    pub fn named(&self) -> bool {
+        self.named
     }
 
     /// A state carrying only whether the path is excluded, decided at no
@@ -152,6 +220,7 @@ impl FilterState {
     pub fn excluded_from(excluded: bool) -> Self {
         Self {
             excluded,
+            named: false,
             decided_at: 0,
         }
     }
@@ -163,6 +232,7 @@ impl FilterState {
     pub fn decided(excluded: bool, decided_at: u32) -> Self {
         Self {
             excluded,
+            named: false,
             decided_at,
         }
     }
@@ -276,23 +346,25 @@ pub fn load(
     ignore_path: impl AsRef<Path>,
     view_path: impl AsRef<Path>,
 ) -> Result<Filter, FilterError> {
-    with_ignore(load_filter(ignore_path)?, view_path)
+    from_instances(load_filter(ignore_path)?, load_filter(view_path)?)
 }
 
-/// The filter of `ignore`, the rules of a repository's ignore file, with the exclusions every
-/// repository holds and the view at `view_path`.
-fn with_ignore(
+/// The repository filter for rules already read: `ignore` gains the exclusions every repository
+/// carries (its own directory, merge artifacts, temporary files), and `view` is taken as given.
+///
+/// For a caller whose filter files are not on disk to [`load`], such as an instance whose working
+/// tree is a virtual filesystem.
+pub fn from_instances(
     mut ignore: FilterInstance,
-    view_path: impl AsRef<Path>,
+    view: FilterInstance,
 ) -> Result<Filter, FilterError> {
+    ignore.name_nothing();
     ignore.add_exclusion(DOT_URC)?;
     ignore.add_exclusion(DOT_LORE)?;
     for suffix in MERGE_ARTIFACT_SUFFIXES {
         ignore.add_exclusion(&format!("*{suffix}"))?;
     }
     ignore.add_exclusion(&format!("*{TEMP_FILE_EXTENSION}"))?;
-
-    let view = load_filter(view_path)?;
 
     Ok(Filter {
         ignore,
@@ -327,7 +399,10 @@ pub fn load_with_instance_ignore_from(
         Some((bytes, path)) => parse_filter(bytes, path)?,
         None => FilterInstance::default(),
     };
-    with_instance_ignore(with_ignore(rules, view_path)?, instance_ignore_path)
+    with_instance_ignore(
+        from_instances(rules, load_filter(view_path)?)?,
+        instance_ignore_path,
+    )
 }
 
 /// `filter` with the exclusions in the instance's own ignore file at `instance_ignore_path` after
@@ -974,6 +1049,11 @@ impl RuleIndex {
         self.unprefixed.widen(RuleReach::rule(line, depth));
     }
 
+    /// One past the last line of a rule the index records; zero for none.
+    fn lines(&self) -> u32 {
+        self.root.below.lines.max(self.unprefixed.lines)
+    }
+
     /// Whether a rule on line `floor` or later can match a path strictly below
     /// `path`, which stands `depth` components deep.
     ///
@@ -1135,10 +1215,12 @@ impl LinePrefixes {
         }
     }
 
-    /// Calls `each` in ascending order with every line numbered `floor` or later
-    /// that is listed at the root or at a node `path`'s leading components lead
-    /// to, which includes every line that can match `path`.
-    fn visit(&self, path: &str, floor: usize, mut each: impl FnMut(usize)) {
+    /// The lines numbered `floor` or later listed at the root and at each node
+    /// `path`'s leading components lead to, one ascending list per node that
+    /// holds any, and how many lists there are. Always inlined, since
+    /// [`visit`](Self::visit) runs for every step of an indexed filter.
+    #[inline(always)]
+    fn lists(&self, path: &str, floor: usize) -> ([&[u32]; MAX_PREFIX_COMPONENTS + 1], usize) {
         let mut node = &self.nodes[0];
         let mut lists: [&[u32]; MAX_PREFIX_COMPONENTS + 1] = [&[]; MAX_PREFIX_COMPONENTS + 1];
         let mut count = 0;
@@ -1157,7 +1239,14 @@ impl LinePrefixes {
             };
             node = &self.nodes[node.children[index].child as usize];
         }
+        (lists, count)
+    }
 
+    /// Calls `each` in ascending order with every line numbered `floor` or later
+    /// that is listed at the root or at a node `path`'s leading components lead
+    /// to, which includes every line that can match `path`.
+    fn visit(&self, path: &str, floor: usize, mut each: impl FnMut(usize)) {
+        let (mut lists, count) = self.lists(path, floor);
         let lists = &mut lists[..count];
         loop {
             let mut next: Option<(usize, u32)> = None;
@@ -1174,6 +1263,31 @@ impl LinePrefixes {
             lists[index] = &lists[index][1..];
             each(line as usize);
         }
+    }
+
+    /// The last of the lines [`visit`](Self::visit) would visit that `accepts`
+    /// takes, found by searching each list from its end.
+    fn last(
+        &self,
+        path: &str,
+        floor: usize,
+        mut accepts: impl FnMut(usize) -> bool,
+    ) -> Option<usize> {
+        let (lists, count) = self.lists(path, floor);
+        let mut last = None;
+        for list in &lists[..count] {
+            for &line in list.iter().rev() {
+                let line = line as usize;
+                if last.is_some_and(|found| line <= found) {
+                    break;
+                }
+                if accepts(line) {
+                    last = Some(line);
+                    break;
+                }
+            }
+        }
+        last
     }
 }
 
@@ -1314,6 +1428,14 @@ impl FilterInstance {
         self.lines.is_empty()
     }
 
+    /// Makes no line name a directory ([`FilterState::named`]), so a step matches no inclusion
+    /// against a directory it includes: only the view's directory rule reads the naming.
+    fn name_nothing(&mut self) {
+        for line in &mut self.lines {
+            line.names_depth = 0;
+        }
+    }
+
     /// Appends `line`, and lists it by its leading literal components once the
     /// filter holds [`INDEXED_LINES`] lines, listing all of them on reaching it.
     fn push_line(&mut self, line: FilterLine) {
@@ -1356,12 +1478,13 @@ impl FilterInstance {
                 .insert(&glob, expand, self.lines.len(), depth_max);
         }
         self.push_line(FilterLine {
+            compare: Compare::of(&glob, filename, literal),
             glob,
             negated: false,
             directory: ending_separator,
             filename,
-            min_depth,
-            literal,
+            min_depth: line_depth(min_depth),
+            names_depth: 0,
         });
         Ok(())
     }
@@ -1428,12 +1551,13 @@ impl FilterInstance {
                 .insert(&glob, expand, self.lines.len(), depth_max);
         }
         self.push_line(FilterLine {
-            min_depth,
-            literal,
+            min_depth: line_depth(min_depth),
+            compare: Compare::of(&glob, filename, literal),
             glob,
             negated: true,
             directory: ending_separator,
             filename,
+            names_depth: line_depth(depth_max),
         });
 
         if let Some(subtree) = subtree {
@@ -1441,12 +1565,13 @@ impl FilterInstance {
             self.reinclude
                 .insert(&subtree, expand, self.lines.len(), depth_max);
             self.push_line(FilterLine {
-                min_depth,
-                literal: false,
+                min_depth: line_depth(min_depth),
+                compare: Compare::Glob,
                 glob: subtree,
                 negated: true,
                 directory: false,
                 filename: false,
+                names_depth: 0,
             });
         }
 
@@ -1472,14 +1597,15 @@ impl FilterInstance {
         self.push_line(FilterLine {
             glob: glob.to_owned(),
             negated: true,
-            min_depth: depth,
-            literal: true,
+            min_depth: line_depth(depth),
+            compare: Compare::Text,
+            names_depth: line_depth(depth),
             ..FilterLine::default()
         });
         self.push_line(FilterLine {
             glob: escaped_subtree(glob),
             negated: true,
-            min_depth: depth + 1,
+            min_depth: line_depth(depth + 1),
             ..FilterLine::default()
         });
     }
@@ -1494,18 +1620,29 @@ impl FilterInstance {
     ///   [`LinePrefixes`] lists for `match_path` are visited: a line whose
     ///   leading literal components differ from the path's cannot match it.
     /// - An inclusion can only clear `excluded` and an exclusion can only set
-    ///   it, so a line whose effect equals the current state could at most match
-    ///   to no effect, and is skipped before the glob.
+    ///   it, so a line whose effect equals the current state could change only
+    ///   the floor, and is skipped before the glob.
     /// - A name rule is skipped when the parent is excluded: it cannot reach into
     ///   a directory a walk would have pruned.
     /// - A line needing more components than `depth` cannot match and is skipped.
-    /// - When the parent is excluded, lines before the one that excluded it are
-    ///   skipped. A tree walk stops at an excluded directory, so a rule that
-    ///   already lost there must not win below it -- that is what keeps
+    /// - When the parent is excluded, lines before the parent's floor are
+    ///   skipped: for a directory a re-inclusion can reach below, the last line
+    ///   that excluded it. A tree walk stops at an excluded directory, so a rule
+    ///   that already lost there must not win below it -- that is what keeps
     ///   `!/src` + `/src/*` from re-including `src/drop/y` through the `src/**`
     ///   companion. When the parent is *included* nothing was pruned, so every
     ///   line applies and an unanchored `*.tmp` still bites inside a re-included
     ///   subtree.
+    ///
+    /// For an excluded directory that a re-inclusion can reach below and an
+    /// exclusion follows the floor, [`last_exclusion`](Self::last_exclusion)
+    /// then finds the last of the exclusions skipped as changing only the floor,
+    /// which floors the steps below it.
+    ///
+    /// For a directory, an inclusion that names it is also matched while it is
+    /// included, so the state says whether it is [`named`](FilterState::named).
+    /// Only a line within its [`names_depth`](FilterLine::names_depth) is
+    /// matched, so a filter without inclusions pays nothing for it.
     fn step(
         &self,
         parent: FilterState,
@@ -1525,9 +1662,15 @@ impl FilterInstance {
             self.lines.len()
         );
         let pruned = parent.excluded;
-        let mut state = parent;
+        let mut state = FilterState {
+            named: false,
+            ..parent
+        };
+        let names = |line: &FilterLine| {
+            line.negated && is_directory && u32::from(line.names_depth) >= depth
+        };
         let mut apply = |number: usize, line: &FilterLine| {
-            if line.negated != state.excluded {
+            if line.negated != state.excluded && !names(line) {
                 return;
             }
             if line.directory && !is_directory {
@@ -1536,23 +1679,18 @@ impl FilterInstance {
             if pruned && line.negated && line.filename {
                 return;
             }
-            if line.min_depth > depth {
+            if u32::from(line.min_depth) > depth {
                 return;
             }
-            let to_match = if line.filename {
-                match_name
-            } else {
-                match_path
-            };
-            let hit = if line.literal {
-                line.glob == to_match
-            } else {
-                glob_match::glob_match(line.glob.as_str(), to_match)
-            };
-            if hit {
+            if line.hits(match_path, match_name) {
                 state = FilterState {
                     excluded: !line.negated,
-                    decided_at: number as u32,
+                    named: names(line),
+                    decided_at: if line.negated == state.excluded {
+                        number as u32
+                    } else {
+                        state.decided_at
+                    },
                 };
             }
         };
@@ -1566,7 +1704,42 @@ impl FilterInstance {
                 apply(number, &self.lines[number]);
             }),
         }
+        if is_directory
+            && state.excluded
+            && self.exclude.lines() > state.decided_at.saturating_add(1)
+        {
+            state.decided_at = self.last_exclusion(match_path, match_name, depth, state.decided_at);
+        }
         state
+    }
+
+    /// The last exclusion after line `from` that matches the directory
+    /// `match_path`, where a re-inclusion can reach below it, or `from` where
+    /// none does or none can.
+    ///
+    /// Meaningful only for a directory; it floors the steps below it. Kept cold
+    /// and out of [`step`](Self::step), which runs for every node a walk
+    /// visits and reaches this only for an excluded directory.
+    #[cold]
+    #[inline(never)]
+    fn last_exclusion(&self, match_path: &str, match_name: &str, depth: u32, from: u32) -> u32 {
+        if !self.reinclude.below(match_path, from, depth) {
+            return from;
+        }
+        let start = from as usize + 1;
+        let excludes = |line: &FilterLine| {
+            !line.negated && u32::from(line.min_depth) <= depth && line.hits(match_path, match_name)
+        };
+        match &self.prefixes {
+            None => self
+                .lines
+                .get(start..)
+                .and_then(|lines| lines.iter().rposition(excludes))
+                .map_or(from, |offset| (start + offset) as u32),
+            Some(prefixes) => prefixes
+                .last(match_path, start, |number| excludes(&self.lines[number]))
+                .map_or(from, |number| number as u32),
+        }
     }
 
     /// The exclusion verdict for `path`, given its parent's.
@@ -1770,6 +1943,11 @@ bitflags! {
         /// tracked, ignored directory is ignored. A walk clears the bit for each node the tree
         /// does not hold; see [`FilterMode::at`].
         const KeepTracked = 0b1000;
+        /// The view slot does not exclude a node that holds a staged change at or below it. The
+        /// slot is still stepped, and the bit is cleared for each node the tree does not hold, as
+        /// [`KeepTracked`](Self::KeepTracked) is, and for each node that holds nothing staged; see
+        /// [`FilterMode::at_staged`].
+        const KeepStagedInView = 0b10000;
     }
 }
 bitflagsops!(FilterMode, u16);
@@ -1782,23 +1960,55 @@ impl FilterMode {
     /// changed in it has nothing to report, and an ignored one is pruned without being entered.
     pub const TRACKED: Self = Self::Full.union(Self::KeepTracked);
 
+    /// The mode for the changes a stage holds: [`TRACKED`](Self::TRACKED), and the view, which
+    /// excludes nothing staged.
+    ///
+    /// A comparison of trees in this mode also asks [`at_staged`](Self::at_staged) whether
+    /// something is staged at or below a node, so a subtree past the view with nothing staged in
+    /// it is pruned without being entered.
+    pub const CHANGES: Self = Self::TRACKED.union(Self::KeepStagedInView);
+
+    /// The bits that keep a slot from excluding a tracked node.
+    const KEEPS: Self = Self::KeepTracked.union(Self::KeepStagedInView);
+
     /// The mode a walk through `self` asks about a node in, `tracked` saying whether the node is
     /// one the tree tracks.
     pub fn at(self, tracked: bool) -> Self {
         if tracked {
             self
         } else {
-            self.difference(Self::KeepTracked)
+            self.difference(Self::KEEPS)
         }
+    }
+
+    /// The mode a walk through `self` asks about a node in, `staged` saying whether the node holds
+    /// a staged change at or below it.
+    pub fn at_staged(self, staged: bool) -> Self {
+        if staged {
+            self
+        } else {
+            self.difference(Self::KeepStagedInView)
+        }
+    }
+
+    /// The slots a walk through `self` asks about a deletion that a path missing from the working
+    /// tree drives: the view alone where the walk is forced, since a forced walk passes the ignore
+    /// file and the working tree lacks what the view excludes without its having been deleted, and
+    /// `self` otherwise.
+    pub fn absence(self, force: bool) -> Self {
+        if force { Self::View } else { self }
     }
 
     /// The slots that exclude.
     fn excluding(self) -> Self {
+        let mut slots = self;
         if self.contains(Self::KeepTracked) {
-            self.difference(Self::Ignore)
-        } else {
-            self
+            slots.remove(Self::Ignore);
         }
+        if self.contains(Self::KeepStagedInView) {
+            slots.remove(Self::View);
+        }
+        slots
     }
 }
 
@@ -1807,6 +2017,7 @@ impl FilterMode {
 /// Only a directory can tell the two apart: it can be excluded by its own rule
 /// and still hold content a later rule re-includes, and then the answer depends
 /// on which question was asked.
+#[lore_macro::test_pub]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scope {
     /// The path itself. Says nothing about what sits below it.
@@ -1829,6 +2040,32 @@ impl FilterStates {
         view: FilterState::ROOT,
     };
 
+    /// These states with each slot outside `mode` at its root state.
+    fn only(self, mode: FilterMode) -> Self {
+        Self {
+            ignore: if mode.contains(FilterMode::Ignore) {
+                self.ignore
+            } else {
+                FilterState::ROOT
+            },
+            view: if mode.contains(FilterMode::View) {
+                self.view
+            } else {
+                FilterState::ROOT
+            },
+        }
+    }
+
+    /// Whether an operation writing the working tree creates the directory these states describe,
+    /// whatever it holds: the view includes it, and a line names it ([`FilterState::named`]) or
+    /// the repository holds it `empty`. Any other directory stands on disk only as the parent of
+    /// what the operation creates below it: a kept file, a link or layer mount, or a directory
+    /// this check creates. Reads the view slot of states stepped at the directory itself.
+    #[inline]
+    pub fn creates_directory(self, empty: bool) -> bool {
+        !self.view.excluded && (empty || self.view.named)
+    }
+
     /// Whether the path these states describe is itself excluded, for the slots in `mode`.
     pub fn excluded(self, mode: FilterMode) -> bool {
         self.reason(mode).is_some()
@@ -1847,6 +2084,13 @@ impl FilterStates {
 }
 
 impl Filter {
+    /// A filter whose view excludes every path.
+    pub fn excluding_all_from_view() -> Result<Self, FilterError> {
+        let mut filter = Self::default();
+        filter.view.add_exclusion("**")?;
+        Ok(filter)
+    }
+
     /// The same ignore rules with `view` in the view slot, and a fresh
     /// [`AncestorMemo`].
     ///
@@ -1929,31 +2173,73 @@ impl Filter {
             && self.child_emit_excludes(parent, path, true, mode).1
     }
 
-    /// The mode a walk asks about `path` in, from `parent`: `mode` where `tracked` answers that the
-    /// tree tracks the node there, and `mode` without [`FilterMode::KeepTracked`] otherwise.
-    /// `tracked` is awaited only where `mode` carries the bit and the ignore rules would leave the
-    /// node out, so a walk reads nothing more for a node they keep.
-    pub async fn tracked_mode<E, F>(
+    /// One step of a walk in `mode` at the node's tracking ([`FilterMode::at`]): the states `path`'s
+    /// children inherit, and why the walk drops `path`. `tracked` answers whether the tree tracks
+    /// the node, and is awaited only where [`child_untracked_reason`](Self::child_untracked_reason)
+    /// asks.
+    ///
+    /// The slots are stepped once: the keep bits decide which slots exclude, not the states.
+    ///
+    /// Not an `async fn`, which would hold a second copy of its arguments.
+    #[allow(clippy::manual_async_fn)]
+    pub fn child_tracked_reason<E, F>(
         &self,
         parent: FilterStates,
         path: &impl FilterPath,
         is_directory: bool,
         mode: FilterMode,
         tracked: impl FnOnce() -> F,
-    ) -> Result<FilterMode, E>
+    ) -> impl std::future::Future<Output = Result<(FilterStates, Option<FilterReason>), E>>
     where
         F: std::future::Future<Output = Result<bool, E>>,
     {
-        let untracked = mode.at(false);
-        if !mode.contains(FilterMode::KeepTracked)
-            || !self
-                .child_excludes_tree(parent, path, is_directory, untracked)
-                .1
-        {
-            return Ok(untracked);
+        let (states, reason, asks) = self.child_untracked_reason(parent, path, is_directory, mode);
+        async move {
+            // Boxed: a cold path, which unboxed would sit in every walk future that asks.
+            if !asks || !Box::pin(tracked()).await? {
+                return Ok((states, reason));
+            }
+            Ok((
+                states,
+                self.tracked_reason(states, path, is_directory, mode),
+            ))
         }
-        // Boxed: a cold path, which unboxed would sit in every walk future that asks.
-        Ok(mode.at(Box::pin(tracked()).await?))
+    }
+
+    /// The first half of [`child_tracked_reason`](Self::child_tracked_reason), for a walk that
+    /// awaits the tree's answer inline: the states `path`'s children inherit, why the walk drops
+    /// `path` where the tree does not track it, and whether the tree's answer can keep it, which
+    /// is where the filter drops it and `mode` carries the keep bit that passes the slot dropping
+    /// it. Where the tree tracks the node, [`tracked_reason`](Self::tracked_reason) answers.
+    pub(crate) fn child_untracked_reason(
+        &self,
+        parent: FilterStates,
+        path: &impl FilterPath,
+        is_directory: bool,
+        mode: FilterMode,
+    ) -> (FilterStates, Option<FilterReason>, bool) {
+        let (states, reason) =
+            self.child_exclude_reason(parent, path, is_directory, mode.at(false), Scope::Tree);
+        let keep = match reason {
+            None => return (states, None, false),
+            Some(FilterReason::Ignore) => FilterMode::KeepTracked,
+            Some(FilterReason::View) => FilterMode::KeepStagedInView,
+        };
+        (states, reason, mode.contains(keep))
+    }
+
+    /// Why a walk in `mode` drops `path`, which the tree tracks, from the `states` its step
+    /// ([`child_untracked_reason`](Self::child_untracked_reason)) handed down.
+    pub(crate) fn tracked_reason(
+        &self,
+        states: FilterStates,
+        path: &impl FilterPath,
+        is_directory: bool,
+        mode: FilterMode,
+    ) -> Option<FilterReason> {
+        let lowercase = path.as_lowercase_str();
+        let depth = component_count(lowercase);
+        self.reason_at(states, lowercase, depth, is_directory, mode, Scope::Tree)
     }
 
     /// [`emit_excludes_any_kind`](Self::emit_excludes_any_kind) without the event.
@@ -1999,6 +2285,7 @@ impl Filter {
     /// is one index lookup rather than a second pass over the lines.
     ///
     /// A file has no subtree, so it is answered the same at either scope.
+    #[lore_macro::test_pub]
     pub(crate) fn child_exclude_reason(
         &self,
         parent: FilterStates,
@@ -2024,13 +2311,27 @@ impl Filter {
                 .view
                 .step(parent.view, lowercase, name, is_directory, depth);
         }
+        let reason = self.reason_at(states, lowercase, depth, is_directory, mode, scope);
+        (states, reason)
+    }
+
+    /// Why `states` exclude the lowercase `path`, `depth` components deep, at `scope` in `mode`:
+    /// `None` to keep it and, for a directory at [`Scope::Tree`], to descend into it.
+    fn reason_at(
+        &self,
+        states: FilterStates,
+        path: &str,
+        depth: u32,
+        is_directory: bool,
+        mode: FilterMode,
+        scope: Scope,
+    ) -> Option<FilterReason> {
         let mode = mode.excluding();
-        let reason = if scope == Scope::Tree && is_directory {
-            self.descend_reason(states, lowercase, depth, mode)
+        if scope == Scope::Tree && is_directory {
+            self.descend_reason(states, path, depth, mode)
         } else {
             states.reason(mode)
-        };
-        (states, reason)
+        }
     }
 
     /// [`excludes_tree`](Self::excludes_tree) for a walk that threads state:
@@ -2062,46 +2363,29 @@ impl Filter {
         (states, Self::emit(path, reason))
     }
 
-    /// [`child_excludes_tree`](Self::child_excludes_tree) unless `force` puts
-    /// the walk past the filter.
-    ///
-    /// See [`child_emit_excludes_unless_forced`](Self::child_emit_excludes_unless_forced)
-    /// for why a forced walk is answered without asking the filter.
-    pub fn child_excludes_tree_unless_forced(
+    /// [`child_emit_excludes`](Self::child_emit_excludes) for the slots in `mode`, unless `force`
+    /// puts the walk past the filter. A forced step leaves out nothing and emits nothing, and the
+    /// states it hands back step only the slots in `stepped`, at a directory, with every other
+    /// slot at its root state. A file, which has nothing below it, takes [`FilterStates::ROOT`].
+    /// With `stepped` empty, a forced step reads none of the lines.
+    pub fn child_emit_unless_forced(
         &self,
         force: bool,
+        stepped: FilterMode,
         parent: FilterStates,
         path: &impl FilterPath,
         is_directory: bool,
         mode: FilterMode,
     ) -> (FilterStates, bool) {
-        if force {
+        if !force {
+            return self.child_emit_excludes(parent, path, is_directory, mode);
+        }
+        if !is_directory {
             return (FilterStates::ROOT, false);
         }
-        self.child_excludes_tree(parent, path, is_directory, mode)
-    }
-
-    /// [`child_emit_excludes`](Self::child_emit_excludes) unless `force` puts
-    /// the walk past the filter.
-    ///
-    /// A forced operation drops nothing, so it must report nothing as excluded
-    /// either, and it needs no verdict at all: `force` is one flag on the
-    /// operation -- `ExecutionContext::globals` or `DirtyWalkOptions` -- so
-    /// every step below is forced too and none of them reads one. The walk is
-    /// answered without touching the lines, and the state handed back is
-    /// [`FilterStates::ROOT`] rather than a verdict nothing will consult.
-    pub fn child_emit_excludes_unless_forced(
-        &self,
-        force: bool,
-        parent: FilterStates,
-        path: &impl FilterPath,
-        is_directory: bool,
-        mode: FilterMode,
-    ) -> (FilterStates, bool) {
-        if force {
-            return (FilterStates::ROOT, false);
-        }
-        self.child_emit_excludes(parent, path, is_directory, mode)
+        let (states, _) =
+            self.child_exclude_reason(parent.only(stepped), path, true, stepped, Scope::Node);
+        (states, false)
     }
 
     /// The folded verdicts at the directory `path`, seeding a walk that starts
@@ -2157,7 +2441,9 @@ impl Filter {
     /// reported ahead of one that only excludes at the leaf.
     ///
     /// [`FilterMode::KeepTracked`] keeps the ancestors past the ignore slot as
-    /// well as the leaf, since every ancestor of a tracked path is tracked.
+    /// well as the leaf, since every ancestor of a tracked path is tracked, and
+    /// [`FilterMode::KeepStagedInView`] past the view slot, since every ancestor of a staged
+    /// node is staged.
     fn exclude_reason(
         &self,
         path: &impl FilterPath,
@@ -2333,6 +2619,13 @@ impl Filter {
             || self.ignore.covers_subtree(states.ignore, lowercase, depth))
             && (!mode.contains(FilterMode::View)
                 || self.view.covers_subtree(states.view, lowercase, depth))
+    }
+
+    /// Whether the view takes in everything at and below the directory `path`, given the verdicts
+    /// at `path` itself: a view that excludes nothing takes in everything.
+    pub fn view_covers_subtree(&self, states: FilterStates, path: &RelativePath) -> bool {
+        self.view.is_empty()
+            || self.covers_subtree(states, path, query_depth(path.as_str()), FilterMode::View)
     }
 
     /// [`excludes_tree`](Self::excludes_tree), emitting a

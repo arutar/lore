@@ -11,6 +11,7 @@ use crate::branch::BranchLatestStatus;
 use crate::branch::push::PushProgress;
 use crate::branch::push::push_fragments;
 use crate::branch::push::push_query;
+use crate::branch::push::refusal_as_internal;
 use crate::change;
 use crate::commit;
 use crate::errors::*;
@@ -375,8 +376,8 @@ pub(crate) async fn restore(
         repository.clone(),
         Arc::new(changes.clone()),
         Some(state_staged.clone()),
-        true,  /* No changes on disk */
-        false, /* No merge */
+        true, /* No changes on disk */
+        None, /* No merge */
         stats,
     )
     .await
@@ -441,11 +442,15 @@ pub(crate) async fn restore(
     .await
     .forward::<RestoreError>("preparing commit metadata")?;
 
-    commit::prune_dirty_for_commit(state_staged.clone(), repository.clone())
-        .await
-        .forward::<RestoreError>("pruning dirty nodes before rehash")?;
+    commit::prune_dirty_for_commit(
+        state_staged.clone(),
+        repository.clone(),
+        head_state.revision(),
+    )
+    .await
+    .forward::<RestoreError>("pruning dirty nodes before rehash")?;
 
-    let modified_times = commit::rehash_tree_in_operation(
+    let (modified_times, _) = commit::rehash_tree_in_operation(
         repository.clone(),
         token.share(),
         state_staged.clone(),
@@ -468,16 +473,18 @@ pub(crate) async fn restore(
             .forward::<RestoreError>("serializing metadata")?,
     );
 
-    commit::weave_history(
+    commit::weave_changes(
         repository.clone(),
         new_state.clone(),
         commit::BasedOn::FirstParent,
+        &[],
+        None,
     )
     .await
     .forward::<RestoreError>("weaving history")?;
 
     let signature = new_state
-        .serialize(repository.clone(), token)
+        .serialize_committed(repository.clone(), token)
         .await
         .forward::<RestoreError>("serializing new state")?;
 
@@ -557,6 +564,7 @@ pub(crate) async fn restore(
         let response = revision_protocol
             .branch_push(current_branch, signature, false, false)
             .await
+            .map_err(refusal_as_internal)
             .forward::<RestoreError>("pushing branch head pointer")?;
 
         if response.fast_forward_merged {

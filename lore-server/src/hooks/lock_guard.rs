@@ -139,6 +139,7 @@ impl Hook for LockGuardHook {
             stores.immutable.clone(),
             stores.mutable.clone(),
             repository_id,
+            lore_revision::state::no_link_traversal(),
         ));
         let changed =
             match changed_paths(repository, branch_id, incoming, self.config.history_limit).await {

@@ -11,6 +11,7 @@ use lore_revision::branch::DEFAULT_HISTORY_STEP_SIZE;
 use lore_revision::lore::BranchId;
 use lore_revision::lore::RepositoryId;
 use lore_revision::repository::RepositoryContext;
+use lore_revision::state::allow_all_repositories;
 use lore_server::grpc::forwarded_requests::CallerContext;
 use lore_server::grpc::forwarded_revision::v1::branch_delete::*;
 use lore_server::grpc::get_write_token;
@@ -27,6 +28,7 @@ use tonic::Request;
 use crate::notification::testing::MockNotificationSender;
 use crate::store::test_support::test_store_create;
 
+#[derive(Clone)]
 struct TestInstrumentProvider {}
 
 impl InstrumentProvider for TestInstrumentProvider {
@@ -65,6 +67,7 @@ async fn create_test_branch(repository_context: Arc<RepositoryContext>, branch: 
 
     let latest = branch_push::push(
         repository_context.clone(),
+        None,
         main,
         state_hash,
         crate::util::test_support::PUSH_ANY,
@@ -135,7 +138,7 @@ async fn missing_user_id_returns_internal_error() {
             tonic::metadata::BinaryMetadataValue::from_bytes(repository.data()),
         );
 
-        let hook_dispatcher = HookDispatcher::empty();
+        let hook_dispatcher = Arc::new(HookDispatcher::empty());
         let err = handler(
             request,
             immutable_store,
@@ -177,10 +180,11 @@ mod base_branch_delete_handler {
                 immutable_store.clone(),
                 mutable_store.clone(),
                 repository,
+                allow_all_repositories(),
             ));
             create_test_branch(repository_context, branch_id).await;
 
-            let hook_dispatcher = HookDispatcher::empty();
+            let hook_dispatcher = Arc::new(HookDispatcher::empty());
             let response = handler(
                 make_forwarded_request(repository, branch_id),
                 immutable_store,
@@ -213,7 +217,7 @@ mod base_branch_delete_handler {
         let instrument_provider = TestInstrumentProvider {};
 
         Box::pin(LORE_CONTEXT.scope(execution, async move {
-            let hook_dispatcher = HookDispatcher::empty();
+            let hook_dispatcher = Arc::new(HookDispatcher::empty());
             let err = handler(
                 make_forwarded_request(repository, branch_id),
                 immutable_store,

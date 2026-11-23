@@ -883,8 +883,8 @@ RPC_ACTIONS = {
     "/urc.rpc.RevisionService/BranchGet": ("read",),
     "/urc.rpc.RevisionService/BranchList": ("read",),
     "/urc.rpc.RevisionService/BranchPush": ("write", "push-protected"),
-    "/urc.rpc.RevisionService/BranchProtect": ("owner", "admin"),
-    "/urc.rpc.RevisionService/BranchUnprotect": ("owner", "admin"),
+    "/urc.rpc.RevisionService/BranchProtect": ("owner", "admin", "set-protected"),
+    "/urc.rpc.RevisionService/BranchUnprotect": ("owner", "admin", "set-protected"),
     "/urc.rpc.RevisionService/BranchDiff": ("read",),
     "/urc.rpc.RevisionService/BranchRevisionList": ("read",),
     "/urc.rpc.RevisionService/BranchMetadataGet": ("read",),
@@ -969,7 +969,15 @@ def test_every_partition_scoped_rpc_asks_its_action(auth_env, make_actor):
 
     tokens = {
         action: holding(action)
-        for action in ("read", "write", "owner", "admin", "migrate", "push-protected")
+        for action in (
+            "read",
+            "write",
+            "owner",
+            "admin",
+            "migrate",
+            "push-protected",
+            "set-protected",
+        )
     }
     failures = []
     for method, accepted in RPC_ACTIONS.items():
@@ -1115,7 +1123,7 @@ def test_cross_partition_link_read_follows_the_token_claim(auth_env, make_actor)
             node.path
             for node in revision_tree(
                 target, repository_id, signature, authorization=token
-            )
+            ).nodes
         }
 
     granted = tree_paths(both)

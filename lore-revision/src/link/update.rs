@@ -6,22 +6,24 @@ use lore_error_set::prelude::*;
 
 use super::LinkError;
 use crate::branch;
-use crate::errors::InvalidPath;
-use crate::errors::NotALink;
+use crate::errors::Divergent;
 use crate::event;
 use crate::filter::FilterMode;
-use crate::fs::filesystem_provider::FilesystemDiffIntent;
+use crate::find;
+use crate::find::HistoryPosition;
 use crate::fs::filesystem_provider::with_operation;
 use crate::interface::LoreFileAction;
 use crate::link;
 use crate::link::LoreLinkChangeEventData;
 use crate::lore::Context;
 use crate::lore::Hash;
+use crate::lore::execution_context;
 use crate::lore_debug;
+use crate::lore_info;
+use crate::lore_warn;
 use crate::repository::RepositoryContext;
 use crate::repository::RepositoryWriteToken;
 use crate::stage;
-use crate::state;
 use crate::state::NodeMapping;
 use crate::state::State;
 use crate::util::path::RelativePath;
@@ -50,35 +52,8 @@ pub(crate) async fn update(
     .await?;
     let inner_repository = chain.innermost.repository.clone();
     let inner_state = chain.innermost.state.clone();
-
-    let node_link = inner_state
-        .find_relative_node_link(
-            inner_repository.clone(),
-            chain.innermost.node,
-            chain.remainder_path.as_str(),
-        )
-        .await
-        .forward::<LinkError>("Invalid path")?;
-
-    lore_debug!("Link node is {node_link:?}");
-    if !node_link.is_valid() {
-        return Err(InvalidPath {
-            path: link_path.to_string(),
-        }
-        .into());
-    }
-
-    let link_node = inner_state
-        .node(inner_repository.clone(), node_link.node)
-        .await
-        .forward::<LinkError>("Failed deserializing state")?;
-
-    if !link_node.is_link() {
-        return Err(NotALink {
-            path: link_path.to_string(),
-        }
-        .into());
-    }
+    let (link_node_id, link_node) = chain.innermost_link(&link_path).await?;
+    lore_debug!("Link node is {link_node_id}");
 
     if link_node.is_staged() {
         return Err(LinkError::internal("Link has staged changes"));
@@ -86,50 +61,16 @@ pub(crate) async fn update(
 
     let linked_node = link_node.child;
 
-    // TODO(vri): Verify filesystem in any case for local modifications
-    // Tree roots at the innermost node; filesystem path is the full link path.
-    if state_current.revision() != state_staged.revision() {
-        let changed = with_operation(repository.file_system(), async |operation| {
-            let linked_changes = state::diff_filesystem_subtree(
-                &operation,
-                NodeMapping {
-                    repository: inner_repository.clone(),
-                    state: inner_state.clone(),
-                    path: link_path.clone(),
-                    node: node_link.node,
-                },
-                NodeMapping {
-                    repository: inner_repository.clone(),
-                    state: inner_state.clone(),
-                    path: link_path.clone(),
-                    node: node_link.node,
-                },
-                link_path.clone(),
-                FilterMode::View,
-                FilesystemDiffIntent::Report,
-                std::sync::Arc::new(Vec::new()),
-            )
-            .await
-            .forward::<LinkError>("Failed to diff link with filesystem")?;
-            let changed = linked_changes
-                .any(|_change| true)
-                .await
-                .forward::<LinkError>("Failed to diff link with filesystem")?;
-            Ok::<_, LinkError>(changed)
-        })
-        .await?;
-
-        if changed {
-            return Err(LinkError::internal("Link has filesystem changes"));
-        }
-    }
-
     let link = repository
         .to_link_context(link_node.address.context.into())
         .await;
-    let link_remote = link.remote().await.forward::<LinkError>("Not connected")?;
+    let unreachable = || link::unreachable(link.id);
+    let link_remote = link
+        .remote()
+        .await
+        .forward_with::<LinkError, _>(unreachable)?;
     let link_reference = inner_state
-        .link_find(inner_repository.clone(), link.id, node_link.node)
+        .link_find(inner_repository.clone(), link.id, link_node_id)
         .await
         .forward::<LinkError>("Failed to find link")?;
 
@@ -139,15 +80,52 @@ pub(crate) async fn update(
 
     // If a pin is specified, attempt to resolve it
     let (link_revision, link_branch) = if let Some(pin) = pin {
-        link::resolve_pin(link.clone(), pin).await?
+        link::resolve_pin(link.clone(), pin)
+            .await
+            .forward_with::<LinkError, _>(unreachable)?
     } else {
         let link_latest = branch::load_remote_latest(link_remote.clone(), link.id, resolved_branch)
             .await
-            .forward::<LinkError>("Failed to load link latest")?;
+            .forward_with::<LinkError, _>(unreachable)?;
 
         lore_debug!("Using latest {link_latest} of current branch {resolved_branch} as link pin");
 
-        (link_latest, resolved_branch)
+        // A zero remote latest, or a walk that cannot decide, updates as before.
+        let position = if link_latest.is_zero()
+            || link_latest == current_link_revision
+            || execution_context().globals().force()
+        {
+            None
+        } else {
+            find::try_history_position(&link, current_link_revision, link_latest)
+                .await
+                .inspect_err(|err| {
+                    lore_debug!(
+                        "Pin {current_link_revision} not placed against {link_latest}: {err}"
+                    );
+                })
+                .ok()
+        };
+        let link_revision = match position {
+            None | Some(HistoryPosition::OnHistory) => link_latest,
+            Some(HistoryPosition::Ahead) => {
+                let branch = branch::display_name(link.clone(), resolved_branch).await;
+                lore_info!(
+                    "Link '{link_path}' is ahead of remote branch '{branch}': its pin {current_link_revision} holds revisions not pushed yet. Push to publish them."
+                );
+                current_link_revision
+            }
+            Some(HistoryPosition::Diverged) => {
+                let branch = branch::display_name(link.clone(), resolved_branch).await;
+                lore_warn!(
+                    "Link '{link_path}' and remote branch '{branch}' have diverged: the pin {current_link_revision} holds revisions not pushed, and the remote branch has new ones. Updating would drop the unpushed revisions from the working tree; they stay reachable as {current_link_revision}. To drop them, run `lore --force link update {link_path}`, or pick a revision with `lore link update {link_path} --pin <revision>`."
+                );
+                return Err(LinkError::from(Divergent)).forward_with::<LinkError, _>(|| {
+                    format!("updating the link at {link_path} to the latest of branch {branch}")
+                });
+            }
+        };
+        (link_revision, resolved_branch)
     };
 
     lore_debug!("Updating to link revision {link_revision} on branch {link_branch}");
@@ -177,7 +155,8 @@ pub(crate) async fn update(
             mount_source: link::LinkMountSource::SamePath,
         },
     )
-    .await?;
+    .await
+    .forward_with::<LinkError, _>(unreachable)?;
 
     let mut node = link_node;
     node.address.hash = link_revision;
@@ -207,23 +186,35 @@ pub(crate) async fn update(
         .await
         .forward::<LinkError>("Failed to update link")?;
 
-    // Filesystem realize uses the full mount path.
-    link::realize_resolved_link_pin(repository.clone(), link.clone(), &pin).await?;
+    // The staged state is stored before the operation that realizes the new pin finalizes: an
+    // SWFS instance serves the link from what is stored then (ADR-00042).
+    with_operation::<_, LinkError, _>(repository.file_system(), async |operation| {
+        // Filesystem realize uses the full mount path.
+        link::realize_resolved_link_pin_in_operation(
+            &operation,
+            repository.clone(),
+            link.clone(),
+            &pin,
+            false,
+        )
+        .await?;
 
-    // Fold nested link revisions up into the top-level state (no-op if flat).
-    link::propagate_link_chain(&chain, token).await?;
+        // Fold nested link revisions up into the top-level state (no-op if flat).
+        link::propagate_link_chain(&chain, token, link::LinkPinRealize::StateOnly).await?;
 
-    state_staged.reparent_onto(state_current.revision());
+        state_staged.reparent_onto(state_current.revision());
 
-    // Serialize the staged state
-    let signature = state_staged
-        .serialize(repository.clone(), token)
-        .await
-        .forward::<LinkError>("Failed to serialize state")?;
+        // Serialize the staged state
+        let signature = state_staged
+            .serialize(repository.clone(), token)
+            .await
+            .forward::<LinkError>("Failed to serialize state")?;
 
-    crate::instance::store_staged_anchor(&repository, signature)
-        .await
-        .forward::<LinkError>("Failed to serialize anchor")?;
+        crate::instance::store_staged_anchor(&repository, signature)
+            .await
+            .forward::<LinkError>("Failed to serialize anchor")
+    })
+    .await?;
 
     event::LoreEvent::LinkChange(LoreLinkChangeEventData::new(
         link_path.as_str(),

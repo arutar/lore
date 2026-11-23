@@ -427,6 +427,7 @@ mod refused {
             test_partition(),
             credentials,
             None,
+            lore_transport::quic::client::CongestionAlgorithm::default(),
         )
         .await
         .expect("connect to the test server")
@@ -477,7 +478,7 @@ mod refused {
 
     /// A storage session start the server refuses forgets the authorization it presented and starts
     /// the session with a newly exchanged one.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_authorization_is_exchanged_again() {
         let (endpoint, stub) = auth_service("stub-auth://auth.refused-authorization.test.invalid");
         let (server, started) = session_start(
@@ -494,7 +495,7 @@ mod refused {
 
     /// A refused authorization from the token store is not read back from it on the cache miss
     /// its eviction leaves, so the session starts with a newly exchanged one.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_stored_authorization_is_exchanged_again() {
         const AUTH_URL: &str = "stub-auth://auth.refused-stored-authorization.test.invalid";
         token_store::store_user_token(
@@ -516,7 +517,7 @@ mod refused {
     }
 
     /// A refusal of the newly exchanged authorization is final.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_new_authorization_is_final() {
         let (endpoint, stub) = auth_service("stub-auth://auth.refused-twice.test.invalid");
         let (server, started) = session_start(
@@ -533,7 +534,7 @@ mod refused {
 
     /// A refusal is final where the exchange after it gives the authorization refused again, which
     /// is not presented twice.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refusal_the_exchange_gives_again_is_final() {
         let stub = StubAuthentication::new(|_, _| AUTHZ_ONE);
         let endpoint = AuthEndpoint::new(
@@ -554,7 +555,7 @@ mod refused {
 
     /// A refusal of an access token the caller supplied is final, and asks the auth service
     /// nothing.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_supplied_access_token_is_final() {
         let (endpoint, stub) = auth_service("stub-auth://auth.refused-access-token.test.invalid");
         let (server, started) = session_start(
@@ -571,7 +572,7 @@ mod refused {
 
     /// A refusal of an access token the caller supplied is final, and asks the auth service
     /// nothing, though a later call supplies an identity token while the server considers it.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_supplied_access_token_is_final_after_a_rotation() {
         let (endpoint, stub) = auth_service("stub-auth://auth.rotated-access-token.test.invalid");
         let (server, started) = session_start_across_a_rotation(
@@ -588,7 +589,7 @@ mod refused {
 
     /// A refusal is forgotten under the identity token that exchanged the authorization refused,
     /// though a later call supplies another while the server considers it.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refusal_after_a_rotation_forgets_the_authorization_refused() {
         let (endpoint, stub) = auth_service("stub-auth://auth.rotated-identity-token.test.invalid");
         let (server, started) = session_start_across_a_rotation(

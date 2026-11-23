@@ -4,7 +4,7 @@ import logging
 import os
 
 import pytest
-from test_utils import has_staged_anchor, to_posix
+from test_utils import get_unstage_counts, has_staged_anchor, to_posix
 from lore_parsers import parse_jsonl, parse_status_json
 
 from lore import Lore
@@ -142,13 +142,6 @@ def test_unstage_clears_stage_flags_keeps_dirty(new_lore_repo):
     )
 
     repo.branch_switch("main")
-
-
-def get_unstage_counts(output: str) -> dict:
-    """Extract the count object from the fileUnstageEnd event in JSON output."""
-    events = parse_jsonl(output, "fileUnstageEnd")
-    assert len(events) == 1, f"Expected 1 fileUnstageEnd event, got {len(events)}"
-    return events[0]["count"]
 
 
 def get_unstage_file_events(output: str) -> list[dict]:
@@ -543,3 +536,50 @@ def test_unstage_of_a_staged_replacement_leaves_it_untracked(
     repo.stage("entry", scan=True, offline=True)
     repo.commit("replace", offline=True)
     assert committed_delta(repo) == delta
+
+
+BELOW_A_STAGED_DELETION = {
+    "r/a": (
+        {("r", "keep", False), ("r/keep", "delete", True)},
+        [("r/a", "delete", "directory")],
+        {"other.txt", "r/a/y", "r/a/z"},
+    ),
+    "r/a/y": (
+        {
+            ("r", "keep", False),
+            ("r/a", "keep", False),
+            ("r/a/z", "delete", True),
+            ("r/keep", "delete", True),
+        },
+        [("r/a/y", "delete", "file")],
+        {"other.txt", "r/a/y"},
+    ),
+}
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("unstaged", BELOW_A_STAGED_DELETION.keys())
+def test_unstage_below_a_staged_deletion_keeps_the_path(new_lore_repo, unstaged):
+    """Unstaging a path below a directory staged for deletion keeps the path and
+    each directory above it: the commit deletes the rest, status shows the path
+    as a deletion not staged, and an instance of the revision holds the path."""
+    delta, not_staged, synced = BELOW_A_STAGED_DELETION[unstaged]
+    repo: Lore = new_lore_repo()
+    repo.write_files(
+        {"r/a/y": b"y\n", "r/a/z": b"z\n", "r/keep": b"keep\n", "other.txt": b"o\n"}
+    )
+    repo.stage(scan=True, offline=True)
+    repo.commit("base", offline=True)
+    repo.rmtree("r")
+    repo.stage("r", scan=True, offline=True)
+    repo.unstage(unstaged, offline=True)
+    repo.commit("delete", offline=True)
+
+    assert committed_delta(repo) == delta
+    entries = parse_status_json(repo.status(json=True, offline=True))
+    assert not any(e["flagStaged"] for e in entries)
+    assert [(to_posix(e["path"]), e["action"], e["type"]) for e in entries] == (
+        not_staged
+    )
+    repo.push()
+    assert set(repo.clone().read_files()) == synced

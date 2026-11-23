@@ -205,7 +205,8 @@ pub struct RevisionSyncArgs {
     #[clap(long, action, conflicts_with = "forward_changes")]
     reset: bool,
 
-    /// Root files for dependency-based selective sync (only sync changes for these files and their dependencies)
+    /// Root files for dependency-based selective sync (only sync changes for these files and their dependencies, and
+    /// the whole folder that replaces a link they lie in). A root file inside a link is skipped. Don't commit after merging, reverting or cherry-picking in such an instance: the commit can delete a directory the instance never had on disk, with everything in it
     #[clap(long = "root-file", value_name = "path")]
     root_files: Vec<String>,
 
@@ -620,7 +621,7 @@ pub fn handle_revision_history(globals: LoreGlobalArgs, args: &RevisionHistoryAr
                 )
                 .unwrap_or_default()
             } else {
-                message.lines().next().map(String::from).unwrap_or_default()
+                message.lines().next().map_or_default(String::from)
             };
 
             println!("{revision_number} {message}");
@@ -1911,7 +1912,7 @@ fn handle_revision_cherry_pick_resolve_impl(
 
                 count_atomic.fetch_add(1, Ordering::Relaxed);
             }
-            LoreEvent::Complete(_) => {
+            LoreEvent::Complete(data) if data.status == 0 => {
                 let count = count_atomic.load(Ordering::Relaxed);
                 if count == 0 {
                     println!("No conflicts resolved");
@@ -2193,7 +2194,7 @@ fn handle_revision_revert_resolve_impl(
 
                 count_atomic.fetch_add(1, Ordering::Relaxed);
             }
-            LoreEvent::Complete(_) => {
+            LoreEvent::Complete(data) if data.status == 0 => {
                 let count = count_atomic.load(Ordering::Relaxed);
                 if count == 0 {
                     println!("No conflicts resolved");

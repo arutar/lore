@@ -2394,12 +2394,11 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lore"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "async-trait",
  "bitcode",
  "bytes",
- "chrono",
  "ctor",
  "dashmap",
  "futures",
@@ -2422,6 +2421,7 @@ dependencies = [
  "serial_test",
  "smallvec",
  "thiserror",
+ "time",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "uuid",
@@ -2430,7 +2430,7 @@ dependencies = [
 
 [[package]]
 name = "lore-aws"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -2441,7 +2441,6 @@ dependencies = [
  "aws-smithy-types",
  "aws-types",
  "bytes",
- "chrono",
  "dashmap",
  "hex",
  "lore-aws",
@@ -2464,6 +2463,7 @@ dependencies = [
  "smallvec",
  "temp-env",
  "thiserror",
+ "time",
  "tokio",
  "tracing",
  "tracing-test",
@@ -2473,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "lore-base"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "backtrace",
  "bitcode",
@@ -2481,7 +2481,6 @@ dependencies = [
  "blake3",
  "bytes",
  "cc",
- "chrono",
  "directories",
  "hex",
  "libc",
@@ -2496,6 +2495,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "time",
  "tokio",
  "uuid",
  "windows-sys 0.61.2",
@@ -2504,7 +2504,7 @@ dependencies = [
 
 [[package]]
 name = "lore-capi"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "blake3",
  "cbindgen",
@@ -2516,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "lore-chaos-client"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "anyhow",
  "clap",
@@ -2534,16 +2534,16 @@ dependencies = [
 
 [[package]]
 name = "lore-client"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "anstream",
  "anstyle",
- "chrono",
  "clap",
  "clap-markdown",
  "clap_complete",
  "libc",
  "lore",
+ "lore-base",
  "lore-client",
  "lore-macro",
  "parking_lot",
@@ -2558,17 +2558,19 @@ dependencies = [
 
 [[package]]
 name = "lore-credential"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "apple-native-keyring-store",
  "base64 0.22.1",
  "ctor",
  "jsonwebtoken",
  "keyring-core",
+ "libc",
  "linux-keyutils-keyring-store",
  "lore-base",
  "lore-credential",
  "lore-error-set",
+ "lore-macro",
  "ring",
  "serde",
  "serde_json",
@@ -2601,7 +2603,7 @@ dependencies = [
 
 [[package]]
 name = "lore-fuse"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "dashmap",
  "libc",
@@ -2617,7 +2619,7 @@ dependencies = [
 
 [[package]]
 name = "lore-hashicorp"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "async-trait",
  "lore-base",
@@ -2677,7 +2679,7 @@ dependencies = [
 
 [[package]]
 name = "lore-io"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "bytes",
  "futures",
@@ -2693,7 +2695,7 @@ dependencies = [
 
 [[package]]
 name = "lore-macro"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2702,7 +2704,7 @@ dependencies = [
 
 [[package]]
 name = "lore-notification"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "async-trait",
  "lore-base",
@@ -2720,7 +2722,7 @@ dependencies = [
 
 [[package]]
 name = "lore-proto"
-version = "0.1.67"
+version = "0.1.69"
 dependencies = [
  "lore-base",
  "prost",
@@ -2732,8 +2734,9 @@ dependencies = [
 
 [[package]]
 name = "lore-revision"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
+ "arc-swap",
  "async-stream",
  "async-trait",
  "base64 0.22.1",
@@ -2741,7 +2744,6 @@ dependencies = [
  "bitflags 2.13.2",
  "blake3",
  "bytes",
- "chrono",
  "crossbeam-epoch",
  "crossbeam-queue",
  "crossbeam-utils",
@@ -2800,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "lore-server"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2821,6 +2823,8 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "indexmap",
  "jsonwebtoken",
  "lore-aws",
@@ -2870,6 +2874,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tonic-types",
  "tower",
  "tower-http",
  "tracing",
@@ -2884,7 +2889,7 @@ dependencies = [
 
 [[package]]
 name = "lore-storage"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "async-trait",
  "bitcode",
@@ -2924,7 +2929,7 @@ dependencies = [
 
 [[package]]
 name = "lore-telemetry"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "axum",
  "bytes",
@@ -2948,7 +2953,7 @@ dependencies = [
 
 [[package]]
 name = "lore-transport"
-version = "0.13.1-nightly"
+version = "0.14.1-nightly"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2957,10 +2962,13 @@ dependencies = [
  "bitcode",
  "bytes",
  "crossbeam-epoch",
+ "crossbeam-queue",
+ "crossbeam-utils",
  "ctor",
  "dashmap",
  "futures",
  "http",
+ "hyper-util",
  "libc",
  "lore-base",
  "lore-credential",
@@ -2989,6 +2997,7 @@ dependencies = [
  "tower",
  "url",
  "webpki-roots",
+ "windows-sys 0.61.2",
  "zerocopy",
 ]
 
@@ -4846,6 +4855,17 @@ dependencies = [
  "syn 2.0.119",
  "tempfile",
  "tonic-build",
+]
+
+[[package]]
+name = "tonic-types"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73ab1b02061f83d519bba3caa167f88f261ef05720ab8ebc954ade70de3348e8"
+dependencies = [
+ "prost",
+ "prost-types",
+ "tonic",
 ]
 
 [[package]]

@@ -10,6 +10,8 @@ use lore::interface::LoreGlobalArgs;
 use lore::interface::LoreLinkChangeEventData;
 use lore::interface::LoreLinkEntryEventData;
 use lore::interface::LoreString;
+use lore::interface::NotAuthenticated;
+use lore::interface::NotAuthorized;
 use lore::link::LinkFlags;
 use lore::link::LoreLinkAddArgs;
 use lore::link::LoreLinkInfoArgs;
@@ -153,7 +155,7 @@ fn handle_link_add(globals: LoreGlobalArgs, args: &LinkAddArgs) -> u8 {
                     crate::util::format_bytes_to_string(data.count.bytes_transferred),
                     crate::util::format_bytes_to_string(data.count.bytes_total),
                 );
-                println!("Clone complete in {:.2}s", start.elapsed().as_secs_f32());
+                println!("Cloned in {:.2}s", start.elapsed().as_secs_f32());
             }
             LoreEvent::LinkChange(data) => {
                 println!(
@@ -165,6 +167,7 @@ fn handle_link_add(globals: LoreGlobalArgs, args: &LinkAddArgs) -> u8 {
                 print_link_change(data);
             }
             LoreEvent::Complete(data) if data.status != 0 => {
+                print_link_access_remediation(data.status);
                 println!(
                     "{}Failed to add link{}",
                     CommonStyles::FAILURE,
@@ -350,6 +353,7 @@ fn handle_link_list(globals: LoreGlobalArgs, args: &LinkListArgs) -> u8 {
                 entries_cb.lock().push(data.clone());
             }
             LoreEvent::Complete(data) if data.status != 0 => {
+                print_link_access_remediation(data.status);
                 eprintln!("Failed to list links");
             }
             LoreEvent::Maintenance(data) => {
@@ -384,12 +388,16 @@ fn handle_link_list_staged(globals: LoreGlobalArgs) -> u8 {
     let discovered_links: Arc<Mutex<Vec<(String, u64)>>> = Arc::new(Mutex::new(Vec::default()));
     let discovered_links_clone = discovered_links.clone();
     let callback: LoreEventCallback = Some(
-        (Box::new(move |event: &LoreEvent| {
-            if let LoreEvent::LinkStagedEntry(data) = event {
+        (Box::new(move |event: &LoreEvent| match event {
+            LoreEvent::LinkStagedEntry(data) => {
                 discovered_links_clone
                     .lock()
                     .push((data.path.to_string(), data.staged_file_count));
             }
+            LoreEvent::Complete(data) if data.status != 0 => {
+                print_link_access_remediation(data.status);
+            }
+            _ => (),
         }) as EventCallbackFn)
             .with_defaults(),
     );
@@ -446,14 +454,13 @@ fn handle_link_update(globals: LoreGlobalArgs, args: &LinkUpdateArgs) -> u8 {
                     print_link_change(data);
                 }
             }
-            LoreEvent::Complete(data) => {
-                if data.status != 0 {
-                    println!(
-                        "{}Failed to update link{}",
-                        CommonStyles::FAILURE,
-                        anstyle::Reset
-                    );
-                }
+            LoreEvent::Complete(data) if data.status != 0 => {
+                print_link_access_remediation(data.status);
+                println!(
+                    "{}Failed to update link{}",
+                    CommonStyles::FAILURE,
+                    anstyle::Reset
+                );
             }
             _ => revision::handle_sync_event(event, &progress_bar, debug),
         }) as EventCallbackFn)
@@ -495,7 +502,20 @@ fn print_link_change(data: &LoreLinkChangeEventData) {
     );
 }
 
-fn format_link_flags(flags: u32) -> String {
+/// A missing entitlement is not something a retry fixes, so say what does.
+fn print_link_access_remediation(status: i32) {
+    if status != NotAuthorized::FFI_CODE && status != NotAuthenticated::FFI_CODE {
+        return;
+    }
+    eprintln!(
+        "{}No access to the linked repository.{} Request access to it, or refresh \
+         your credentials with `lore auth login`, then retry.",
+        CommonStyles::FAILURE,
+        anstyle::Reset
+    );
+}
+
+pub(crate) fn format_link_flags(flags: u32) -> String {
     let flags = LinkFlags::from_bits_truncate(flags);
     let name = if flags.is_empty() {
         "None".to_string()

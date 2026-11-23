@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
+use lore_revision::fs::filesystem_provider::CaseLookup;
 use lore_revision::fs::filesystem_provider::DirectoryEntry;
 use lore_revision::fs::filesystem_provider::FileInfo;
 use lore_revision::fs::filesystem_provider::FilesystemDiffIntent;
@@ -24,10 +25,12 @@ use lore_revision::fs::filesystem_provider::create_empty_directory;
 use lore_revision::fs::filesystem_provider::test_util::CommittedCalls;
 use lore_revision::fs::filesystem_provider::test_util::HoldCalls;
 use lore_revision::fs::filesystem_provider::test_util::StoredCalls;
+use lore_revision::fs::filesystem_provider::test_util::TestIdentity;
 use lore_revision::fs::filesystem_provider::test_util::TestOperation;
 use lore_revision::fs::filesystem_provider::with_operation;
 use lore_revision::fs::filesystem_provider::with_operation_if;
 use lore_revision::fs::os::OsFilesystem;
+use lore_revision::infer::ConflictMarkers;
 use lore_revision::lore::RepositoryId;
 use lore_revision::node::NodeID;
 use lore_revision::repository::RepositoryContext;
@@ -46,6 +49,7 @@ pub struct TestFilesystemProvider {
     pub names_folding_count: Arc<AtomicUsize>,
     pub finalize_events: Arc<Mutex<Vec<bool>>>,
     pub hold_calls: HoldCalls,
+    pub warm_count: Arc<AtomicUsize>,
     pub stored_calls: StoredCalls,
     pub committed_calls: CommittedCalls,
     /// The directory file information and content are read from, where given.
@@ -54,6 +58,11 @@ pub struct TestFilesystemProvider {
     pub failing_scans: Arc<Mutex<Vec<String>>>,
     /// Paths whose scan finds the named node stale.
     pub stale_on_scan: Arc<Mutex<Vec<(String, NodeID)>>>,
+    /// Paths each recursive removal was asked for.
+    pub removed: Arc<Mutex<Vec<String>>>,
+    identity: TestIdentity,
+    /// How many directories its operations read.
+    pub directory_reads: Arc<AtomicUsize>,
     begin_fails: bool,
     finalize_fails: bool,
     committed_fails: bool,
@@ -64,11 +73,28 @@ pub struct TestFilesystemProvider {
     holds_paths: bool,
     holds_state: bool,
     hold_refuses: bool,
+    /// What its operations answer for `case_lookup`.
+    case_lookup: CaseLookup,
 }
 
 impl TestFilesystemProvider {
     pub fn new() -> TestFilesystemProvider {
         Self::default()
+    }
+
+    /// This provider, its operations answering whether two paths name one entry as `identity`
+    /// says.
+    pub fn with_identity(self, identity: TestIdentity) -> TestFilesystemProvider {
+        Self { identity, ..self }
+    }
+
+    /// The provider, its operations answering `case_lookup` for how a walk finds a name held in
+    /// another case.
+    pub fn with_case_lookup(self, case_lookup: CaseLookup) -> TestFilesystemProvider {
+        Self {
+            case_lookup,
+            ..self
+        }
     }
 
     /// A provider that fails to begin an operation, as one whose filesystem will not freeze.
@@ -226,10 +252,12 @@ impl FilesystemProvider for TestFilesystemProvider {
                 finalize_fails: self.finalize_fails,
                 write_fails: self.write_fails,
                 file_info_fails: self.file_info_fails,
+                failing_file_infos: Arc::default(),
                 content_source_fails: self.content_source_fails,
                 content_source_missing: self.content_source_missing,
                 holds_paths: self.holds_paths,
                 hold_calls: self.hold_calls.clone(),
+                warm_count: self.warm_count.clone(),
                 stored_calls: self.stored_calls.clone(),
                 committed_calls: self.committed_calls.clone(),
                 committed_fails: self.committed_fails,
@@ -237,6 +265,13 @@ impl FilesystemProvider for TestFilesystemProvider {
                 hold_refuses: self.hold_refuses,
                 failing_scans: self.failing_scans.clone(),
                 stale_on_scan: self.stale_on_scan.clone(),
+                removed: self.removed.clone(),
+                identity: self.identity,
+                case_lookup: self.case_lookup,
+                directory_reads: self.directory_reads.clone(),
+                directory_creates: Arc::default(),
+                rename_count: Arc::default(),
+                refuses_rename: None,
             }),
             self.holds_state,
         )))
@@ -814,11 +849,12 @@ async fn content_reported_not_found_is_neither_diffable_nor_conflicted() {
                     .await
                     .expect("a path holding no file is an answer")
             );
-            assert!(
-                !operation
+            assert_eq!(
+                operation
                     .infer_is_conflicted(&path)
                     .await
-                    .expect("a path holding no file is an answer")
+                    .expect("a path holding no file is an answer"),
+                ConflictMarkers::NoFile
             );
         })
         .await;
@@ -876,6 +912,220 @@ async fn a_file_standing_where_the_directory_belongs_is_reported() {
         dir.path().join("held").is_file(),
         "the file standing there was replaced"
     );
+}
+
+/// The calls a [`renaming_operation`] made.
+#[derive(Default)]
+struct RenameCalls {
+    file_infos: Arc<AtomicUsize>,
+    creates: Arc<AtomicUsize>,
+    renames: Arc<AtomicUsize>,
+}
+
+impl RenameCalls {
+    /// How many lookups, directory creates and renames were asked for, in that order.
+    fn counts(&self) -> (usize, usize, usize) {
+        (
+            self.file_infos.load(Ordering::Acquire),
+            self.creates.load(Ordering::Acquire),
+            self.renames.load(Ordering::Acquire),
+        )
+    }
+}
+
+/// An operation over the working tree at `root` that refuses each rename `refuses_rename`
+/// answers an error for, and fails each directory create where `write_fails`, with the calls it
+/// makes.
+fn renaming_operation(
+    root: &Path,
+    refuses_rename: fn(usize) -> Option<FsError>,
+    write_fails: bool,
+) -> (InstanceOperationImpl, RenameCalls) {
+    let calls = RenameCalls::default();
+    let operation = InstanceOperationImpl::new(
+        StaticDispatchInstanceOperation::Test(TestOperation {
+            reads: Some(OsFilesystem::new(root).begin_operation()),
+            file_info_count: calls.file_infos.clone(),
+            directory_creates: calls.creates.clone(),
+            rename_count: calls.renames.clone(),
+            refuses_rename: Some(refuses_rename),
+            write_fails,
+            ..TestOperation::default()
+        }),
+        false,
+    );
+    (operation, calls)
+}
+
+/// A working tree holding the file `x` and the directory `a`.
+fn tree_with_x_and_a() -> lore_base::test_util::TempDir {
+    let dir = lore_base::test_util::TempDir::new("lore-fs-provider-rename-");
+    std::fs::create_dir(dir.path().join("a")).expect("create directory");
+    std::fs::write(dir.path().join("x"), b"x").expect("write file");
+    dir
+}
+
+/// A rename into a directory the working tree holds is the rename alone: no lookup and no create.
+#[tokio::test]
+async fn a_rename_whose_parent_exists_is_the_rename_alone() {
+    let dir = tree_with_x_and_a();
+    let (operation, calls) = renaming_operation(dir.path(), |_| None, false);
+
+    operation
+        .rename_creating_parent(&relative("x"), &relative("a/x"))
+        .await
+        .expect("the rename");
+
+    assert_eq!(calls.counts(), (0, 0, 1));
+    assert!(dir.path().join("a/x").is_file());
+}
+
+/// A rename into directories the working tree lacks creates them and renames again.
+#[tokio::test]
+async fn a_rename_into_a_missing_parent_creates_it() {
+    let dir = tree_with_x_and_a();
+    let (operation, calls) = renaming_operation(dir.path(), |_| None, false);
+
+    operation
+        .rename_creating_parent(&relative("x"), &relative("a/b/c/x"))
+        .await
+        .expect("the rename");
+
+    let (_, creates, renames) = calls.counts();
+    assert_eq!((creates, renames), (1, 2));
+    assert!(dir.path().join("a/b/c/x").is_file());
+    assert!(!dir.path().join("x").exists());
+}
+
+/// A rename into missing directories that fails again answers the second rename's error and
+/// removes the directories it created, and only those.
+#[tokio::test]
+async fn a_failed_rename_into_a_missing_parent_removes_what_it_created() {
+    let dir = tree_with_x_and_a();
+    let (operation, calls) = renaming_operation(
+        dir.path(),
+        |asked| {
+            Some(if asked == 0 {
+                FsError::internal("the first rename is refused")
+            } else {
+                lore_base::error::FileNotFound {
+                    resource: "x".to_string(),
+                }
+                .into()
+            })
+        },
+        false,
+    );
+
+    let failed = operation
+        .rename_creating_parent(&relative("x"), &relative("a/b/c/x"))
+        .await
+        .expect_err("the second rename is refused");
+
+    assert!(failed.is_file_not_found(), "answered {failed}");
+    let (_, creates, renames) = calls.counts();
+    assert_eq!((creates, renames), (1, 2));
+    assert!(
+        dir.path().join("a").is_dir(),
+        "the directory held before stays"
+    );
+    assert!(
+        !dir.path().join("a/b").exists(),
+        "a created directory stays"
+    );
+    assert!(dir.path().join("x").is_file());
+}
+
+/// A refused rename into a directory the working tree holds answers its refusal and creates
+/// nothing.
+#[tokio::test]
+async fn a_refused_rename_whose_parent_exists_creates_nothing() {
+    let dir = tree_with_x_and_a();
+    let (operation, calls) = renaming_operation(
+        dir.path(),
+        |_| {
+            Some(
+                lore_base::error::FileNotFound {
+                    resource: "x".to_string(),
+                }
+                .into(),
+            )
+        },
+        false,
+    );
+
+    let refused = operation
+        .rename_creating_parent(&relative("x"), &relative("a/x"))
+        .await
+        .expect_err("the rename is refused");
+
+    assert!(refused.is_file_not_found(), "answered {refused}");
+    let (_, creates, renames) = calls.counts();
+    assert_eq!((creates, renames), (0, 1));
+    assert!(dir.path().join("x").is_file());
+}
+
+/// A directory renamed into directories the working tree lacks moves whole, by one rename into the
+/// directories created, rather than child by child.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_directory_renamed_into_a_missing_parent_moves_whole() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = lore_base::test_util::TempDir::new("lore-fs-provider-rename-");
+    std::fs::create_dir(dir.path().join("moved")).expect("create directory");
+    std::fs::write(dir.path().join("moved").join("child"), b"child").expect("write file");
+    let inode = |path: &str| {
+        std::fs::metadata(dir.path().join(path))
+            .expect("the directory")
+            .ino()
+    };
+    let before = inode("moved");
+    let operation = os_operation(dir.path()).await;
+
+    operation
+        .rename_creating_parent(&relative("moved"), &relative("a/b/moved"))
+        .await
+        .expect("the rename");
+
+    assert_eq!(inode("a/b/moved"), before);
+    assert!(dir.path().join("a/b/moved/child").is_file());
+    assert!(!dir.path().join("moved").exists());
+}
+
+/// A refused rename of a source the working tree does not hold answers its refusal and creates
+/// nothing, though the directory it lands in is missing.
+#[tokio::test]
+async fn a_refused_rename_of_a_missing_source_creates_nothing() {
+    let dir = tree_with_x_and_a();
+    let (operation, calls) = renaming_operation(dir.path(), |_| None, false);
+
+    operation
+        .rename_creating_parent(&relative("y"), &relative("a/b/y"))
+        .await
+        .expect_err("the source is missing");
+
+    let (_, creates, renames) = calls.counts();
+    assert_eq!((creates, renames), (0, 1));
+    assert!(!dir.path().join("a/b").exists());
+}
+
+/// A rename into missing directories whose create fails answers the create's error and renames
+/// no more.
+#[tokio::test]
+async fn a_rename_whose_missing_parent_cannot_be_created_fails() {
+    let dir = tree_with_x_and_a();
+    let (operation, calls) = renaming_operation(dir.path(), |_| None, true);
+
+    operation
+        .rename_creating_parent(&relative("x"), &relative("a/b/x"))
+        .await
+        .expect_err("the create fails");
+
+    let (_, creates, renames) = calls.counts();
+    assert_eq!((creates, renames), (1, 1));
+    assert!(!dir.path().join("a/b").exists());
+    assert!(dir.path().join("x").is_file());
 }
 
 /// Every entry the operation lists at `path`, which is what a caller collecting a directory

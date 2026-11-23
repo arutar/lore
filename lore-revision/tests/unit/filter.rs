@@ -371,6 +371,67 @@ fn the_floor_holds_for_every_list() {
     );
 }
 
+/// The floor below an excluded directory is the last line that excludes it,
+/// though an earlier line excludes it too. With `/**`, `!/a*`, `!*/d/y` and
+/// `/a/*`, `/a/*` is the last line to exclude `a/d`, so `!*/d/y`, authored
+/// before it, re-includes nothing below `a/d` and a walk does not enter it, as
+/// Git prunes there. Only `/**` excludes `ab/d`, so `!*/d/y` re-includes
+/// `ab/d/y`, which Git leaves out by pruning at `ab/d`. A view and an ignore
+/// file answer alike, folding a whole path and stepping down a walk, in every
+/// layout.
+///
+/// Where several exclusions follow the floor, the last of them floors the step
+/// below: `/a/d/` floors `a/d` past `!*/d/y*`, which follows `/a/*`. And a
+/// later rule excluding a directory on the way stops a deep re-inclusion that
+/// an earlier one would not.
+#[test]
+fn the_floor_is_the_last_line_that_excludes_a_directory() {
+    let rules = ["/**", "!/a*", "!*/d/y", "/a/*"];
+    assert_verdicts(&rules, &["a/d/y", "a/x"], &["ab/d/y"]);
+    assert_verdicts(
+        &["/**", "!/a*", "/a/*", "!*/d/y*", "/a/d/"],
+        &["a/d/y"],
+        &["ab/d/y"],
+    );
+    assert_verdicts(&["/*", "!/e/s/r/p/i", "/e/*/"], &["e/s/r/p/i"], &[]);
+    assert_verdicts(&["/*", "/e/*/", "!/e/s/r/p/i"], &[], &["e/s/r/p/i"]);
+    for mode in [FilterMode::View, FilterMode::Ignore] {
+        for (layout, instance) in layouts(|filter| add_rules(filter, &rules)) {
+            let mut filter = Filter::default();
+            if mode == FilterMode::View {
+                filter.view = instance;
+            } else {
+                filter.ignore = instance;
+            }
+            for (top, kept) in [("a", false), ("ab", true)] {
+                let file = format!("{top}/d/y");
+                assert_eq!(
+                    !filter.excludes(&path(&file), false, mode),
+                    kept,
+                    "{mode:?} {layout} folds {file}"
+                );
+                let (top_states, _) =
+                    filter.child_exclusion_states(FilterStates::ROOT, &path(top), true, mode);
+                assert!(!top_states.excluded(mode), "{mode:?} {layout} steps {top}");
+                let directory = path(&format!("{top}/d"));
+                let (states, _) = filter.child_exclusion_states(top_states, &directory, true, mode);
+                assert!(states.excluded(mode), "{mode:?} {layout} steps {top}/d");
+                assert_eq!(
+                    filter.should_descend(states, &directory, mode),
+                    kept,
+                    "{mode:?} {layout} descends into {top}/d"
+                );
+                let (states, _) = filter.child_exclusion_states(states, &path(&file), false, mode);
+                assert_eq!(
+                    !states.excluded(mode),
+                    kept,
+                    "{mode:?} {layout} steps {file}"
+                );
+            }
+        }
+    }
+}
+
 /// Re-inclusions added out of the order their text sorts in each reach their
 /// own directory, so a fold descends into it, and no other, at a node narrow
 /// enough to scan and at one wide enough to search.
@@ -503,24 +564,21 @@ fn a_view_of_reincluded_prefixes_with_excluded_extensions() {
     );
 }
 
-/// Every named mode other than [`FilterMode::KeepTracked`] keeps its bits through
-/// [`FilterMode::at`], so no mode can share the tracked bit.
+/// Every named mode other than the keep bits, [`FilterMode::KeepTracked`] and
+/// [`FilterMode::KeepStagedInView`], keeps its bits through [`FilterMode::at`], so no mode can
+/// share a keep bit.
 #[test]
-fn a_mode_keeps_every_bit_but_the_tracked_one_through_at() {
+fn a_mode_keeps_every_bit_but_the_keep_bits_through_at() {
     use bitflags::Flags;
 
+    let keeps = FilterMode::KeepTracked | FilterMode::KeepStagedInView;
     for flag in FilterMode::FLAGS {
-        if flag.name() == "KeepTracked" {
+        let mode = *flag.value();
+        if keeps.contains(mode) {
             continue;
         }
-        let mode = *flag.value();
         assert_eq!(mode.at(false), mode, "{}", flag.name());
-        assert_eq!(
-            (mode | FilterMode::KeepTracked).at(false),
-            mode,
-            "{}",
-            flag.name()
-        );
+        assert_eq!((mode | keeps).at(false), mode, "{}", flag.name());
     }
 }
 
@@ -569,4 +627,214 @@ fn a_tracked_node_passes_the_ignore_slot_and_its_untracked_children_do_not() {
     assert!(!filter.should_descend(states, &bin, FilterMode::TRACKED.at(false)));
     assert!(!filter.excludes_any_kind(states, &child, FilterMode::TRACKED));
     assert!(filter.excludes_any_kind(states, &child, FilterMode::TRACKED.at(false)));
+}
+
+/// The view slot keeps a node that holds a staged change in a comparison of trees and nowhere
+/// else, and steps its children from the node's verdict, so a child holding nothing staged is
+/// excluded below it, a tracked one marked dirty included.
+#[test]
+fn a_staged_node_passes_the_view_slot_only_in_a_comparison() {
+    let mut filter = Filter::default();
+    filter.view.add_exclusion("/*").expect("Filter exclusion");
+    let engine = path("Engine");
+    let child = path("Engine/a.txt");
+    let staged = FilterMode::CHANGES.at(true).at_staged(true);
+
+    let (states, excluded) = filter.child_excludes_tree(FilterStates::ROOT, &engine, true, staged);
+    assert!(
+        !excluded,
+        "a staged directory passes the view in a comparison"
+    );
+    for mode in [
+        FilterMode::CHANGES.at(false),
+        FilterMode::CHANGES.at(true).at_staged(false),
+        FilterMode::TRACKED.at(true),
+    ] {
+        assert!(
+            filter
+                .child_excludes_tree(FilterStates::ROOT, &engine, true, mode)
+                .1,
+            "{mode:?} keeps the directory"
+        );
+        assert!(
+            filter.child_excludes_tree(states, &child, false, mode).1,
+            "{mode:?} keeps the child of the staged directory"
+        );
+    }
+    assert!(
+        !filter.child_excludes_tree(states, &child, false, staged).1,
+        "a staged child passes it"
+    );
+    assert!(!filter.excludes_tree(&child, false, FilterMode::CHANGES));
+    assert!(filter.excludes_tree(&child, false, FilterMode::TRACKED));
+}
+
+/// The state `filter` steps a walk to at the directory `directory`, one component at a time from
+/// the root.
+fn walked_directory_state(filter: &FilterInstance, directory: &str) -> FilterState {
+    let mut walked = String::new();
+    let mut state = FilterState::ROOT;
+    for component in directory.split('/') {
+        if !walked.is_empty() {
+            walked.push('/');
+        }
+        walked.push_str(component);
+        state = filter.child_exclusion_state(state, &path(&walked), true);
+    }
+    state
+}
+
+/// A directory is named where the last line to decide it is an inclusion matching the directory
+/// itself, whether it flips the verdict or meets a directory already included, and in no other
+/// case: not by an ancestor's verdict, not by an inclusion's subtree companion, not by an
+/// exclusion, and not where a later line excludes it. A walk and a whole-path query agree, and
+/// so does a step that reads the lines through the index.
+#[test]
+fn a_directory_is_named_only_by_an_inclusion_matching_it() {
+    let example: &[&str] = &["**", "!/a/**/*.bat", "!/a/b/", "!/a/c/file.txt"];
+    // Rules, directory, named.
+    let cases: &[(&[&str], &str, bool)] = &[
+        (example, "a", false),
+        (example, "a/b", true),
+        (example, "a/b/x", false),
+        (example, "a/c", false),
+        (example, "a/d", false),
+        (&["!/a/b/", "/a/b/*"], "a/b", true),
+        (&["!/a/b/", "/a/b/*"], "a", false),
+        (&["/*", "!*/Saved/Config/"], "engine", false),
+        (&["/*", "!*/Saved/Config/"], "engine/saved", false),
+        (&["/*", "!*/Saved/Config/"], "engine/saved/config", true),
+        (&["/*", "!*/Saved/Config/"], "game/saved/config", true),
+        (
+            &["/*", "!/Engine/Content/", "/Engine/Content/*"],
+            "engine",
+            false,
+        ),
+        (
+            &["/*", "!/Engine/Content/", "/Engine/Content/*"],
+            "engine/content",
+            true,
+        ),
+        (&["*.bat", "*.uasset"], "a", false),
+        (&["*.bat", "*.uasset"], "a/b", false),
+        (&["/a/**"], "a", false),
+        (&["!/a/", "/a/"], "a", false),
+        (&["**", "!/a/", "*.bat"], "a", true),
+        (&["**", "!/a/", "*.bat"], "a/x", false),
+        (&["!/a/b/", "**", "!/a/"], "a/b", false),
+        (&["!/a/b/", "/a/b/x"], "a/b", true),
+        (&["!config/"], "engine/config", true),
+        (&["**", "!/a/*/"], "a/x", true),
+        (&["**", "!/a/*/"], "a/x/y", false),
+    ];
+    for (rules, directory, named) in cases {
+        for (layout, filter) in layouts(|filter| add_rules(filter, rules)) {
+            let walked = walked_directory_state(&filter, directory);
+            assert_eq!(
+                walked.named(),
+                *named,
+                "{rules:?} {layout} names {directory}: {walked:?}"
+            );
+            assert_eq!(
+                filter.exclusion_state(&path(directory), true),
+                walked,
+                "{rules:?} {layout}: a whole-path query of {directory} agrees with the walk"
+            );
+        }
+    }
+}
+
+/// A file is never named, though the line that decides it names it.
+#[test]
+fn a_file_is_never_named() {
+    let mut filter = FilterInstance::default();
+    filter.add_exclusion("**").expect("exclude");
+    filter.add_inclusion("/a/c/file.txt").expect("include");
+    let state = filter.child_exclusion_state(
+        walked_directory_state(&filter, "a/c"),
+        &path("a/c/file.txt"),
+        false,
+    );
+    assert!(!state.excluded(), "the line includes the file");
+    assert!(!state.named(), "and names no directory");
+}
+
+/// The view creates a directory it includes that a line names or the repository holds empty,
+/// and no other.
+#[test]
+fn the_view_creates_a_directory_it_names_or_the_repository_holds_empty() {
+    let mut filter = Filter::default();
+    add_rules(
+        &mut filter.view,
+        &["**", "!/a/**/*.bat", "!/a/b/", "!/a/c/file.txt"],
+    );
+    // Directory, held empty, created.
+    for (directory, empty, created) in [
+        ("a", false, false),
+        ("a", true, false),
+        ("a/b", false, true),
+        ("a/c", false, false),
+        ("a/d", false, false),
+        ("a/b/x", true, true),
+        ("a/b/x", false, false),
+    ] {
+        assert_eq!(
+            filter
+                .exclusion_states(&path(directory))
+                .creates_directory(empty),
+            created,
+            "{directory}, held empty: {empty}"
+        );
+    }
+    assert!(
+        FilterStates::ROOT.creates_directory(true) && !FilterStates::ROOT.creates_directory(false),
+        "with no view, the check creates only a directory the repository holds empty"
+    );
+}
+
+/// An ignore file's inclusion names no directory: only the view's directory rule reads the
+/// naming, so the ignore slot never matches an inclusion against a directory it includes.
+#[test]
+fn an_ignore_inclusion_names_no_directory() {
+    let mut ignore = FilterInstance::default();
+    add_rules(&mut ignore, &["**", "!/a/", "!*.ini"]);
+    let mut view = FilterInstance::default();
+    add_rules(&mut view, &["**", "!/a/", "!*.ini"]);
+    let filter = from_instances(ignore, view).expect("the filter");
+    for directory in ["a", "b.ini"] {
+        let states = filter.exclusion_states(&path(directory));
+        assert!(!states.ignore.excluded(), "{directory} is re-included");
+        assert!(!states.ignore.named(), "the ignore slot names {directory}");
+        assert!(states.view.named(), "the view names {directory}");
+    }
+}
+
+/// A name rule of `*` and literal text, decided as the ending of the name, matches what the glob
+/// matches: the text alone, a longer name ending in it, the name at any depth, and no name that
+/// holds it elsewhere; a rule with more syntax after the `*` is still evaluated as a glob.
+#[test]
+fn a_name_rule_ending_in_literal_text_matches_as_its_glob_does() {
+    // Rule, path, excluded.
+    let cases: &[(&str, &str, bool)] = &[
+        ("*.ini", "a.ini", true),
+        ("*.ini", ".ini", true),
+        ("*.INI", "a/b/c.ini", true),
+        ("*.ini", "ini", false),
+        ("*.ini", "a.ini.bak", false),
+        ("*", "a", true),
+        ("*.i?i", "a.ixi", true),
+        ("*.i?i", "a.ini.x", false),
+        ("*[.]ini", "a.ini", true),
+        ("*.{ini,txt}", "a.txt", true),
+        ("*.{ini,txt}", "a.{ini,txt}", false),
+    ];
+    for (rule, file, excluded) in cases {
+        let mut filter = FilterInstance::default();
+        add_rules(&mut filter, &[rule]);
+        assert_eq!(
+            filter.exclusion_state(&path(file), false).excluded(),
+            *excluded,
+            "{rule} on {file}"
+        );
+    }
 }

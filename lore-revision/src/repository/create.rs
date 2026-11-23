@@ -14,7 +14,6 @@ use super::StoreConfig;
 use super::VfsConfig;
 use super::VfsType;
 use super::get_dot_lore_path;
-use super::load_repository_config_from_dot_dir;
 use crate::branch;
 use crate::errors::*;
 use crate::event;
@@ -25,6 +24,7 @@ use crate::interface::LoreString;
 use crate::lore::Context;
 use crate::lore::RepositoryId;
 use crate::lore::execution_context;
+use crate::lore_warn;
 use crate::protocol;
 use crate::repository;
 use crate::util;
@@ -215,17 +215,16 @@ pub(crate) async fn create_with_metadata(
         }));
     }
 
-    repository::refuse_nesting_in_swfs_mount(path)?;
     if options.vfs_options.vfs_type == VfsType::Swfs {
-        repository::refuse_swfs_nested_in_repository(path)?;
+        repository::refuse_instance_nested_at(path)?;
         repository::refuse_swfs_past_mount_limit()?;
+    } else {
+        repository::refuse_nesting_in_swfs_mount(path)?;
     }
-    let existing_dot_dir = get_dot_lore_path(path)?;
+    let existing_dot_dir =
+        get_dot_lore_path(path).forward::<CreateError>("finding the Lore directory")?;
     if existing_dot_dir.exists() {
-        let existing_repository_is_swfs =
-            load_repository_config_from_dot_dir(existing_dot_dir.as_path())
-                .is_ok_and(|config| config.vfs_type() == VfsType::Swfs);
-        if call.force() && !existing_repository_is_swfs {
+        if call.force() && repository::force_may_replace(path, &existing_dot_dir) {
             if call.dry_run() {
                 dry_run_created(id_or_new(&options), name, path);
                 return Ok(());
@@ -376,12 +375,14 @@ pub(crate) async fn create_with_metadata(
     }
 
     // The create command goes through dispatch_call, not repository_call,
-    // so the normal spawn_flush_stores path that flushes dirty mutable store
-    // buckets after each command does not run. Flush explicitly to ensure
-    // branch creation, instance registration, and metadata are written
-    // before the process exits — synced to disk only under `--sync-data`, as
-    // every other command's flush is.
-    let _ = repository.flush(call.sync_data()).await;
+    // so the post-command flush of the stores and the instance records
+    // (`RepositoryContext::try_spawn_post_command_flush`) does not run. Flush
+    // explicitly to ensure branch creation, instance registration, and
+    // metadata are written before the process exits — synced to disk only
+    // under `--sync-data`, as every other command's flush is.
+    if let Err(err) = repository.flush(call.flush_options()).await {
+        lore_warn!("Failed to flush the created repository's stores: {err}");
+    }
 
     drop(repository);
     drop(connection);

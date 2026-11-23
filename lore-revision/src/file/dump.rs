@@ -95,9 +95,10 @@ pub(crate) async fn dump_file(
         .flatten()
         .unwrap_or(current_revision);
 
-    let state = state::State::deserialize(repository.clone(), staged_revision)
-        .await
-        .forward::<DumpError>("deserializing state")?;
+    let state =
+        state::State::deserialize_staged(repository.clone(), staged_revision, current_revision)
+            .await
+            .forward::<DumpError>("deserializing state")?;
 
     let node_link = state
         .find_node_link(repository.clone(), relative_path.as_str())
@@ -107,6 +108,12 @@ pub(crate) async fn dump_file(
     if !node_link.is_valid() {
         return Err(DumpError::internal("invalid node"));
     }
+
+    // A node inside a link is numbered in the linked tree.
+    let (repository, state) = node_link
+        .resolve(repository, state)
+        .await
+        .forward::<DumpError>("entering the link the path resolves into")?;
 
     let node = state
         .node(repository.clone(), node_link.node)

@@ -984,7 +984,8 @@ mod tests {
 
     /// Run `body` against a fresh in-memory state, inside the execution scope the
     /// state edits read their globals from. Nothing here serializes, so the
-    /// repository needs no path and no write token.
+    /// repository needs no write token; its path is a scratch directory, as a
+    /// provider over it reads its Lore directory.
     async fn with_state<F, Fut>(body: F)
     where
         F: FnOnce(Arc<RepositoryContext>, Arc<State>) -> Fut + Send + 'static,
@@ -1002,8 +1003,10 @@ mod tests {
                 )
                 .await
                 .expect("Failed to create store");
+                let tempdir = generate_tempdir();
                 let repository = Arc::new(RepositoryContext::new(
-                    default_repository_creation_args(immutable_store, mutable_store),
+                    default_repository_creation_args(immutable_store, mutable_store)
+                        .with_path(tempdir.path()),
                 ));
                 body(repository, State::new()).await;
             }))
@@ -1582,7 +1585,7 @@ mod tests {
                 lore_revision::state::node_discard_free(
                     &state,
                     &repository,
-                    &[node],
+                    &[(node, 0)],
                     Vec::new(),
                     |_, _| {},
                 )
@@ -2992,8 +2995,11 @@ mod block_single_flight {
             self.inner.max_query_batch()
         }
 
-        async fn flush(self: Arc<Self>, sync_data: bool) -> Result<(), StoreError> {
-            self.inner.clone().flush(sync_data).await
+        async fn flush(
+            self: Arc<Self>,
+            options: lore_storage::FlushOptions,
+        ) -> Result<(), StoreError> {
+            self.inner.clone().flush(options).await
         }
 
         async fn verify(self: Arc<Self>, heal: bool) -> Result<(), StoreError> {
@@ -3538,6 +3544,7 @@ mod block_single_flight {
                 let repository = Arc::new(RepositoryContext::new_null_context(
                     immutable_store,
                     mutable_store,
+                    lore_revision::state::allow_all_repositories(),
                 ));
                 let state = State::new();
 
@@ -3569,6 +3576,7 @@ mod block_single_flight {
                 let repository = Arc::new(RepositoryContext::new_null_context(
                     immutable_store,
                     mutable_store,
+                    lore_revision::state::allow_all_repositories(),
                 ));
                 let state = State::new();
                 let options = immutable::read_options_from_repository(&repository);
@@ -3604,8 +3612,48 @@ mod block_single_flight {
             .await;
     }
 
+    /// A walk that attributes its entries holds the attribution load in a box of its own, so the
+    /// future of each entry, which walks a link's subtree through `enumerate_children`, does not
+    /// hold the delta block read.
+    #[tokio::test]
+    async fn an_attributed_walk_keeps_the_delta_read_out_of_its_future() {
+        LORE_CONTEXT
+            .scope(setup_test_execution(), async {
+                let (immutable_store, mutable_store, _execution) =
+                    test_store_create().await.expect("Failed to create stores");
+                let repository = Arc::new(RepositoryContext::new_null_context(
+                    immutable_store,
+                    mutable_store,
+                    lore_revision::state::allow_all_repositories(),
+                ));
+                let state = State::new();
+                let mut tree_walk = lore_revision::state::TreeWalk::default();
+
+                let walk = lore_revision::state::enumerate_children(
+                    state.clone(),
+                    repository.clone(),
+                    ROOT_NODE,
+                    lore_revision::util::path::RelativePath::new(),
+                    0,
+                    0,
+                    0,
+                    &mut tree_walk,
+                    true,
+                );
+                let delta_read = state.delta_block(repository);
+
+                assert!(
+                    size_of_val(&walk) < size_of_val(&delta_read),
+                    "an attributed walk holds {} bytes, the delta block read {}",
+                    size_of_val(&walk),
+                    size_of_val(&delta_read)
+                );
+            })
+            .await;
+    }
+
     /// A node block read holds its read of the current format, and the fallback to the older
-    /// formats, which holds a read as large and the conversion, stays in a box of its own.
+    /// formats, which holds a read as large and the first read's error, stays in a box of its own.
     #[tokio::test]
     async fn a_node_block_read_keeps_the_older_formats_out_of_its_future() {
         LORE_CONTEXT
@@ -3615,12 +3663,16 @@ mod block_single_flight {
                 let repository = Arc::new(RepositoryContext::new_null_context(
                     immutable_store,
                     mutable_store,
+                    lore_revision::state::allow_all_repositories(),
                 ));
                 let state = State::new();
 
                 let read = NodeBlock::deserialize(repository.clone(), &state, Address::default());
-                let fallback =
-                    NodeBlock::deserialize_other_version(repository, &state, Address::default());
+                let fallback = lore_revision::node::read_older_node_block(
+                    repository,
+                    Address::default(),
+                    lore_revision::immutable::ImmutableError::internal("the current format's read"),
+                );
 
                 assert!(
                     size_of_val(&read) < size_of_val(&fallback),

@@ -8,7 +8,6 @@ pub(crate) mod branch_list;
 mod branch_metadata_get;
 mod branch_metadata_set;
 mod branch_push;
-mod hook_recorder;
 mod push_operation;
 mod revision_list;
 mod service;

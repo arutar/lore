@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Epic Games, Inc.
 # SPDX-License-Identifier: MIT
+import atexit
 import json
 import logging
 import os
@@ -40,6 +41,13 @@ from service_util import (
 from lore import Lore, lore_test_env
 
 logger = logging.getLogger(__name__)
+
+# The tests fork a child for every lore they run, while gRPC may serve or call
+# in this process. With fork support on, gRPC restarts its poller in each child,
+# and on macOS the poller logs to the child's stderr before it execs, which the
+# tests read as the command's output. No test uses gRPC in a forked child. gRPC
+# reads the setting when it first initializes, after this module is imported.
+os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "false"
 
 
 def pytest_addoption(parser):
@@ -223,8 +231,111 @@ def _remove_tmp_path(request, keep_test_data):
         remove_tree(tmp_path, label="tmp_path")
 
 
+# The file systems Lore verifies on Linux as local and durable, as `volume.rs` in lore-io names
+# them, by the type `/proc/self/mountinfo` gives.
+VERIFIED_LINUX_FILE_SYSTEMS = {
+    "btrfs",
+    "xfs",
+    "bcachefs",
+    "ext2",
+    "ext3",
+    "ext4",
+    "zfs",
+}
+
+
+def _linux_file_system(path: Path) -> str:
+    """The type of the file system that holds the existing `path`, from the mount of the longest
+    mount point above it in `/proc/self/mountinfo`."""
+    resolved = os.path.realpath(path)
+    best, kind = "", "unknown"
+    with open("/proc/self/mountinfo") as table:
+        for line in table:
+            fields = line.split()
+            mount_point = fields[4].replace("\\040", " ")
+            below = resolved == mount_point or resolved.startswith(
+                mount_point.rstrip("/") + "/"
+            )
+            if below and len(mount_point) >= len(best):
+                best, kind = mount_point, fields[fields.index("-") + 1]
+    return kind
+
+
+# The scratch directory made beside the outermost Lore working tree that holds the rootdir.
+BESIDE_TREE = "lore-test-scratch"
+
+
+def _outermost_tree(path: Path):
+    """The outermost directory at or above `path` that holds a `.lore` directory, if any."""
+    trees = [
+        ancestor for ancestor in [path, *path.parents] if (ancestor / ".lore").is_dir()
+    ]
+    return trees[-1] if trees else None
+
+
+def _refusal(candidate: Path):
+    """Why `candidate` can't hold a test's global directory and move targets, made where it is
+    missing: the working tree it lies in, or on Linux its file system. `None` where it can."""
+    tree = _outermost_tree(candidate)
+    if tree is not None:
+        return f"inside the Lore working tree at {tree}"
+    candidate.mkdir(parents=True, exist_ok=True)
+    if platform.system() != "Linux":
+        return None
+    kind = _linux_file_system(candidate)
+    return None if kind in VERIFIED_LINUX_FILE_SYSTEMS else kind
+
+
+# The scratch directories beside a working tree this process chose, removed as it ends.
+_MADE_BESIDE_TREE: set = set()
+
+
+def _remove_if_empty(path: Path):
+    try:
+        path.rmdir()
+    except OSError:
+        pass
+
+
+def _verified_scratch_base(config, tmp_path_factory) -> Path:
+    """Where a test marked `verified_volume` makes its global directory and the targets it moves
+    the external root to: the first of pytest's base temp directory, `target/tmp` under the
+    rootdir, and a directory beside the outermost Lore working tree that holds the rootdir, in
+    that tree's parent, with no Lore working tree above it and, on Linux, on a file system Lore
+    verifies. The last is made where needed and removed, once empty, as the process that chose it
+    ends. Fails,
+    naming each candidate and why it was refused, where none qualifies. The temp directories of
+    macOS and Windows are on volumes Lore verifies, so only Linux checks the file system."""
+    build_tmp = Path(config.rootpath) / "target" / "tmp"
+    tree = _outermost_tree(build_tmp)
+    candidates = [tmp_path_factory.getbasetemp(), build_tmp]
+    if tree is not None:
+        candidates.append(tree.parent / BESIDE_TREE)
+    refused = []
+    for index, candidate in enumerate(candidates):
+        why = _refusal(candidate)
+        if why is None:
+            if index == 2 and candidate not in _MADE_BESIDE_TREE:
+                _MADE_BESIDE_TREE.add(candidate)
+                atexit.register(_remove_if_empty, candidate)
+            return candidate
+        refused.append(f"{candidate} ({why})")
+    pytest.fail(
+        "no scratch directory is on a file system Lore has verified as local and durable, "
+        "outside any Lore working tree: " + ", ".join(refused)
+    )
+
+
+def _scratch_base(request, tmp_path_factory) -> Path:
+    """The directory a test's scratch paths and global directory go in: a verified one for a test
+    marked `verified_volume`, else pytest's base temp directory."""
+    if request.node.get_closest_marker("verified_volume") is None:
+        return tmp_path_factory.getbasetemp()
+    return _verified_scratch_base(request.config, tmp_path_factory)
+
+
 @pytest.fixture(scope="function")
-def scratch_dir(tmp_path_factory, keep_test_data):
+def scratch_dir(tmp_path_factory, keep_test_data, request):
     """Returns a function handing out paths beside the test's repositories for
     the test to create things at -- shared stores, clone targets, instances --
     each removed when the test ends, pass or fail.
@@ -235,11 +346,12 @@ def scratch_dir(tmp_path_factory, keep_test_data):
     unless `unique=False` asks for the name verbatim.
     """
     created: list[Path] = []
+    base = _scratch_base(request, tmp_path_factory)
 
     def _scratch_dir(name: str, *, unique: bool = True, create: bool = False) -> Path:
         if unique:
             name = Lore.generate_random_name(name)
-        path = tmp_path_factory.getbasetemp() / name
+        path = base / name
         created.append(path)
         if create:
             path.mkdir(parents=True, exist_ok=True)
@@ -254,9 +366,10 @@ def scratch_dir(tmp_path_factory, keep_test_data):
 
 
 @pytest.fixture(scope="function")
-def global_dir_name(tmp_path_factory, keep_test_data):
+def global_dir_name(tmp_path_factory, keep_test_data, request):
     path = str(
-        tmp_path_factory.getbasetemp() / Lore.generate_random_name("lore_global")
+        _scratch_base(request, tmp_path_factory)
+        / Lore.generate_random_name("lore_global")
     )
     logger.info(f"Setting global directory for test to {path}")
     os.makedirs(path)
@@ -672,14 +785,48 @@ def lore_grpc_target(request, lore_main_server_ports):
     return f"{host}:{lore_main_server_ports['grpc']}"
 
 
+def _local_server_disabled(config) -> bool:
+    """Whether the run launches no main loreserver of its own."""
+    return config.getoption("--disable-local-server") or config.getoption(
+        "--disable-auto-server"
+    )
+
+
 @pytest.fixture(scope="session")
-def lore_main_server_ports(request, tmp_path_factory):
+def launches_main_server(request, tmp_path_factory) -> bool:
+    """Whether this process launches the main loreserver.
+
+    With the local server disabled, none does. Without xdist, this process does.
+    Under xdist, every worker shares one server, which
+    the first worker to set this fixture up launches: it claims the launch by
+    creating `lore_server.claim` in the shared directory, and the others wait
+    for the ports it publishes. A worker named in advance would not do: a worker
+    whose tests are all skipped, or that is given none, sets up no session
+    fixture, and the others would wait for a server nobody launches. The shared
+    directory is the controller's basetemp, which every session starts empty,
+    so no claim is left from an earlier one.
+    """
+    if _local_server_disabled(request.config):
+        return False
+    if _get_worker_id(request) is None:
+        return True
+    claim = _get_shared_tmp_dir(tmp_path_factory) / "lore_server.claim"
+    try:
+        os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        return False
+    return True
+
+
+@pytest.fixture(scope="session")
+def lore_main_server_ports(request, tmp_path_factory, launches_main_server):
     """Resolve the main loreserver's {quic, grpc, http, internal} ports.
 
     For each port: if its CLI option was explicitly passed, use that value;
-    otherwise ask the OS for a free ephemeral port. Under pytest-xdist, gw0
-    resolves first and publishes the ports via lore_server_info.json so
-    secondary workers connect to the ports gw0 actually launched on.
+    otherwise allocate one with `allocate_free_port`. Under pytest-xdist, the
+    worker that launches the server resolves them and publishes them via
+    lore_server_info.json, so the other workers connect to the ports it
+    actually launched on.
     """
     cli_values = {
         "quic": request.config.getoption("--lore-remote-quic-port"),
@@ -721,7 +868,20 @@ def lore_main_server_ports(request, tmp_path_factory):
             ),
         }
 
-    worker_id = _get_worker_id(request)
+    # With the local server disabled, no worker publishes ports to wait for.
+    if _local_server_disabled(request.config) or _get_worker_id(request) is None:
+        return resolve_locally()
+
+    info_path = _get_shared_tmp_dir(tmp_path_factory) / "lore_server_info.json"
+
+    if launches_main_server:
+        # A launch that fails before it starts says so, so the other workers
+        # report the failure rather than time out waiting for it.
+        try:
+            return resolve_locally()
+        except Exception:
+            info_path.write_text(json.dumps({"status": "failed"}))
+            raise
 
     # Fast path: if all four ports are CLI-supplied, every worker can compute
     # the same values from CLI args alone — no cross-worker port discovery
@@ -730,24 +890,11 @@ def lore_main_server_ports(request, tmp_path_factory):
     # setup (key copy / openssl) as buffer time before its own polling clock
     # starts.
     if all(v is not None for v in cli_values.values()):
-        if worker_id == "gw0":
-            shared_tmp = _get_shared_tmp_dir(tmp_path_factory)
-            (shared_tmp / "lore_server_info.json").unlink(missing_ok=True)
         return resolve_locally()
 
-    if worker_id is None:
-        return resolve_locally()
-
-    shared_tmp = _get_shared_tmp_dir(tmp_path_factory)
-    info_path = shared_tmp / "lore_server_info.json"
-
-    if worker_id == "gw0":
-        # Clear any stale info file from a killed prior session before allocating.
-        info_path.unlink(missing_ok=True)
-        return resolve_locally()
-
-    # Dynamic-allocation mode: secondary workers must wait for gw0 to publish
-    # the ports it actually picked, since they can't predict them.
+    # Dynamic-allocation mode: the other workers must wait for the launching
+    # worker to publish the ports it actually picked, since they can't predict
+    # them.
     for _ in range(30):
         if info_path.exists():
             try:
@@ -756,21 +903,34 @@ def lore_main_server_ports(request, tmp_path_factory):
                 sleep(1)
                 continue
             if info.get("status") == "failed":
-                pytest.fail("Lore server failed to start on gw0")
+                pytest.fail("Lore server failed to start on the worker launching it")
             if info.get("status") == "running" and "ports" in info:
                 return info["ports"]
         sleep(1)
-    pytest.fail("Timed out waiting for Lore server ports from gw0")
+    pytest.fail(
+        "Timed out waiting for the Lore server's ports from the worker launching it"
+    )
 
 
 @pytest.fixture(scope="session")
-def lore_local_server_config(request, tmp_path_factory, lore_main_server_ports):
-    # remove_when_done=False: under xdist this server belongs to gw0 but serves
-    # every worker, so it is still in use when gw0's session ends. The
-    # controller's sweep takes its root once all of them have stopped.
-    return generate_server_config(
-        request, tmp_path_factory, lore_main_server_ports, remove_when_done=False
-    )
+def lore_local_server_config(
+    request, tmp_path_factory, lore_main_server_ports, launches_main_server
+):
+    # remove_when_done=False: under xdist this server belongs to the worker that
+    # launched it but serves every worker, so it is still in use when that
+    # worker's session ends. The controller's sweep takes its root once all of
+    # them have stopped.
+    try:
+        return generate_server_config(
+            request, tmp_path_factory, lore_main_server_ports, remove_when_done=False
+        )
+    except Exception:
+        # As in lore_main_server_ports: the other workers report the failure
+        # rather than time out waiting for the launch.
+        if launches_main_server and _get_worker_id(request) is not None:
+            info_path = _get_shared_tmp_dir(tmp_path_factory) / "lore_server_info.json"
+            info_path.write_text(json.dumps({"status": "failed"}))
+        raise
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -780,27 +940,23 @@ def auto_lore_local_server(
     lore_server_executable_path,
     tmp_path_factory,
     lore_main_server_ports,
+    launches_main_server,
 ):
     """
     Runs loreserver locally.
 
-    Under pytest-xdist, gw0 launches the server and writes a status file;
+    Under pytest-xdist, the worker that claimed the launch (see
+    launches_main_server) launches the server and writes a status file; the
     other workers block in lore_main_server_ports until that file appears.
     The xdist controller's pytest_sessionfinish hook handles teardown after
-    all workers complete. Without xdist, behavior is identical to before
-    (fixture owns full lifecycle).
+    all workers complete. Without xdist, the fixture owns the server's full
+    lifecycle.
     """
-    disabled = request.config.getoption(
-        "--disable-local-server"
-    ) or request.config.getoption("--disable-auto-server")
-    if disabled:
+    if _local_server_disabled(request.config):
         yield
         return
 
-    worker_id = _get_worker_id(request)
-
-    if worker_id is None:
-        # Not xdist — original behavior (fixture owns full lifecycle)
+    if _get_worker_id(request) is None:
         (server_root, server_env) = lore_local_server_config
         yield from lore_local_server(
             server_root, server_env, lore_server_executable_path
@@ -810,8 +966,8 @@ def auto_lore_local_server(
     shared_tmp = _get_shared_tmp_dir(tmp_path_factory)
     info_path = shared_tmp / "lore_server_info.json"
 
-    if worker_id == "gw0":
-        # Primary: launch server, publish readiness + ports in one atomic write.
+    if launches_main_server:
+        # Primary: launch server, publish readiness + ports in one write.
         (server_root, server_env) = lore_local_server_config
         try:
             server_proc, server_log_path, server_log_fd = launch_lore_server(
@@ -838,12 +994,13 @@ def auto_lore_local_server(
         # Do NOT kill here — controller's pytest_sessionfinish handles it.
         server_log_fd.close()
     else:
-        # Secondary: wait for gw0's server to be ready before tests start.
+        # Secondary: wait for the shared server to be ready before tests start.
         # In dynamic-allocation mode, lore_main_server_ports already blocked
         # until ports were published, so this poll typically returns instantly.
         # In fast-path (all CLI ports set), this is the only wait — and it
         # runs *after* lore_local_server_config has done its file-copy /
-        # keygen work, giving gw0 buffer time before this clock starts.
+        # keygen work, giving the launching worker buffer time before this
+        # clock starts.
         for _ in range(30):
             if info_path.exists():
                 try:
@@ -852,12 +1009,16 @@ def auto_lore_local_server(
                     sleep(1)
                     continue
                 if info.get("status") == "failed":
-                    pytest.fail("Lore server failed to start on gw0")
+                    pytest.fail(
+                        "Lore server failed to start on the worker launching it"
+                    )
                 if info.get("status") == "running":
                     break
             sleep(1)
         else:
-            pytest.fail("Timed out waiting for Lore server to start on gw0")
+            pytest.fail(
+                "Timed out waiting for the worker launching the Lore server to start it"
+            )
         yield
 
 
@@ -969,6 +1130,11 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
+        "verified_volume: make the test's global directory and scratch paths on a file system "
+        "Lore verifies as local and durable, as a move of the external root needs",
+    )
+    config.addinivalue_line(
+        "markers",
         "runs_in_process(reason): keep the test's commands in their own process when "
         "LORE_TEST_SERVICE_SOCKET relays the rest of the run to a service",
     )
@@ -995,3 +1161,51 @@ def pytest_collection_modifyitems(config, items):
                     reason="bug_reproduction: known unfixed bug", strict=True
                 )
             )
+
+
+def _hdiutil_volume(scratch_dir, name: str, file_system: str, size: str):
+    """A volume of `file_system` mounted for the test from a disk image made with hdiutil, or a
+    skip where hdiutil can't make one."""
+    if sys.platform != "darwin":
+        pytest.skip("the volume is made with hdiutil, which only macOS has")
+    image = scratch_dir(f"{name}_image", create=True) / "volume.dmg"
+    mount = scratch_dir(name, create=True)
+    for command in (
+        [
+            "hdiutil",
+            "create",
+            "-size",
+            size,
+            "-fs",
+            file_system,
+            "-volname",
+            "LoreTest",
+            str(image),
+        ],
+        ["hdiutil", "attach", "-nobrowse", "-mountpoint", str(mount), str(image)],
+    ):
+        made = subprocess.run(command, capture_output=True, text=True, check=False)
+        if made.returncode != 0:
+            pytest.skip(f"hdiutil cannot make a volume here: {made.stderr}")
+    try:
+        yield mount
+    finally:
+        subprocess.run(
+            ["hdiutil", "detach", "-force", str(mount)],
+            capture_output=True,
+            check=False,
+        )
+
+
+@pytest.fixture
+def other_volume(scratch_dir):
+    """A small HFS+ volume mounted for the test, which shares no blocks with the volume the
+    repositories are on and cannot clone files itself, but keeps permissions and links."""
+    yield from _hdiutil_volume(scratch_dir, "other_volume", "HFS+", "50m")
+
+
+@pytest.fixture
+def apfs_volume(scratch_dir):
+    """A small APFS volume mounted for the test, another volume than the one the repositories
+    are on, of the one file system Lore verifies as local on macOS."""
+    yield from _hdiutil_volume(scratch_dir, "apfs_volume", "APFS", "100m")

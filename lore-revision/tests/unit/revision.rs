@@ -12,6 +12,7 @@ use lore_revision::node::NodeFlags;
 use lore_revision::repository::RepositoryContext;
 use lore_revision::state::NodeMapping;
 use lore_revision::state::State;
+use lore_revision::state::allow_all_repositories;
 use lore_revision::state::stream::ChangeStream;
 use lore_revision::util::path::RelativePath;
 
@@ -19,19 +20,84 @@ use crate::fs::filesystem_provider::setup_test_execution;
 use crate::fs::filesystem_provider::test_store_create;
 
 mod case_rename;
+mod deletion_walk;
 mod diff;
-mod instance;
+mod fast_forward_merge;
+pub(crate) mod instance;
+mod interrupted_commit;
+mod interrupted_push;
 mod last_merged;
+mod merge_deletions;
+mod merge_local_work;
+#[cfg(unix)]
+mod merge_modes;
 mod merge_moves;
+mod moved_out;
 mod remote_comparison;
+mod replaced_mounts;
 mod resolve;
+mod stale_directory;
 mod sync;
 mod sync_hold;
+mod tree_walk;
 
 use lore_revision::revision::*;
 
 fn path(text: &str) -> RelativePath {
     RelativePath::new_from_initial_path(text).expect("valid path")
+}
+
+/// A path compared with another path respelled at some of its names orders as it orders against
+/// the respelled path built in full, where a name keeps its length and where it changes it, where
+/// the two differ inside a name or after it, and where one is a prefix of the other.
+#[test]
+fn a_path_orders_against_a_respelled_path_as_against_the_built_one() {
+    let spelled = "Dir/\u{212A}/Sub/c.txt";
+    let kelvin = spelled.find('\u{212A}').expect("the Kelvin sign");
+    let sub = spelled.find("Sub").expect("the inner directory");
+    for names in [
+        vec![],
+        vec![(0, 3, "dir")],
+        vec![(kelvin, kelvin + 3, "k")],
+        vec![
+            (0, 3, "DIR"),
+            (kelvin, kelvin + 3, "K"),
+            (sub, sub + 3, "sub"),
+        ],
+    ] {
+        let mut built = String::new();
+        let mut copied = 0;
+        for &(start, end, name) in &names {
+            built.push_str(&spelled[copied..start]);
+            built.push_str(name);
+            copied = end;
+        }
+        built.push_str(&spelled[copied..]);
+        let candidates = [
+            "",
+            "D",
+            "Dir",
+            "dir/",
+            built.as_str(),
+            &built[..built.len() - 1],
+            &format!("{built}x"),
+            &format!("{built}/d.txt"),
+            &built.replace("c.txt", "b.txt"),
+            &built.replace("c.txt", "d.txt"),
+            "Dir/\u{212A}/Sub",
+            "dir/k/sub/c.txt",
+            "DIR/K/sub/c.txt",
+            "Dir/\u{212A}/Sub/c.txt",
+            "\u{212A}",
+        ];
+        for candidate in candidates {
+            assert_eq!(
+                cmp_respelled(candidate, spelled, &names),
+                candidate.cmp(built.as_str()),
+                "{candidate:?} against {built:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -63,6 +129,7 @@ async fn the_target_walk_holds_no_change_beside_the_join() {
             let repository = Arc::new(RepositoryContext::new_null_context(
                 immutable_store,
                 mutable_store,
+                allow_all_repositories(),
             ));
             let state = State::new();
             let side = NodeChangeState {
@@ -88,8 +155,9 @@ async fn the_target_walk_holds_no_change_beside_the_join() {
                 &mut conflicting_mounts,
                 (&state, &state),
                 false,
+                LinkSettlement::Tree,
             );
-            let mut joined = Joined::new(0);
+            let mut joined = Joined::new(0, LinkSettlement::Tree);
             let join = joined.join(&[], change, Err(0), false);
 
             assert!(
@@ -134,6 +202,7 @@ async fn a_file_replaced_by_a_directory_conflicts_only_with_a_change_there_or_be
             let repository = Arc::new(RepositoryContext::new_null_context(
                 immutable_store,
                 mutable_store,
+                allow_all_repositories(),
             ));
             let state = State::new();
             let at = |text: &str| change_at(&repository, &state, text);
@@ -179,22 +248,42 @@ async fn a_file_replaced_by_a_directory_conflicts_only_with_a_change_there_or_be
                 )
                 .is_empty()
             );
+        })
+        .await;
+}
 
-            // One side added a file and the other a directory where the base held nothing.
+#[tokio::test]
+async fn nodes_of_different_types_added_at_one_path_conflict_there() {
+    LORE_CONTEXT
+        .scope(setup_test_execution(), async {
+            let (immutable_store, mutable_store, _execution) =
+                test_store_create().await.expect("Failed to create stores");
+            let repository = Arc::new(RepositoryContext::new_null_context(
+                immutable_store,
+                mutable_store,
+                allow_all_repositories(),
+            ));
+            let state = State::new();
             let added = |flags: NodeFlags| {
-                let mut change = at("thing");
+                let mut change = change_at(&repository, &state, "thing");
                 change.action = FileAction::Add;
                 change.to.mapping.node = 1;
                 change.to.flags = flags;
                 change
             };
-            assert_eq!(
-                conflicting_replacements(
-                    [(&[], &[], &[]), (&[], &[], &[])],
-                    &[(added(NodeFlags::File), added(NodeFlags::NoFlags))],
-                ),
-                vec![path("thing")]
-            );
+            let types = [NodeFlags::File, NodeFlags::NoFlags, NodeFlags::Link];
+            for source in types {
+                for target in types.into_iter().filter(|target| *target != source) {
+                    assert_eq!(
+                        conflicting_replacements(
+                            [(&[], &[], &[]), (&[], &[], &[])],
+                            &[(added(source), added(target))],
+                        ),
+                        vec![path("thing")],
+                        "{source:?} against {target:?}"
+                    );
+                }
+            }
         })
         .await;
 }

@@ -4,8 +4,21 @@ import json
 import os
 
 import pytest
-from error_types import LocalChanges, LoreException
-from link_helpers import assert_crr_clean, make_parent_with_link, make_repo
+from error_types import (
+    ImproperArgumentsError,
+    LocalChanges,
+    NothingStagedError,
+    NotSupportedError,
+)
+from link_helpers import (
+    assert_crr_clean,
+    build_nested_link_repos_at,
+    link_entry,
+    make_parent_with_link,
+    make_repo,
+    make_repo_renumbering_folder,
+    remount,
+)
 from lore_parsers import parse_status_json
 from test_utils import has_staged_anchor, status_by_path
 
@@ -241,34 +254,124 @@ def test_link_reset(new_lore_repo):
 
 
 @pytest.mark.smoke
-@pytest.mark.xfail(
-    strict=True,
-    reason="reset of a staged file inside a link discards the staged edit instead "
-    "of refusing, as the same reset does outside a link",
-)
-def test_link_reset_refuses_a_staged_file_inside_a_link(new_lore_repo):
-    """`reset` refuses a file whose change is staged, inside a link as outside.
-
-    Outside a link the reset fails with `Failed to reset staged node` and leaves
-    the edit alone. Inside a link it currently restores the committed content and
-    reports success, which loses the staged edit.
+@pytest.mark.parametrize("layout", ["link", "nested", "repinned"])
+def test_link_reset_refuses_a_staged_file_inside_a_link(new_lore_repo, layout):
+    """`reset` refuses a staged file inside a link, and a directory holding one, as it
+    does outside a link, and keeps the staged edit. An unstaged edit beside it still
+    resets. That holds in a link inside a link, and in a link re-pinned and not yet
+    committed to a revision that numbers the file's nodes differently.
     """
-    link_path = "linked"
-    staged_file = f"{link_path}/file1.txt"
-    repo, _link_repo = make_parent_with_link(
-        new_lore_repo, link_path, {"file1.txt": "link file 1 original\n"}
-    )
-
-    repo.write_files({staged_file: "MODIFIED file 1 for staged test\n"})
-    repo.stage(staged_file)
-
-    with pytest.raises(LoreException):
-        repo.reset(staged_file)
-
-    with repo.open_file(staged_file) as f:
-        assert f.read() == "MODIFIED file 1 for staged test\n", (
-            "A refused reset must leave the staged edit on disk"
+    if layout == "nested":
+        repo, _, _, outer_mount, inner_mount = build_nested_link_repos_at(
+            new_lore_repo, "linked", "inner"
         )
+        staged_directory = f"{inner_mount}/c-data"
+        staged_file = f"{staged_directory}/inner.txt"
+        edited_file = f"{outer_mount}/b-root.txt"
+    elif layout == "repinned":
+        link_repo, first_pin, second_pin = make_repo_renumbering_folder(new_lore_repo)
+        repo = make_repo(new_lore_repo, {"parent.txt": "parent\n"})
+        repo.link_add("linked", link_repo.get_id(), "/", pin=first_pin)
+        repo.commit("Add link")
+        repo.push()
+        repo.link_update("linked", pin=second_pin)
+        staged_directory = "linked/sub"
+        staged_file = f"{staged_directory}/a.txt"
+        edited_file = "parent.txt"
+    else:
+        repo, _link_repo = make_parent_with_link(
+            new_lore_repo,
+            "linked",
+            {"dir/staged.txt": "original\n", "edited.txt": "original\n"},
+        )
+        staged_directory = "linked/dir"
+        staged_file = f"{staged_directory}/staged.txt"
+        edited_file = "linked/edited.txt"
+    files = repo.read_files()
+
+    repo.write_files({staged_file: "staged edit\n", edited_file: "unstaged edit\n"})
+    repo.stage(staged_file)
+    repo.reset(edited_file)
+    status = status_by_path(repo)
+
+    for path in (staged_file, staged_directory):
+        with pytest.raises(ImproperArgumentsError):
+            repo.reset(path)
+
+    assert repo.read_files() == {**files, staged_file: "staged edit\n"}
+    assert status_by_path(repo) == status
+    assert any(entry["flagStaged"] for entry in status.values())
+
+
+@pytest.mark.smoke
+def test_link_reset_refuses_a_file_added_inside_a_link(new_lore_repo):
+    """`reset` refuses a file added inside a link, staged or marked dirty, and leaves the
+    working tree and the status as they were. An untracked file there still resets.
+
+    The parent holds more nodes than the linked repository, so the added file's node id
+    also numbers a committed file in the parent.
+    """
+    repo, _link_repo = make_parent_with_link(
+        new_lore_repo,
+        "linked",
+        parent_files={f"parent{i}.txt": f"parent {i}\n" for i in range(6)},
+    )
+    staged_file = "linked/staged.txt"
+    dirty_file = "linked/dirty.txt"
+    untracked_file = "linked/untracked.txt"
+    repo.write_files({staged_file: "staged\n", dirty_file: "dirty\n"})
+    repo.stage(staged_file)
+    repo.dirty(dirty_file)
+    files = repo.read_files()
+    status = status_by_path(repo)
+    repo.write_files({untracked_file: "untracked\n"})
+
+    for path in (staged_file, dirty_file):
+        with pytest.raises(NotSupportedError):
+            repo.reset(path)
+    repo.reset(untracked_file, purge=True)
+
+    assert repo.read_files() == files
+    assert files[staged_file] == "staged\n"
+    assert files[dirty_file] == "dirty\n"
+    assert status_by_path(repo) == status
+    assert status[staged_file]["flagStaged"]
+    assert status[dirty_file]["flagDirty"]
+
+
+@pytest.mark.smoke
+def test_link_reset_last_merged_refuses_a_file_inside_a_link(new_lore_repo):
+    """`reset --last-merged-from` refuses a file inside a link, at the merge and after it, and
+    leaves the working tree as it was.
+
+    The linked file's node id also numbers parent files that a merge changed, so the file's
+    history must not be read in the parent's tree.
+    """
+    parent_files = {f"parent{i}.txt": f"parent {i}\n" for i in range(6)}
+    repo, _link_repo = make_parent_with_link(
+        new_lore_repo, "linked", parent_files=parent_files
+    )
+    repo.branch_create("feature")
+    repo.write_commit_push("Edit the linked file", {"linked/linked.txt": "feature\n"})
+    repo.branch_switch("main")
+    repo.write_commit_push("Edit the parent", {path: "main\n" for path in parent_files})
+    repo.branch_switch("feature")
+    repo.branch_merge("main")
+    files = repo.read_files()
+
+    with pytest.raises(NotSupportedError):
+        repo.reset("linked/linked.txt", last_merged_from="main")
+    assert repo.read_files() == files
+
+    repo.write_commit_push(
+        "Edit the parent after the merge", {"parent0.txt": "after\n"}
+    )
+    files = repo.read_files()
+
+    with pytest.raises(NotSupportedError):
+        repo.reset("linked/linked.txt", last_merged_from="main")
+    assert repo.read_files() == files
+    assert files["linked/linked.txt"] == "feature\n"
 
 
 @pytest.mark.smoke
@@ -324,6 +427,68 @@ def test_link_reset_purge_ignores_a_directory_rule_naming_the_mount(new_lore_rep
         )
     for path in untracked:
         assert not repo.file_exists(path), f"The purge kept the untracked {path}"
+
+
+@pytest.mark.smoke
+def test_link_reset_puts_back_the_spelling_of_a_mount(new_lore_repo):
+    """`lore reset .` renames a link's mount the working tree holds in another case
+    back to the spelling the revision holds, with the linked content in it."""
+    repo: Lore = new_lore_repo()
+    repo.write_commit_push(None, {"outside.txt": b"outside"})
+
+    link_repo = new_lore_repo()
+    link_repo.write_commit_push(None, {"inside.txt": b"inside"})
+
+    repo.link_add("Linked", link_repo.get_id(), "/")
+    repo.commit()
+    repo.push()
+
+    repo.move("Linked", "linked.tmp")
+    repo.move("linked.tmp", "linked")
+
+    repo.reset(".")
+
+    entries = sorted(entry for entry in os.listdir(repo.path) if entry != ".lore")
+    assert entries == ["Linked", "outside.txt"], (
+        f"reset should put back the mount's spelling, left {entries}"
+    )
+    assert os.listdir(os.path.join(repo.path, "Linked")) == ["inside.txt"]
+    with repo.open_file("Linked/inside.txt", "rb") as f:
+        assert f.read() == b"inside"
+
+
+@pytest.mark.smoke
+def test_link_sync_moves_a_mount_held_in_another_case(new_lore_repo):
+    """A sync of a link's mount renamed in case alone renames the mount a working tree
+    holds in a third spelling, with the linked content in it, rather than mounting it
+    beside."""
+    repo: Lore = new_lore_repo()
+    repo.write_commit_push(None, {"outside.txt": b"outside"})
+
+    link_repo = new_lore_repo()
+    link_repo.write_commit_push(None, {"inside.txt": b"inside"})
+
+    repo.link_add("Linked", link_repo.get_id(), "/")
+    repo.commit()
+    repo.push()
+    other: Lore = repo.clone()
+
+    repo.move("Linked", "linked.tmp")
+    repo.move("linked.tmp", "LINKED")
+    repo.stage(scan=True, case="rename")
+    repo.commit()
+    repo.push()
+
+    other.move("Linked", "linked.tmp")
+    other.move("linked.tmp", "linked")
+
+    other.sync()
+
+    entries = sorted(entry for entry in os.listdir(other.path) if entry != ".lore")
+    assert entries == ["LINKED", "outside.txt"], (
+        f"the sync should move the mount to the revision's spelling, left {entries}"
+    )
+    assert os.listdir(os.path.join(other.path, "LINKED")) == ["inside.txt"]
 
 
 # ---------------------------------------------------------------------------
@@ -570,15 +735,18 @@ def test_link_forced_unstage_puts_back_a_link_a_staged_file_replaced(new_lore_re
         ("replaced", True),
         ("removed-then-folder", False),
         ("added-then-replaced", False),
+        ("relinked-edited", True),
+        ("relinked-in-the-way", True),
     ],
 )
 def test_link_unstage_keeps_local_work_at_the_mount(new_lore_repo, change, refused):
     """`unstage` of a staged link change keeps the local work standing at the mount: it refuses
-    where restoring the link would overwrite that work, and otherwise leaves it in place."""
+    where restoring the link would overwrite that work, changing nothing, and otherwise leaves it
+    in place."""
     parent = make_repo(new_lore_repo, {"README.txt": "baseline\n"})
     link_repo = make_repo(new_lore_repo, {"linked.txt": "linked\n"})
     parent.link_add("shared", link_repo.get_id(), "/")
-    if change in ("replaced", "removed-then-folder"):
+    if change in ("replaced", "removed-then-folder") or change.startswith("relinked"):
         parent.commit("Add link")
         parent.push()
 
@@ -588,18 +756,31 @@ def test_link_unstage_keeps_local_work_at_the_mount(new_lore_repo, change, refus
         "replaced": "shared",
         "removed-then-folder": "shared/own.txt",
         "added-then-replaced": "shared",
+        "relinked-edited": "shared/other.txt",
+        "relinked-in-the-way": "shared/linked.txt",
     }[change]
     if change == "removed-then-folder":
         parent.link_remove("shared")
+    if change.startswith("relinked"):
+        other_repo = make_repo(new_lore_repo, {"other.txt": "other\n"})
+        remount(parent, "shared", other_repo.get_id(), "/", None)
     if local == "shared":
         parent.rmtree("shared")
     parent.write_files({local: "local\n"})
-    if change in ("replaced", "removed-then-folder", "added-then-replaced"):
+    if change in (
+        "replaced",
+        "removed-then-folder",
+        "added-then-replaced",
+        "relinked-edited",
+    ):
         parent.stage("shared", scan=True)
+
+    files = parent.read_files()
 
     if refused:
         with pytest.raises(LocalChanges):
             parent.unstage("shared")
+        assert parent.read_files() == files
     else:
         parent.unstage("shared")
     with parent.open_file(local) as f:
@@ -651,6 +832,77 @@ def test_link_reset_staged_update(new_lore_repo):
     assert main_repo.link_list() == pre_link_list, (
         "Registry must match pre-update exactly (branch + signature)"
     )
+
+
+@pytest.mark.smoke
+def test_link_branching_change_commits(new_lore_repo):
+    """A link added back at the same pin with branching disabled commits as a fixed link, which a
+    clone of the pushed revision holds; adding it back the same way again stages nothing to
+    commit."""
+    link_path = "linked/repo"
+    parent, link_repo = make_parent_with_link(new_lore_repo, link_path)
+
+    remount(parent, link_path, link_repo.get_id(), "/", None, disable_branching=True)
+    assert status_by_path(parent)[link_path]["flagStaged"]
+    parent.commit("Make the link fixed")
+    parent.push()
+
+    entry = link_entry(parent, link_path)
+    assert (entry["tracking"], entry["flags"]) == (False, 1)
+    assert link_entry(parent.clone(), link_path) == entry
+
+    remount(parent, link_path, link_repo.get_id(), "/", None, disable_branching=True)
+    with pytest.raises(NothingStagedError):
+        parent.commit("Nothing to commit")
+
+
+def link_branching(repo: Lore, link_path: str) -> tuple:
+    """The branch, tracking and flags of the link at `link_path`."""
+    entry = link_entry(repo, link_path)
+    return entry["branch"], entry["tracking"], entry["flags"]
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    ("change", "undo"),
+    [
+        ("replaced", "unstage"),
+        ("edited-inside", "reset"),
+        ("edited-inside", "forced-unstage-of-both"),
+        ("removed-again", "unstage"),
+    ],
+)
+def test_link_undo_puts_back_a_link_replaced_by_another_repository(
+    new_lore_repo, change, undo
+):
+    """`unstage` and `reset` of a link replaced by one to another repository put the original
+    link back, in the registry and on disk: over a change staged inside the replacement that
+    `reset` or a forced `unstage` discards, and after the replacement is removed again."""
+    link_path = "linked/repo"
+    parent, _ = make_parent_with_link(new_lore_repo, link_path)
+    committed = link_entry(parent, link_path)
+    files = parent.read_files()
+    other_repo = make_repo(new_lore_repo, {"other.txt": "other\n"})
+    remount(parent, link_path, other_repo.get_id(), "/", None)
+    inside = f"{link_path}/other.txt"
+    if change == "edited-inside":
+        parent.write_files({inside: "local\n"})
+        parent.stage(inside, scan=True)
+    elif change == "removed-again":
+        parent.link_remove(link_path)
+
+    if undo == "reset":
+        parent.reset(link_path)
+    elif undo == "forced-unstage-of-both":
+        parent.unstage([inside, link_path], force=True)
+        # A forced unstage repins every link it walks to its staged state.
+        committed["revision"] = link_entry(parent, link_path)["revision"]
+    else:
+        parent.unstage(link_path)
+
+    assert link_entry(parent, link_path) == committed
+    assert parent.read_files() == files
+    assert_crr_clean(parent, [], [], {other_repo.get_id(): False})
 
 
 @pytest.mark.smoke
@@ -764,24 +1016,31 @@ def test_link_reset_idempotent(new_lore_repo):
 
 
 @pytest.mark.smoke
-def test_dry_run_unstage_and_reset_keep_a_staged_link_add(new_lore_repo):
-    """`unstage --dry-run` and `reset --dry-run` of a staged link addition keep the link's
-    files and the staged link, where `unstage` without it removes both."""
+@pytest.mark.parametrize("change", ["added", "relinked"])
+def test_dry_run_unstage_and_reset_keep_a_staged_link_change(new_lore_repo, change):
+    """`unstage --dry-run` and `reset --dry-run` of a staged link addition, or of a link replaced
+    by one to another repository holding the same path, keep the staged link and its files, where
+    `unstage` without it puts back what the current revision holds."""
     repo = make_repo(new_lore_repo, {"a.txt": "a\n"})
     link_repo = make_repo(new_lore_repo, {"linked.txt": "linked\n"})
-    repo.link_add("lnk", link_repo.get_id(), "/")
-    linked_file = os.path.join(repo.path, "lnk", "linked.txt")
-    assert os.path.isfile(linked_file)
-    links = repo.link_list()
+    if change == "relinked":
+        repo.link_add("lnk", link_repo.get_id(), "/")
+        repo.commit("Add link")
+        repo.push()
+    committed = (repo.link_list(), repo.read_files())
+    if change == "relinked":
+        other_repo = make_repo(new_lore_repo, {"linked.txt": "other\n"})
+        remount(repo, "lnk", other_repo.get_id(), "/", None)
+    else:
+        repo.link_add("lnk", link_repo.get_id(), "/")
+    staged = (repo.link_list(), repo.read_files())
 
     repo.unstage("lnk", dry_run=True)
     repo.reset("lnk", dry_run=True)
     repo.reset(dry_run=True)
 
-    assert os.path.isfile(linked_file), "a dry run removed the link's files"
-    assert repo.link_list() == links, "a dry run changed the staged links"
+    assert (repo.link_list(), repo.read_files()) == staged
 
     repo.unstage("lnk")
 
-    assert not os.path.exists(linked_file), "unstage kept the link's files"
-    assert repo.link_list() != links, "unstage kept the staged link"
+    assert (repo.link_list(), repo.read_files()) == committed

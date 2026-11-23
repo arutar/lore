@@ -26,8 +26,15 @@
 //!   kernel finishes during the issuing call never reach the port, and the
 //!   rest are completed by a single reaper. Control-plane operations run on
 //!   the syscall pool.
+//!
+//! The [`clone`] module is the exception: blocking calls that clone or copy the
+//! entries of a directory tree, which a caller on an async runtime runs on a
+//! blocking thread.
 
+#[cfg(target_os = "macos")]
+pub mod acl;
 mod buffer;
+pub mod clone;
 mod dir;
 #[cfg(not(feature = "test-util"))]
 mod driver;
@@ -41,10 +48,16 @@ pub mod file;
 mod find;
 #[cfg(all(target_family = "windows", feature = "test-util"))]
 pub mod find;
+#[cfg(not(feature = "test-util"))]
+mod holes;
+#[cfg(feature = "test-util")]
+pub mod holes;
 #[cfg(all(target_family = "windows", not(feature = "test-util")))]
 mod iocp;
 #[cfg(all(target_family = "windows", feature = "test-util"))]
 pub mod iocp;
+#[cfg(target_family = "windows")]
+pub mod junction;
 #[cfg(target_family = "windows")]
 mod overlapped;
 #[cfg(not(feature = "test-util"))]
@@ -52,15 +65,24 @@ mod pool;
 #[cfg(feature = "test-util")]
 pub mod pool;
 #[cfg(not(feature = "test-util"))]
+mod priority;
+#[cfg(feature = "test-util")]
+pub mod priority;
+#[cfg(not(feature = "test-util"))]
 mod psync;
 #[cfg(feature = "test-util")]
 pub mod psync;
+pub mod rename;
 #[cfg(not(feature = "test-util"))]
 mod stat;
 #[cfg(feature = "test-util")]
 pub mod stat;
+#[cfg(feature = "test-util")]
+pub mod test_util;
 #[cfg(target_os = "linux")]
 mod uring;
+#[cfg(target_family = "windows")]
+pub mod win_path;
 
 pub use buffer::StableBuf;
 pub use buffer::StableBufList;
@@ -72,12 +94,22 @@ pub use driver::BackendKind;
 pub use driver::IoDriver;
 pub use driver::WHOLE_FILE_LIMIT;
 pub use file::IoFile;
+pub use file::LockAttempt;
 pub use file::OpenOptions;
+pub use file::lock_refused;
+pub use holes::DataCursor;
 #[cfg(target_family = "windows")]
 pub use iocp::IocpStats;
+pub use pool::Lent;
 pub use pool::PoolStats;
+pub use pool::lend_threads;
 pub use pool::requested_max_threads;
+pub use pool::run_file_operations_on_this_thread;
 pub use pool::set_max_threads;
+pub use psync::create_dir_all_private;
+pub use psync::create_dir_in_existing_parent;
+pub use psync::stat_blocking;
+pub use psync::sync_dir;
 pub use stat::Stat;
 pub use stat::StatKind;
 #[cfg(target_os = "linux")]

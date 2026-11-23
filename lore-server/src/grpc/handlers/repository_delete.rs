@@ -11,13 +11,12 @@ use lore_revision::lore::RepositoryId;
 use lore_revision::lore::execution_context;
 use lore_revision::repository;
 use lore_revision::repository::RepositoryContext;
+use lore_revision::state::no_link_traversal;
 use lore_telemetry::InstrumentProvider;
-use tokio_stream::StreamExt;
 use tonic::Extensions;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
-use tracing::debug;
 use tracing::info;
 use tracing::warn;
 
@@ -54,6 +53,7 @@ pub async fn handler(
         immutable_store,
         mutable_store,
         id,
+        no_link_traversal(),
     ));
 
     LORE_CONTEXT
@@ -103,7 +103,7 @@ async fn repository_delete(
         &metadata.creator,
         &user_id,
     )
-    .await
+    .await?
     {
         info!(
             "Repository delete refused for user {user_id}, creator {}",
@@ -131,45 +131,11 @@ async fn repository_delete(
             Status::internal(format!("Failed to delete repository metadata: {err}"))
         })?;
 
-    // Purge any branches
     // no filter_slow_down()? usage here: the repository record is already
     // torn down above, so this purge is past the point of no return. A
     // retryable status would invite a retry that only finds the repository
     // gone, leaving these keys orphaned.
-    if let Ok(mut branch_stream) = branch::list(repository.clone()).await {
-        let mut branch_list = vec![];
-        while let Some(branch) = branch_stream.next().await {
-            branch_list.push(branch);
-        }
-
-        for branch in branch_list {
-            if let Ok(branch_metadata) = branch::metadata(repository.clone(), branch).await {
-                // Delete name to ID mapping
-                let name = branch::name(&branch_metadata).unwrap_or_default();
-                if !name.is_empty() {
-                    let _ = branch::delete_name_to_id(repository.clone(), name)
-                        .await
-                        .inspect_err(|err| {
-                            debug!("Branch delete failed to remove name to ID mapping: {err}");
-                        });
-                }
-            }
-
-            // Delete the latest pointer from mutable store
-            let _ = branch::mutable_delete(repository.clone(), branch::LATEST, branch)
-                .await
-                .inspect_err(|err| {
-                    debug!("Branch delete failed to remove HEAD pointer: {err}");
-                });
-
-            // Delete the metadata pointer from mutable store
-            let _ = branch::mutable_delete(repository.clone(), branch::METADATA, branch)
-                .await
-                .inspect_err(|err| {
-                    debug!("Branch delete failed to remove metadata pointer: {err}");
-                });
-        }
-    }
+    branch::purge_mapped_branches(repository.clone()).await;
 
     info!(
         "Deleted repository {} with ID {}",

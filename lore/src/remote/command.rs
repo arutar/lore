@@ -172,4 +172,28 @@ pub enum LoreCommand {
     FileAudit(crate::file::LoreFileAuditArgs),
     RepositoryInstanceDelete(crate::repository::LoreRepositoryInstanceDeleteArgs),
     RepositoryInstanceMove(crate::repository::LoreRepositoryInstanceMoveArgs),
+    RepositoryInstanceClone(crate::repository::LoreRepositoryInstanceCloneArgs),
+    RevisionGraphBranchList(crate::revision_graph::branch_list::LoreRevisionGraphBranchListArgs),
+    RevisionGraphRevisionResolve(
+        crate::revision_graph::revision_resolve::LoreRevisionGraphRevisionResolveArgs,
+    ),
+    RevisionGraphBranchResolve(
+        crate::revision_graph::branch_resolve::LoreRevisionGraphBranchResolveArgs,
+    ),
+    RevisionGraphBranchMetadataGet(
+        crate::revision_graph::branch_metadata_get::LoreRevisionGraphBranchMetadataGetArgs,
+    ),
+    RevisionGraphBranchMetadataSet(
+        crate::revision_graph::branch_metadata_set::LoreRevisionGraphBranchMetadataSetArgs,
+    ),
+    RevisionGraphBranchCreate(
+        crate::revision_graph::branch_create::LoreRevisionGraphBranchCreateArgs,
+    ),
+    RevisionGraphBranchArchive(
+        crate::revision_graph::branch_archive::LoreRevisionGraphBranchArchiveArgs,
+    ),
+    RevisionGraphBranchSync(crate::revision_graph::branch_sync::LoreRevisionGraphBranchSyncArgs),
+    BranchMergeConflictsList(crate::branch::LoreBranchMergeConflictsListArgs),
+    ServiceSetExternalDirectory(crate::service::LoreServiceSetExternalDirectoryArgs),
+    RevisionGraphBranchPush(crate::revision_graph::branch_push::LoreRevisionGraphBranchPushArgs),
 }

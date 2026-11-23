@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Epic Games, Inc.
 // SPDX-License-Identifier: MIT
+use std::future::Future;
 use std::net::IpAddr;
+use std::pin::Pin;
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -16,7 +19,6 @@ use lore_proto::BranchPushResponse;
 use lore_revision::branch;
 use lore_revision::branch::BranchError;
 use lore_revision::branch::LATEST;
-use lore_revision::branch::PROTECT;
 use lore_revision::branch::push;
 use lore_revision::interface::ExecutionContext;
 use lore_revision::lore::BranchId;
@@ -26,8 +28,12 @@ use lore_revision::notification::NotificationSender;
 use lore_revision::repository;
 use lore_revision::repository::RepositoryContext;
 use lore_revision::repository::RepositoryMetadata;
+use lore_revision::repository::prefetch::PrefetchCounts;
+use lore_revision::repository::prefetch::PrefetchTracker;
+use lore_revision::repository::prefetch::prefetch_changed_node_blocks;
 use lore_revision::state;
 use lore_revision::state::State;
+use lore_revision::state::allow_all_repositories;
 use lore_revision::util::request_tracker::StoreRequestTracker;
 use lore_storage::StoreError;
 use lore_storage::StoreMatch;
@@ -139,6 +145,14 @@ static FAST_FORWARD_MERGE_CHANGES: LazyLock<Histogram<u64>> = LazyLock::new(|| {
         ],
     )
 });
+
+static PREFETCH_DURATION: LazyLock<Histogram<f64>> =
+    LazyLock::new(|| push_duration_histogram("prefetch_duration"));
+
+/// The most node blocks a state a push's prefetch compares may have. A pushed state's block count is
+/// whatever its client stored, so a prefetch comparing a state of more is skipped, and the walk it
+/// runs beside reads each block as it reaches it.
+const MAX_PREFETCH_BLOCKS: usize = 262_144;
 
 /// A push that takes at least this long is logged at info with its breakdown, as is every
 /// cancelled or failed push.
@@ -323,6 +337,10 @@ pub struct PushReport {
     errored: bool,
     /// Whether the push left the head where it was for the client to resolve.
     declined: bool,
+    /// The prefetch run beside the verification's tree walk.
+    verify_prefetch: Arc<PrefetchTracker>,
+    /// The prefetches run beside each fast-forward merge's diff.
+    merge_prefetch: Arc<PrefetchTracker>,
 }
 
 /// A snapshot of a [`PushReport`], with the running phase counted up to the moment it was taken.
@@ -347,6 +365,12 @@ pub struct PushSummary {
     /// The time the verification's existence checks took, counted up to the snapshot while they
     /// run. `None` if they never started.
     pub verify_exist: Option<Duration>,
+    /// What the prefetch beside the verification's walk did. A fetch still running at the snapshot
+    /// is counted only once it ends.
+    pub verify_prefetch: PrefetchCounts,
+    /// What the prefetches beside the fast-forward merge's diffs did, one for each attempt at the
+    /// merge. A fetch still running at the snapshot is counted only once it ends.
+    pub merge_prefetch: PrefetchCounts,
 }
 
 impl PushSummary {
@@ -381,6 +405,8 @@ impl PushReport {
             verification_failed: false,
             errored: false,
             declined: false,
+            verify_prefetch: Arc::default(),
+            merge_prefetch: Arc::default(),
         }
     }
 
@@ -454,6 +480,8 @@ impl PushReport {
             peak_metadata_reads_in_flight: self.store_requests.peak_metadata_reads_in_flight(),
             verify_collect,
             verify_exist,
+            verify_prefetch: self.verify_prefetch.counts(),
+            merge_prefetch: self.merge_prefetch.counts(),
         }
     }
 
@@ -504,6 +532,8 @@ impl Drop for PushReport {
         if let Some(changes) = summary.fast_forward_merge_changes {
             FAST_FORWARD_MERGE_CHANGES.record(changes, &handler_and_outcome);
         }
+        record_prefetch("verify", &summary.verify_prefetch, &handler_and_outcome);
+        record_prefetch("merge", &summary.merge_prefetch, &handler_and_outcome);
 
         if cancelled
             || summary.outcome == PushOutcome::Error
@@ -534,8 +564,52 @@ impl Drop for PushReport {
                 peak_metadata_reads_in_flight = summary.peak_metadata_reads_in_flight,
                 num_collected_addresses = self.collected_addresses,
                 num_concurrent_query_batches = self.concurrent_query_batches,
+                verify_prefetch = prefetch_field(&summary.verify_prefetch),
+                merge_prefetch = prefetch_field(&summary.merge_prefetch),
                 "Slow, cancelled or failed branch push"
             );
+        }
+    }
+}
+
+/// The prefetch counts of one phase for the slow push log, `None` where the phase ran none.
+fn prefetch_field(counts: &PrefetchCounts) -> Option<tracing::field::DisplayValue<PrefetchCounts>> {
+    (counts.runs != 0).then(|| tracing::field::display(*counts))
+}
+
+/// Records how long one phase's prefetches took, where every one of them finished.
+fn record_prefetch(
+    phase: &'static str,
+    counts: &PrefetchCounts,
+    handler_and_outcome: &[KeyValue; 2],
+) {
+    if counts.runs == 0 || counts.finished != counts.runs {
+        return;
+    }
+    let [handler, outcome] = handler_and_outcome.clone();
+    PREFETCH_DURATION.record(
+        counts.elapsed.as_secs_f64() * 1000.,
+        &[KeyValue::new("phase", phase), handler, outcome],
+    );
+}
+
+/// Runs `work` with `prefetch`, where there is one, beside it and answers `work`'s output as soon
+/// as there is one. Dropping the prefetch then stops it comparing and starting fetches; those it
+/// started run to their end.
+async fn beside_prefetch<T>(
+    mut work: Pin<&mut impl Future<Output = T>>,
+    prefetch: Option<Pin<&mut impl Future<Output = ()>>>,
+) -> T {
+    let Some(mut prefetch) = prefetch else {
+        return work.await;
+    };
+    let mut prefetching = true;
+    loop {
+        tokio::select! {
+            // The prefetch is polled first so it has started before the work can finish.
+            biased;
+            () = prefetch.as_mut(), if prefetching => prefetching = false,
+            output = work.as_mut() => return output,
         }
     }
 }
@@ -610,6 +684,7 @@ pub async fn handler(
     request: Request<BranchPushRequest>,
     authorizer: Arc<dyn RepositoryAuthorizer>,
     immutable_store: Arc<dyn lore_storage::ImmutableStore>,
+    local_tier: Option<Arc<dyn lore_storage::ImmutableStore>>,
     mutable_store: Arc<dyn lore_storage::MutableStore>,
     notification: Arc<dyn NotificationSender>,
     hook_dispatcher: &HookDispatcher,
@@ -649,10 +724,13 @@ pub async fn handler(
                 "Handling branch push request",
             );
 
+            // The fast-forward merge must build the same revision whoever pushes; narrowing its
+            // diff to the pusher's reads would change it.
             let repository = Arc::new(RepositoryContext::new_server_context(
                 immutable_store,
                 mutable_store,
                 repository,
+                allow_all_repositories(),
             ));
 
             let repository_id: RepositoryId = repository.id;
@@ -680,6 +758,7 @@ pub async fn handler(
                 async {
                     let pushed = push(
                         repository.clone(),
+                        local_tier.as_ref(),
                         branch,
                         revision,
                         access,
@@ -868,10 +947,10 @@ impl PushAccess {
         let access = Self {
             write: authorizer
                 .permits(extensions, repository, Action::Write)
-                .await,
+                .await?,
             push_protected: authorizer
                 .permits(extensions, repository, Action::PushProtected)
-                .await,
+                .await?,
         };
         if access.write || access.push_protected {
             Ok(access)
@@ -905,11 +984,15 @@ struct VerifiedParents {
     other: Option<Arc<State>>,
 }
 
-/// Pushes `latest` as the latest revision of `branch`, mapping the name of a deleted branch
-/// back to it.
+/// Pushes `latest` as the latest revision of `branch`. A branch whose name doesn't map to it, as
+/// an archive leaves it, fails as not found.
+///
+/// `local_tier` is the store that reads through `repository`'s store fill with what they read,
+/// which the push prefetches the trees it walks into; `None` prefetches nothing.
 #[allow(clippy::too_many_arguments)]
 pub async fn push(
     repository: Arc<RepositoryContext>,
+    local_tier: Option<&Arc<dyn lore_storage::ImmutableStore>>,
     branch: BranchId,
     latest: Hash,
     access: PushAccess,
@@ -922,6 +1005,7 @@ pub async fn push(
     let (metadata, loaded) = load_branch_and_head(repository.clone(), branch, latest).await;
     push_loaded(
         repository,
+        local_tier,
         branch,
         latest,
         access,
@@ -950,7 +1034,8 @@ pub(crate) async fn load_branch_and_head(
 }
 
 /// Pushes `latest` as the latest revision of `branch` from the branch `metadata` and the
-/// `loaded` head read for it, mapping the name of a deleted branch back to it.
+/// `loaded` head read for it. A branch whose name doesn't map to it, as an archive leaves it,
+/// fails as not found.
 ///
 /// The name check runs beside the fragment verification of the incoming revision. Both complete
 /// before the head moves, and a failed branch check is reported ahead of any failure of the
@@ -959,6 +1044,7 @@ pub(crate) async fn load_branch_and_head(
 #[instrument(level = "debug", skip_all, fields(branch))]
 pub(crate) async fn push_loaded(
     repository: Arc<RepositoryContext>,
+    local_tier: Option<&Arc<dyn lore_storage::ImmutableStore>>,
     branch: BranchId,
     latest: Hash,
     access: PushAccess,
@@ -986,6 +1072,7 @@ pub(crate) async fn push_loaded(
         async {
             prepare_push(
                 repository.clone(),
+                local_tier,
                 latest,
                 loaded?,
                 force,
@@ -1006,6 +1093,7 @@ pub(crate) async fn push_loaded(
         } => {
             store_new_head(
                 repository,
+                local_tier,
                 branch,
                 latest,
                 loaded,
@@ -1025,6 +1113,7 @@ pub(crate) async fn push_loaded(
         } => {
             try_fast_forward_merge(
                 repository,
+                local_tier,
                 branch,
                 loaded.incoming,
                 loaded.head,
@@ -1063,7 +1152,7 @@ async fn load_branch_metadata(
 /// Refuses a push the caller's `access` does not cover: a protected branch needs
 /// `push-protected`, any other branch `write`.
 fn check_push_access(metadata: &Metadata, access: PushAccess) -> Result<(), Status> {
-    if metadata.get_bool(PROTECT).unwrap_or_default() {
+    if branch::protected(metadata) {
         if !access.push_protected {
             warn!("Branch push failed, branch is protected");
             return Err(Status::permission_denied("protected"));
@@ -1076,90 +1165,70 @@ fn check_push_access(metadata: &Metadata, access: PushAccess) -> Result<(), Stat
     Ok(())
 }
 
-/// Ensures `name` maps to `branch`, mapping it back when no live branch claims it.
-async fn ensure_name_maps_to_branch(
+/// Fails unless `name` maps to `branch`, writing nothing: only a create restores a branch. A push
+/// to an archived branch whose name maps to nothing, or to an id without metadata, fails as
+/// `NOT_FOUND`, so the client restores the branch with a create and pushes again. One whose name
+/// maps to another branch with metadata fails as in use, as that create would.
+///
+/// Not an `async fn`, which would hold a second copy of its arguments.
+#[allow(clippy::manual_async_fn)]
+fn ensure_name_maps_to_branch(
     repository: Arc<RepositoryContext>,
     branch: BranchId,
     name: &str,
-) -> Result<(), Status> {
-    if name.is_empty() {
-        return Ok(());
-    }
+) -> impl Future<Output = Result<(), Status>> {
+    async move {
+        if name.is_empty() {
+            return Ok(());
+        }
 
-    // The `None` arm reinstates the mapping, so an unreadable name key must
-    // not reach it: that would rebind the name away from whichever branch
-    // currently owns it.
-    match none_or_status(
-        branch::load_name_to_id_local(repository.clone(), name).await,
-        BranchError::is_branch_not_found,
-    )? {
-        Some(mapped) if BranchId::from(mapped) == branch => Ok(()),
-        Some(other) => {
-            let other_id = BranchId::from(other);
-            if other_branch_still_claims_name(&repository, other_id, name).await? {
-                info!(
-                    {BRANCH_ID} = %branch,
-                    %name,
-                    claimed_by = %other_id,
-                    "Cannot reinstate deleted branch: name claimed by another branch",
-                );
-                Err(Status::already_exists(format!(
-                    "Branch name '{name}' is in use by a different branch"
-                )))
-            } else {
-                debug!(
-                    {BRANCH_ID} = %branch,
-                    %name,
-                    stale = %other_id,
-                    "Stale name → id mapping, reinstating to current branch",
-                );
-                branch::store_name_to_id(repository, branch, name)
-                    .await
-                    .filter_slow_down()?
-                    .warn_map_err(|err| {
-                        Status::internal(format!("Failed to reinstate name → id mapping: {err}"))
-                    })
-            }
+        let held = none_or_status(
+            branch::load_name_to_id_local(repository.clone(), name).await,
+            BranchError::is_branch_not_found,
+        )?
+        .unwrap_or_default();
+        if held == branch {
+            return Ok(());
         }
-        None => {
-            // No mapping (deleted — the underlying store treats zero
-            // values as missing — or never written). Reinstate the
-            // mapping so the pushed branch is live again.
-            debug!({BRANCH_ID} = %branch, %name, "Reinstating name → id mapping for push");
-            branch::store_name_to_id(repository, branch, name)
-                .await
-                .filter_slow_down()?
-                .warn_map_err(|err| {
-                    Status::internal(format!("Failed to reinstate name → id mapping: {err}"))
-                })
+        if !held.is_zero() && holder_has_metadata(&repository, held, name).await? {
+            info!(
+                {BRANCH_ID} = %branch,
+                %name,
+                claimed_by = %held,
+                "Cannot push to archived branch: name claimed by another branch",
+            );
+            return Err(Status::already_exists(format!(
+                "Branch name '{name}' is in use by a different branch"
+            )));
         }
+        debug!({BRANCH_ID} = %branch, %name, "Push to an archived branch, which a create restores");
+        Err(Status::not_found(format!("Branch '{name}' is archived")))
     }
 }
 
-/// True iff `other_id` exists and its metadata still names it `name`. A
-/// mismatch (dead branch, missing metadata, or a rename that left an
-/// orphan name pointer) is treated as a stale mapping the caller can
-/// safely overwrite. A store that cannot answer is reported rather than
-/// read as a mismatch, so an unreadable branch never has its name
-/// reassigned.
-async fn other_branch_still_claims_name(
+/// True iff `holder`, the branch `name` maps to, has metadata, whatever name it holds: a create
+/// refuses a name that maps to such a branch. A branch without metadata is a stale mapping, which a
+/// create claims. Any other failure to read the metadata hash is reported rather than read as none.
+async fn holder_has_metadata(
     repository: &Arc<RepositoryContext>,
-    other_id: BranchId,
+    holder: BranchId,
     name: &str,
 ) -> Result<bool, Status> {
-    let Ok(metadata_hash) = branch::metadata_hash(repository.clone(), other_id)
+    match branch::metadata_hash(repository.clone(), holder)
         .await
         .filter_slow_down()?
-    else {
-        return Ok(false);
-    };
-    let Ok(metadata) = branch::load_metadata(repository.clone(), metadata_hash)
-        .await
-        .filter_slow_down()?
-    else {
-        return Ok(false);
-    };
-    Ok(branch::name(&metadata).unwrap_or("") == name)
+    {
+        Ok(_) => Ok(true),
+        Err(err) if err.is_branch_not_found() => Ok(false),
+        Err(err) => Err(err).warn_map_err(|err| holder_unreadable(name, err)),
+    }
+}
+
+/// The failure of a push whose read of the metadata of the branch `name` maps to fails.
+fn holder_unreadable(name: &str, err: &BranchError) -> Status {
+    Status::internal(format!(
+        "Failed to read the metadata of the branch '{name}' maps to: {err}"
+    ))
 }
 
 /// The latest revision of `branch`, zero when it has none, and the state of `latest`.
@@ -1223,6 +1292,7 @@ fn decide_head_move(
 /// when it moves at all.
 async fn prepare_push(
     repository: Arc<RepositoryContext>,
+    local_tier: Option<&Arc<dyn lore_storage::ImmutableStore>>,
     latest: Hash,
     loaded: HeadAndIncoming,
     force: bool,
@@ -1248,7 +1318,8 @@ async fn prepare_push(
     // Both a plain push and a fast-forward merge verify the incoming revision against its own
     // parents, which do not depend on the head. Without this check a client could reference
     // fragments that were never fully uploaded.
-    let parents = verify_incoming_fragments(repository, loaded.incoming.clone(), report).await?;
+    let parents =
+        verify_incoming_fragments(repository, local_tier, loaded.incoming.clone(), report).await?;
 
     Ok(PreparedPush::Move {
         loaded,
@@ -1261,6 +1332,7 @@ async fn prepare_push(
 /// them exists.
 async fn verify_incoming_fragments(
     repository: Arc<RepositoryContext>,
+    local_tier: Option<&Arc<dyn lore_storage::ImmutableStore>>,
     state: Arc<State>,
     report: &mut PushReport,
 ) -> Result<VerifiedParents, Status> {
@@ -1271,7 +1343,15 @@ async fn verify_incoming_fragments(
 
     let other = load_other_parent_state(repository.clone(), &state).await?;
 
-    let verified = verify_fragments(repository, parent.clone(), other.clone(), state, report).await;
+    let verified = verify_fragments(
+        repository,
+        local_tier,
+        parent.clone(),
+        other.clone(),
+        state,
+        report,
+    )
+    .await;
     report.verified_at = Some(Instant::now());
     report.verification_failed = verified.is_err();
     verified?;
@@ -1284,6 +1364,7 @@ async fn verify_incoming_fragments(
 #[allow(clippy::too_many_arguments)]
 async fn store_new_head(
     repository: Arc<RepositoryContext>,
+    local_tier: Option<&Arc<dyn lore_storage::ImmutableStore>>,
     branch: BranchId,
     latest: Hash,
     loaded: HeadAndIncoming,
@@ -1369,6 +1450,7 @@ async fn store_new_head(
             Some(HeadMove::Merge) => {
                 return try_fast_forward_merge(
                     repository,
+                    local_tier,
                     branch,
                     incoming,
                     current,
@@ -1395,9 +1477,11 @@ async fn store_new_head(
 /// can resolve locally.
 ///
 /// Retries via CAS loop if the branch head moves again during processing.
+#[allow(clippy::too_many_arguments)]
 #[instrument(level = "debug", skip_all)]
 async fn try_fast_forward_merge(
     repository: Arc<RepositoryContext>,
+    local_tier: Option<&Arc<dyn lore_storage::ImmutableStore>>,
     branch: BranchId,
     incoming_state: Arc<State>,
     mut current_head: Hash,
@@ -1421,17 +1505,28 @@ async fn try_fast_forward_merge(
             %original_base, %incoming_revision, %current_head,
             "Computing diff3 for fast-forward merge"
         );
-        let diff_result = lore_revision::revision::diff3_collect(
-            repository.clone(),
-            original_base,
-            incoming_revision,
-            current_head,
-            None,
-            false,
-        )
-        .await
-        .filter_slow_down()?
-        .warn_map_err(|err| {
+        let diffed = {
+            let diff = pin!(lore_revision::revision::diff3_collect(
+                repository.clone(),
+                original_base,
+                incoming_revision,
+                current_head,
+                None,
+                true,
+            ));
+            let prefetch = pin!(local_tier.map(|local| {
+                prefetch_changed_node_blocks(
+                    repository.clone(),
+                    local.clone(),
+                    original_base,
+                    vec![incoming_revision, current_head],
+                    MAX_PREFETCH_BLOCKS,
+                    report.merge_prefetch.clone(),
+                )
+            }));
+            beside_prefetch(diff, prefetch.as_pin_mut()).await
+        };
+        let mut diff_result = diffed.filter_slow_down()?.warn_map_err(|err| {
             Status::internal(format!(
                 "Failed to compute diff3 for fast-forward merge: {err}"
             ))
@@ -1464,24 +1559,20 @@ async fn try_fast_forward_merge(
                 ))
             })?;
 
-        // Apply the non-conflicting changes to the current head state
-        state::apply_tree_changes(
+        lore_revision::commit::merge_tree_changes(
             repository.clone(),
             state_current.clone(),
-            &diff_result.changes,
+            &incoming_state,
+            &mut diff_result.changes,
         )
         .await
+        .filter_slow_down()?
         .warn_map_err(|err| {
             Status::internal(format!(
-                "Failed to apply tree changes for fast-forward merge: {err}"
+                "Failed to merge tree changes for fast-forward merge: {err}"
             ))
         })?;
 
-        // Set parents: self=current head (target branch), other=incoming merge revision
-        state_current.set_parent_self(current_head);
-        state_current.set_parent_other(incoming_revision);
-
-        // Compute revision number from both parents
         let parent_state = State::deserialize(repository.clone(), current_head)
             .await
             .filter_slow_down()?
@@ -1489,11 +1580,7 @@ async fn try_fast_forward_merge(
                 Status::internal(format!("Failed to load current head state: {err}"))
             })?;
 
-        let revision_number = next_revision_number(
-            parent_state.revision_number(),
-            incoming_state.revision_number(),
-        );
-        state_current.set_revision_number(revision_number);
+        let revision_number = state_current.revision_number();
 
         // Copy metadata from the incoming revision and set merged-by to "server"
         let incoming_metadata_hash = incoming_state.metadata_hash();
@@ -1763,23 +1850,43 @@ async fn collect_new_addresses(
 ///
 /// A missing fragment is reported as `FAILED_PRECONDITION` naming the address,
 /// whether the walk cannot read it or the store answers that it is absent.
-/// `NOT_FOUND` is left to name an absent branch, which a caller reinstates.
+/// `NOT_FOUND` is left to name an absent branch, which a caller restores with a create.
 async fn verify_fragments(
     repository: Arc<RepositoryContext>,
+    local_tier: Option<&Arc<dyn lore_storage::ImmutableStore>>,
     parent_state: Arc<State>,
     other_parent_state: Option<Arc<State>>,
     state: Arc<State>,
     report: &mut PushReport,
 ) -> Result<(), Status> {
     report.collect_started = Some(Instant::now());
-    let mut new_fragments = collect_new_addresses(
-        repository.clone(),
-        parent_state,
-        other_parent_state,
-        state,
-        report.store_requests.clone(),
-    )
-    .await?;
+    let collected = {
+        let pushed = state.revision();
+        let parents = [Some(&parent_state), other_parent_state.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|parent| parent.revision())
+            .collect();
+        let collect = pin!(collect_new_addresses(
+            repository.clone(),
+            parent_state,
+            other_parent_state,
+            state,
+            report.store_requests.clone(),
+        ));
+        let prefetch = pin!(local_tier.map(|local| {
+            prefetch_changed_node_blocks(
+                repository.clone(),
+                local.clone(),
+                pushed,
+                parents,
+                MAX_PREFETCH_BLOCKS,
+                report.verify_prefetch.clone(),
+            )
+        }));
+        beside_prefetch(collect, prefetch.as_pin_mut()).await
+    };
+    let mut new_fragments = collected?;
     report.exist_started = Some(Instant::now());
     report.collected_addresses = Some(new_fragments.len() as u64);
 

@@ -13,6 +13,7 @@ pub mod fragment_engine;
 pub mod fragment_flags;
 pub mod fs_util;
 pub mod gc_event;
+#[cfg(feature = "test-util")]
 pub mod mutable_conformance;
 
 use std::sync::OnceLock;
@@ -31,6 +32,7 @@ pub mod read;
 mod read_flight;
 #[cfg(feature = "test-util")]
 pub mod read_flight;
+pub(crate) mod resume;
 pub mod store_types;
 #[cfg(feature = "test-util")]
 pub mod test_util;
@@ -57,7 +59,6 @@ pub use compress::suggest_compression_mode;
 pub use compress::writable_compression_mode;
 // Re-export concurrency primitives
 pub use concurrency::FILE_COUNT_LIMIT_DEFAULT;
-pub use concurrency::FRAGMENT_BUDGET_KIB;
 pub use concurrency::FRAGMENT_MINIMUM_COST_KIB;
 pub use concurrency::FRAGMENT_SIZE_EXPECTED;
 pub use concurrency::FRAGMENT_SIZE_MINIMUM;
@@ -98,6 +99,7 @@ pub use hash::hash_slice;
 pub use hash::hash_string;
 pub use hash::hash_string_bytes;
 // Re-export store traits
+pub use immutable_store::CorrelationHold;
 pub use immutable_store::ImmutableStore;
 pub use immutable_store::StoreError;
 pub(crate) use immutable_store::payload_is_content;
@@ -119,12 +121,15 @@ pub use lore_base::retry::DEFAULT_JITTER;
 pub use lore_base::retry::Retry;
 pub use lore_base::retry::retry;
 pub use lore_base::retry::retry_with_jitter;
+pub use lore_io::DataCursor;
 // Re-export maintenance functions
 pub use maintenance::compactor;
 pub use maintenance::evictor;
 pub use maintenance::gc;
 pub use mutable_store::MutableStore;
+pub use mutable_store::flush_stores;
 // Re-export options types
+pub use options::FlushOptions;
 pub use options::ReadOptions;
 pub use options::WriteOptions;
 // Re-export packstore

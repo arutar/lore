@@ -33,6 +33,7 @@ use lore_revision::metadata::branch::BranchMetadataError;
 use lore_revision::metadata::repository::RepositoryMetadataError;
 use lore_revision::repository::RepositoryError;
 use lore_revision::state::StateError;
+use lore_revision::state::allow_all_repositories;
 use lore_server::auth::jwt::AuthorizationToken;
 use lore_server::auth::jwt::ResourcePermission;
 use lore_server::authnz::repository_authorizer::Action;
@@ -321,7 +322,8 @@ mod may_administer {
                     "alice",
                     "mallory",
                 )
-                .await,
+                .await
+                .unwrap(),
                 permitted,
                 "{actions:?}"
             );
@@ -343,6 +345,7 @@ mod may_administer {
                 "mallory",
             )
             .await
+            .unwrap()
         );
         assert_eq!(
             *recording.asked.lock().unwrap(),
@@ -364,7 +367,8 @@ mod may_administer {
                     "alice",
                     "alice",
                 )
-                .await,
+                .await
+                .unwrap(),
                 permitted,
                 "{actions:?}"
             );
@@ -388,7 +392,8 @@ mod may_administer {
                     "alice",
                     user,
                 )
-                .await,
+                .await
+                .unwrap(),
                 permitted,
                 "{user}"
             );
@@ -425,8 +430,38 @@ mod may_administer {
                 "mallory",
             )
             .await
+            .unwrap()
         );
         assert_eq!(*recording.enumerated.lock().unwrap(), 0);
+        assert!(recording.asked.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_layers_grants_answer_set_protected() {
+        let (immutable_store, mutable_store, _execution) =
+            crate::store::test_support::test_store_create()
+                .await
+                .expect("Failed to create stores");
+        let recording = Recording::new(false, &[]);
+        let authorizer: Arc<dyn RepositoryAuthorizer> = recording.clone();
+        let mut extensions = extensions_with_token();
+        extensions.insert(
+            lore_server::authnz::repository_authorizer::PartitionGrants {
+                repository_id: RepositoryId::default(),
+                grants: Grants::Actions(["set-protected".to_string()].into()),
+            },
+        );
+        let repository = Arc::new(
+            lore_revision::repository::RepositoryContext::new_server_context(
+                immutable_store,
+                mutable_store,
+                RepositoryId::default(),
+                allow_all_repositories(),
+            ),
+        );
+        require_branch_protection_administration(&authorizer, &extensions, repository, "mallory")
+            .await
+            .expect("set-protected permits");
         assert!(recording.asked.lock().unwrap().is_empty());
     }
 
@@ -445,10 +480,36 @@ mod may_administer {
                     "alice",
                     "<unknown>",
                 )
-                .await,
+                .await
+                .unwrap(),
                 permitted,
                 "{actions:?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_check_is_an_error_and_a_denial_is_not() {
+        for (refusal, outcome) in [
+            (Status::permission_denied("denied"), Ok(false)),
+            (
+                Status::resource_exhausted("rate limited"),
+                Err(Code::ResourceExhausted),
+            ),
+        ] {
+            let authorizer: Arc<dyn RepositoryAuthorizer> = Arc::new(
+                crate::authnz::repository_authorizer::RefusingAuthorizer(refusal),
+            );
+            let result = may_administer_repository(
+                &authorizer,
+                &extensions_with_token(),
+                RepositoryId::default(),
+                "alice",
+                "mallory",
+            )
+            .await
+            .map_err(|status| status.code());
+            assert_eq!(result, outcome);
         }
     }
 }

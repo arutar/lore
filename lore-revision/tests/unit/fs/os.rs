@@ -4,7 +4,6 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::path::Path;
-#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,12 +14,14 @@ use lore_revision::fs::filesystem_provider::FilesystemProvider;
 use lore_revision::fs::filesystem_provider::InstanceOperation;
 use lore_revision::fs::filesystem_provider::InstanceOperationImpl;
 use lore_revision::fs::os::*;
+use lore_revision::infer::ConflictMarkers;
 use lore_revision::node::Node;
 use lore_revision::node::NodeFileMode;
 use lore_revision::repository::RepositoryContext;
 use lore_revision::util::path::RelativePath;
 
 use crate::fs::filesystem_provider::setup_test_execution;
+use crate::helper::case_insensitive;
 use crate::repository::test_helpers::file_node;
 use crate::repository::test_helpers::store_fragment;
 use crate::repository::test_helpers::stored_as_list;
@@ -39,19 +40,6 @@ async fn os_operation(root: &Path) -> Arc<InstanceOperationImpl> {
 
 fn relative(path: &str) -> RelativePath {
     RelativePath::new_from_initial_path(path).expect("relative path")
-}
-
-/// Whether the filesystem under the temporary directory holds one case variation of a name
-/// and answers lookups in any other. Windows and macOS do by default and Linux does not, but a
-/// mount can be either on any of them, so the tests below ask rather than assume — and the
-/// two behaviours are different enough that a test written for one is not a test of the
-/// other.
-fn case_insensitive(dir: &Path) -> bool {
-    let probe = dir.join("CaseProbe");
-    std::fs::write(&probe, b"").expect("write probe");
-    let insensitive = std::fs::metadata(dir.join("caseprobe")).is_ok();
-    std::fs::remove_file(&probe).expect("remove probe");
-    insensitive
 }
 
 /// An empty directory of its own on a filesystem other than the one holding `beside`, or
@@ -102,8 +90,8 @@ async fn list_path_yields_a_directory_listing() {
         panic!("a directory must list");
     };
     let mut names = Vec::new();
-    while let Some(entry) = listing.next().await {
-        if let Some(item) = file_list_item(entry).expect("entry name") {
+    while let Some(item) = listing.next().await {
+        if let Some(item) = item.expect("entry name") {
             names.push(item.name);
         }
     }
@@ -126,8 +114,8 @@ async fn a_listing_skips_a_link_to_a_file_it_would_otherwise_track() {
         panic!("a directory must list");
     };
     let mut names = Vec::new();
-    while let Some(entry) = listing.next().await {
-        if let Some(item) = file_list_item(entry).expect("entry name") {
+    while let Some(item) = listing.next().await {
+        if let Some(item) = item.expect("entry name") {
             names.push(item.name);
         }
     }
@@ -193,7 +181,7 @@ async fn list_path_describes_a_file_by_its_own_name() {
         panic!("a file must be described, not listed");
     };
     assert_eq!(item.name, "lonely.txt");
-    assert_eq!(item.metadata.len, 4);
+    assert_eq!(item.info.size(), 4);
 }
 
 #[tokio::test]
@@ -449,23 +437,26 @@ async fn infer_is_conflicted_reads_the_content_at_the_path() {
             std::fs::write(dir.path().join("clean"), b"one\ntwo\n").expect("write clean");
             let operation = os_operation(dir.path()).await;
 
-            assert!(
+            assert_eq!(
                 operation
                     .infer_is_conflicted(&relative("marked"))
                     .await
-                    .expect("reading the content must succeed")
+                    .expect("reading the content must succeed"),
+                ConflictMarkers::Present
             );
-            assert!(
-                !operation
+            assert_eq!(
+                operation
                     .infer_is_conflicted(&relative("clean"))
                     .await
-                    .expect("reading the content must succeed")
+                    .expect("reading the content must succeed"),
+                ConflictMarkers::Absent
             );
-            assert!(
-                !operation
+            assert_eq!(
+                operation
                     .infer_is_conflicted(&relative("absent"))
                     .await
-                    .expect("a path holding no file is an answer, not a failure")
+                    .expect("a path holding no file is an answer, not a failure"),
+                ConflictMarkers::NoFile
             );
         })
         .await;
@@ -613,6 +604,34 @@ async fn rename_merges_a_directory_into_the_one_at_the_destination() {
     assert!(!from.exists(), "the source must be gone");
 }
 
+/// A rename into a directory the file system lacks is refused for a directory as for a file: the
+/// source keeps what it holds, and nothing is created at the destination.
+#[tokio::test]
+async fn rename_refuses_a_destination_whose_directory_is_missing() {
+    let dir = temp_dir();
+    std::fs::create_dir(dir.path().join("from")).expect("create source");
+    std::fs::write(dir.path().join("from").join("child"), b"kept").expect("write child");
+    std::fs::write(dir.path().join("file"), b"kept").expect("write file");
+    let operation = os_operation(dir.path()).await;
+
+    for source in ["from", "file"] {
+        operation
+            .rename(&relative(source), &relative(&format!("missing/{source}")))
+            .await
+            .expect_err("the destination's directory is missing");
+    }
+
+    assert!(!dir.path().join("missing").exists());
+    assert_eq!(
+        Some(b"kept".to_vec()),
+        std::fs::read(dir.path().join("from").join("child")).ok()
+    );
+    assert_eq!(
+        Some(b"kept".to_vec()),
+        std::fs::read(dir.path().join("file")).ok()
+    );
+}
+
 /// A file and a directory are not two spellings of one thing, so there is no move that leaves
 /// one of them.
 #[tokio::test]
@@ -631,6 +650,116 @@ async fn rename_refuses_a_destination_of_another_kind() {
     assert!(
         dir.path().join("to").is_dir(),
         "the destination must survive"
+    );
+}
+
+/// A second path to `name` in `dir` naming the same entry: the name in another case where the file
+/// system folds case, and the name through `.` where it does not.
+fn same_entry(dir: &Path, name: &str) -> PathBuf {
+    if case_insensitive(dir) {
+        dir.join(name.to_uppercase())
+    } else {
+        dir.join(".").join(name)
+    }
+}
+
+/// Two paths name one entry only where they lead to the same file, symbolic links followed: a
+/// link to it does, another spelling does where the file system folds case, and another file and a
+/// path naming nothing never do. A first path naming nothing, one through a file included, is
+/// answered as naming nothing.
+#[tokio::test]
+async fn names_one_entry_only_for_paths_to_the_same_file() {
+    let dir = temp_dir();
+    std::fs::write(dir.path().join("file"), b"").expect("write the file");
+    std::fs::write(dir.path().join("other"), b"").expect("write the other file");
+    let folds_case = case_insensitive(dir.path());
+    #[cfg(target_family = "unix")]
+    let linked = std::os::unix::fs::symlink("file", dir.path().join("link")).is_ok();
+    #[cfg(target_family = "windows")]
+    let linked = std::os::windows::fs::symlink_file("file", dir.path().join("link")).is_ok();
+    let operation = os_operation(dir.path()).await;
+
+    let mut cases = vec![
+        ("file", "file", Some(true)),
+        ("file", "FILE", Some(folds_case)),
+        ("file", "other", Some(false)),
+        ("file", "missing", Some(false)),
+        ("file", "other/child", Some(false)),
+        ("missing", "file", None),
+        ("other/child", "file", None),
+    ];
+    if linked {
+        cases.push(("file", "link", Some(true)));
+    }
+    for (from, to, one) in cases {
+        assert_eq!(
+            operation
+                .names_one_entry(&relative(from), &relative(to))
+                .await
+                .expect("an answer"),
+            one,
+            "{from} and {to}"
+        );
+    }
+}
+
+/// A rename holds no unification, which it boxes only where the rename is refused: its future is
+/// smaller than the unification's, which would otherwise make every rename as large.
+#[test]
+fn a_rename_holds_no_unification() {
+    let (from, to) = (Path::new("from"), Path::new("to"));
+    let rename = rename_unifying(from, to);
+    let unification = unify_refused_rename(from, to, std::io::ErrorKind::Other.into());
+    assert!(
+        size_of_val(&rename) < size_of_val(&unification),
+        "the rename holds {} bytes, the unification {}",
+        size_of_val(&rename),
+        size_of_val(&unification)
+    );
+}
+
+/// A refused rename of a file to a path naming its own entry, as a case-only rename does on a file
+/// system that folds case, removes nothing: the refusal is answered and the file keeps what it
+/// holds.
+#[tokio::test]
+async fn a_refused_rename_of_a_file_to_its_own_entry_keeps_it() {
+    let dir = temp_dir();
+    let file = dir.path().join("file");
+    std::fs::write(&file, b"kept").expect("write the file");
+
+    let refused = unify_refused_rename(
+        &file,
+        &same_entry(dir.path(), "file"),
+        std::io::ErrorKind::PermissionDenied.into(),
+    )
+    .await
+    .expect_err("an entry is not unified with itself");
+
+    assert_eq!(std::io::ErrorKind::PermissionDenied, refused.kind());
+    assert_eq!(Some(b"kept".to_vec()), std::fs::read(&file).ok());
+}
+
+/// A refused rename of a directory to a path naming its own entry does not enter it as its own
+/// destination: the refusal is answered and the directory keeps its children.
+#[tokio::test]
+async fn a_refused_rename_of_a_directory_to_its_own_entry_keeps_it() {
+    let dir = temp_dir();
+    let directory = dir.path().join("directory");
+    std::fs::create_dir(&directory).expect("create the directory");
+    std::fs::write(directory.join("entry"), b"kept").expect("write the entry");
+
+    let refused = unify_refused_rename(
+        &directory,
+        &same_entry(dir.path(), "directory"),
+        std::io::ErrorKind::PermissionDenied.into(),
+    )
+    .await
+    .expect_err("an entry is not unified with itself");
+
+    assert_eq!(std::io::ErrorKind::PermissionDenied, refused.kind());
+    assert_eq!(
+        Some(b"kept".to_vec()),
+        std::fs::read(directory.join("entry")).ok()
     );
 }
 
@@ -910,4 +1039,104 @@ async fn an_operation_touches_nothing_at_a_path_that_leaves_its_root() {
             }
         })
         .await;
+}
+
+/// A batched read of whether paths hold directories answers each in order, in its own spelling:
+/// a directory holds one, and nothing, a file or a path through a file none, as the trait's
+/// default, one file-information read a path, answers too. The paths span more of the blocking
+/// tasks the read takes than run at once, which answer in order.
+#[tokio::test]
+async fn directories_held_answers_each_path_in_order_as_one_read_a_path_does() {
+    let dir = temp_dir();
+    for index in 0..650 {
+        std::fs::create_dir_all(dir.path().join(format!("d{index}/inner"))).expect("mkdir");
+    }
+    std::fs::write(dir.path().join("file"), b"data").expect("write file");
+    let mut spelled = vec![
+        "d0".to_string(),
+        "d0/inner".to_string(),
+        "gone".to_string(),
+        "file".to_string(),
+        "file/below".to_string(),
+        "D1".to_string(),
+    ];
+    spelled.extend((0..1300).map(|index| format!("d{index}")));
+    let paths: Arc<[RelativePath]> = spelled
+        .iter()
+        .map(|spelled| crate::helper::relative_path(spelled))
+        .collect();
+    let mut expected = vec![
+        true,
+        true,
+        false,
+        false,
+        false,
+        case_insensitive(dir.path()),
+    ];
+    expected.extend((0..1300).map(|index| index < 650));
+
+    let root = dir.path().to_path_buf();
+    let (batched, one_by_one) = LORE_CONTEXT
+        .scope(setup_test_execution(), async move {
+            let mut batched = Vec::new();
+            os_operation(&root)
+                .await
+                .directories_held(paths.clone(), &mut batched)
+                .await
+                .expect("the batched read");
+            let reading = crate::fs::filesystem_provider::TestFilesystemProvider::reading(&root);
+            let operation = FilesystemProvider::begin_operation(&reading)
+                .await
+                .expect("an operation of the test provider");
+            let mut one_by_one = Vec::new();
+            operation
+                .directories_held(paths, &mut one_by_one)
+                .await
+                .expect("the read a path at a time");
+            (batched, one_by_one)
+        })
+        .await;
+    assert_eq!(batched, expected);
+    assert_eq!(one_by_one, expected);
+}
+
+/// A path a stat is refused permission for holds a directory in a batched read: it may be one the
+/// user may not search, which no deletion took.
+#[cfg(target_family = "unix")]
+#[tokio::test]
+async fn directories_held_takes_a_path_refused_permission_as_held() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Safety: `geteuid` takes no arguments and cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: no permission refuses root a stat");
+        return;
+    }
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.path().join("locked/inner")).expect("mkdir");
+    std::fs::set_permissions(
+        dir.path().join("locked"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .expect("lock the directory");
+    let root = dir.path().to_path_buf();
+    let held = LORE_CONTEXT
+        .scope(setup_test_execution(), async move {
+            let mut held = Vec::new();
+            let read = os_operation(&root)
+                .await
+                .directories_held(
+                    Arc::from([crate::helper::relative_path("locked/inner")]),
+                    &mut held,
+                )
+                .await;
+            (read.map(|()| held), root)
+        })
+        .await;
+    std::fs::set_permissions(
+        dir.path().join("locked"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .expect("unlock the directory");
+    assert_eq!(held.0.expect("the batched read"), [true]);
 }

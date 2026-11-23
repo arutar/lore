@@ -67,6 +67,13 @@ class LocalModificationsError(LocalChanges):
     sites that catch `LocalChanges` keep working."""
 
 
+#: The exit status of a command refused by local modifications.
+LOCAL_MODIFICATIONS = 44
+
+#: The exit status of a command refused by a divergent history.
+DIVERGENT = 42
+
+
 class FileAlreadyExist(LoreException): ...
 
 
@@ -163,18 +170,15 @@ class NotALinkError(LoreException): ...
 class LinkNotFoundError(LoreException): ...
 
 
-class LinkPinDivergedError(LoreException): ...
-
-
-class LinkMountDivergedError(LoreException): ...
-
-
 class LinkDivergedError(LoreException):
     """Raised when a push stops at a link whose branch has newer revisions on
     the remote than the local history holds."""
 
 
 class OverlappingLinkError(LoreException): ...
+
+
+class OverlappingMountError(LoreException): ...
 
 
 class NotALayerError(LoreException): ...
@@ -277,14 +281,14 @@ ERROR_MAP: list[tuple[str | re.Pattern, type[LoreException]]] = [
         "local mutable store but is configured to use a shared store",
         LocalMutableStoreWithSharedStore,
     ),
-    ("Branch has been advanced by another instance", BranchAdvanced),
+    ("The branch's latest revision has moved on", BranchAdvanced),
     ("Nothing staged for commit", NothingStagedError),
     ("Path is not a link", NotALinkError),
     ("Link not found", LinkNotFoundError),
-    ("Link pin conflict at", LinkPinDivergedError),
-    ("Link mount conflict at", LinkMountDivergedError),
     ("Can't push the link at", LinkDivergedError),
     ("overlaps the link already mounted at", OverlappingLinkError),
+    ("overlaps the link mounted at", OverlappingMountError),
+    ("overlaps the layer mounted at", OverlappingMountError),
     ("Path is not a layer", NotALayerError),
     ("Failed to connect to remote URL", BadSharedStoreRemoteUrl),
     ("Local modifications prevent synchronization", LocalModificationsError),

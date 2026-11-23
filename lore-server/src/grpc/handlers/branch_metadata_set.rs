@@ -11,9 +11,11 @@ use lore_revision::branch;
 use lore_revision::lore::BranchId;
 use lore_revision::metadata::Metadata;
 use lore_revision::metadata::MetadataType;
+use lore_revision::metadata::branch::ARCHIVE_KEYS;
 use lore_revision::metadata::branch::READ_ONLY_KEYS;
 use lore_revision::repository;
 use lore_revision::repository::RepositoryContext;
+use lore_revision::state::no_link_traversal;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
@@ -26,12 +28,12 @@ use crate::grpc::get_repository;
 use crate::grpc::get_user_id;
 use crate::grpc::get_write_token;
 use crate::grpc::require_action;
-use crate::grpc::require_repository_administration;
+use crate::grpc::require_branch_protection_administration;
 use crate::grpc::warn_error_to_status;
 use crate::util::setup_execution;
 
 /// Validate that read-only fields have not been changed between the current and proposed
-/// metadata blobs.
+/// metadata blobs, and that none of the keys archives and restores write was added.
 pub(crate) fn validate_read_only_fields(
     current: &Metadata,
     proposed: &Metadata,
@@ -53,6 +55,11 @@ pub(crate) fn validate_read_only_fields(
                     "cannot remove read-only key '{key}'"
                 )));
             }
+            (Err(_), Ok(_)) if ARCHIVE_KEYS.contains(key) => {
+                return Err(Status::invalid_argument(format!(
+                    "cannot add read-only key '{key}'"
+                )));
+            }
             (Err(_), Ok(_) | Err(_)) => {}
         }
     }
@@ -63,8 +70,7 @@ pub(crate) fn validate_read_only_fields(
 /// `current`. Such a change is repository administration rather than an
 /// ordinary write.
 pub(crate) fn changes_protection(current: &Metadata, proposed: &Metadata) -> bool {
-    current.get_bool(branch::PROTECT).unwrap_or_default()
-        != proposed.get_bool(branch::PROTECT).unwrap_or_default()
+    branch::protected(current) != branch::protected(proposed)
 }
 
 /// Validate that all Address-typed values in the proposed metadata blob reference existing
@@ -127,6 +133,7 @@ pub async fn handler(
         immutable_store,
         mutable_store,
         repository_id,
+        no_link_traversal(),
     ));
 
     LORE_CONTEXT
@@ -161,7 +168,7 @@ pub async fn handler(
             // Validate read-only fields are unchanged
             validate_read_only_fields(&current_metadata, &proposed_metadata)?;
             if changes_protection(&current_metadata, &proposed_metadata) {
-                require_repository_administration(
+                require_branch_protection_administration(
                     authorizer,
                     &extensions,
                     repository.clone(),

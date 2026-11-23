@@ -433,8 +433,7 @@ unsafe extern "system" fn start_directory_enumeration(
             } else {
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .map(|t| t.as_millis())
-                    .unwrap_or_default() as u64
+                    .map_or_default(|t| t.as_millis()) as u64
             }
         },
     ));
@@ -869,8 +868,7 @@ async unsafe fn get_placeholder_info_async(
         } else {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|t| t.as_millis())
-                .unwrap_or_default() as u64
+                .map_or_default(|t| t.as_millis()) as u64
         };
 
         let timestamp = ms_filetime(timestamp) as i64;
@@ -1114,25 +1112,6 @@ async fn get_file_data_async(
     Err(ERROR_FILE_NOT_FOUND)
 }
 
-fn format_bytes_to_string(bytes: usize) -> String {
-    let mut unit = "bytes";
-
-    let converted = if bytes > 1024 * 1024 * 1024 {
-        unit = "GiB";
-        (bytes / (1024 * 1024)) as f64 / 1024.0
-    } else if bytes > 1024 * 1024 {
-        unit = "MiB";
-        (bytes / 1024) as f64 / 1024.0
-    } else if bytes > 1024 {
-        unit = "KiB";
-        bytes as f64 / 1024.0
-    } else {
-        bytes as f64
-    };
-
-    format!("{converted:.2} {unit}")
-}
-
 async fn prefetch_files(
     repository: Arc<RepositoryContext>,
     state: Arc<State>,
@@ -1213,7 +1192,9 @@ async fn prefetch_files(
                 println!(
                     "Prefetched {} files, {}",
                     current_file_count,
-                    format_bytes_to_string(file_size.load(std::sync::atomic::Ordering::Relaxed))
+                    lore_base::units::format_bytes_to_string(
+                        file_size.load(std::sync::atomic::Ordering::Relaxed) as u64,
+                    )
                 );
                 last_file_count = current_file_count;
                 last_print = Instant::now();
@@ -1236,7 +1217,9 @@ async fn prefetch_files(
                 println!(
                     "Prefetched {} files, {}",
                     current_file_count,
-                    format_bytes_to_string(file_size.load(std::sync::atomic::Ordering::Relaxed))
+                    lore_base::units::format_bytes_to_string(
+                        file_size.load(std::sync::atomic::Ordering::Relaxed) as u64,
+                    )
                 );
                 last_file_count = current_file_count;
                 last_print = Instant::now();
@@ -1247,6 +1230,8 @@ async fn prefetch_files(
     println!(
         "Prefetched done: {} files, {}",
         file_count.load(std::sync::atomic::Ordering::Relaxed),
-        format_bytes_to_string(file_size.load(std::sync::atomic::Ordering::Relaxed))
+        lore_base::units::format_bytes_to_string(
+            file_size.load(std::sync::atomic::Ordering::Relaxed) as u64,
+        )
     );
 }

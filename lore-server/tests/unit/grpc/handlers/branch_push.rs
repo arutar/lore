@@ -7,18 +7,26 @@ use std::sync::Arc;
 
 use lore_base::runtime::LORE_CONTEXT;
 use lore_base::types::Address;
+use lore_base::types::Context;
 use lore_base::types::Hash;
+use lore_base::types::TypedBytes as _;
 use lore_revision::branch;
 use lore_revision::branch::DEFAULT_HISTORY_STEP_SIZE;
+use lore_revision::change::FileAction;
+use lore_revision::commit::commit_in_memory_revision;
 use lore_revision::lore::BranchId;
 use lore_revision::lore::RepositoryId;
 use lore_revision::node::Node;
+use lore_revision::node::NodeDelta;
 use lore_revision::node::NodeFlags;
+use lore_revision::node::NodeID;
 use lore_revision::node::ROOT_NODE;
 use lore_revision::repository;
 use lore_revision::repository::RepositoryContext;
 use lore_revision::state;
+use lore_revision::state::Mark;
 use lore_revision::state::State;
+use lore_revision::state::allow_all_repositories;
 use lore_revision::util::request_tracker::StoreRequestTracker;
 use lore_server::grpc::get_write_token;
 use lore_server::grpc::handlers::branch_push::*;
@@ -201,6 +209,219 @@ async fn serialize_merge_with_a_file(
     .await
 }
 
+/// Stages `node` as an add of `name` below `parent`.
+async fn add_staged(
+    repository: &Arc<RepositoryContext>,
+    state: &State,
+    parent: NodeID,
+    node: Node,
+    name: &str,
+) -> NodeID {
+    let node_id = state
+        .node_add(repository.clone(), parent, node, name)
+        .await
+        .expect("add the node");
+    state
+        .node_mark(
+            repository,
+            node_id,
+            Mark::staged_and_dirty(NodeFlags::StagedAdd, NodeFlags::DirtyAdd),
+        )
+        .await
+        .expect("stage the add");
+    node_id
+}
+
+/// A change a revision [`commit_files`] commits makes.
+#[derive(Clone, Copy)]
+enum Change {
+    /// Adds a file holding its path, at most one directory deep, with its directory, which takes
+    /// mode 0, the mode staging gives a directory. The file's identity derives from its path, so
+    /// two revisions adding a file at one path add the same file.
+    Add(&'static str),
+    /// Deletes the file at the path.
+    Delete(&'static str),
+    /// Moves the file at the first path to the second, in a directory that exists.
+    Move(&'static str, &'static str),
+}
+
+/// The node at `path` of `state`, which exists.
+async fn node_at(repository: &Arc<RepositoryContext>, state: &State, path: &str) -> NodeID {
+    state
+        .find_node_link(repository.clone(), path)
+        .await
+        .expect("find the node")
+        .node
+}
+
+/// Adds the file at `path` to `state`, as [`Change::Add`] describes.
+async fn add_file(repository: &Arc<RepositoryContext>, state: &State, path: &str) {
+    let mut parent = ROOT_NODE;
+    let mut name = path;
+    if let Some((directory, file)) = path.split_once('/') {
+        name = file;
+        parent = match state.find_node_link(repository.clone(), directory).await {
+            Ok(link) if link.is_valid() => link.node,
+            _ => {
+                let node = Node {
+                    name_hash: lore_storage::hash::hash_string(directory),
+                    ..Default::default()
+                };
+                add_staged(repository, state, ROOT_NODE, node, directory).await
+            }
+        };
+    }
+    let file = Context::from(uuid::Uuid::from_u64_pair(
+        lore_storage::hash::hash_string(path),
+        0,
+    ));
+    let address = lore_revision::immutable::write(
+        repository.clone(),
+        file,
+        bytes::Bytes::copy_from_slice(path.as_bytes()),
+        lore_storage::WriteOptions::default(),
+    )
+    .await
+    .expect("write the file content");
+    let node = Node {
+        flags: NodeFlags::File.bits(),
+        mode: 0o644,
+        size: path.len() as u64,
+        address,
+        name_hash: lore_storage::hash::hash_string(name),
+        ..Default::default()
+    };
+    add_staged(repository, state, parent, node, name).await;
+}
+
+/// Commits on `branch` a revision on `parent`, or a first revision where it is zero, that makes
+/// `changes`, and moves the branch's latest to it.
+async fn commit_files(
+    repository: &Arc<RepositoryContext>,
+    branch: BranchId,
+    parent: Hash,
+    changes: &[Change],
+) -> Hash {
+    let state = if parent.is_zero() {
+        State::new()
+    } else {
+        State::deserialize(repository.clone(), parent)
+            .await
+            .expect("load the parent")
+    };
+    for change in changes {
+        match *change {
+            Change::Add(path) => add_file(repository, &state, path).await,
+            Change::Delete(path) => {
+                let node = node_at(repository, &state, path).await;
+                state
+                    .node_mark(
+                        repository,
+                        node,
+                        Mark::staged_and_dirty(NodeFlags::StagedDelete, NodeFlags::DirtyDelete),
+                    )
+                    .await
+                    .expect("delete the file");
+            }
+            Change::Move(from, to) => {
+                let (directory, name) = to.rsplit_once('/').unwrap_or(("", to));
+                let directory = node_at(repository, &state, directory).await;
+                let node = node_at(repository, &state, from).await;
+                let permit = state.moves_permit().await.expect("the moves permit");
+                state
+                    .node_move_staged(
+                        repository.clone(),
+                        node,
+                        directory,
+                        (name, lore_storage::hash::hash_string(name)),
+                        &permit,
+                        false,
+                    )
+                    .await
+                    .expect("move the file");
+            }
+        }
+    }
+    let mut metadata = lore_revision::metadata::Metadata::new();
+    metadata.set_branch(branch).expect("set branch");
+    commit_in_memory_revision(
+        repository.clone(),
+        &get_write_token(),
+        state,
+        metadata,
+        parent,
+        Hash::default(),
+        branch,
+    )
+    .await
+    .expect("commit the revision")
+}
+
+/// [`commit_files`] leaving the latest of `branch` where it is: a revision a client committed on
+/// `parent` and has yet to push.
+async fn commit_unpushed(
+    repository: &Arc<RepositoryContext>,
+    branch: BranchId,
+    parent: Hash,
+    changes: &[Change],
+) -> Hash {
+    let latest = branch::load_latest(repository.clone(), branch)
+        .await
+        .expect("load the latest revision");
+    try_store_latest(repository.clone(), branch, latest, parent)
+        .await
+        .expect("move the latest revision to the parent");
+    let revision = commit_files(repository, branch, parent, changes).await;
+    try_store_latest(repository.clone(), branch, revision, latest)
+        .await
+        .expect("move the latest revision back");
+    revision
+}
+
+/// The path of every node of the revision `revision` below the root, each failing the test where
+/// it carries a staged or a dirty flag.
+async fn stored_paths(
+    repository: &Arc<RepositoryContext>,
+    revision: Hash,
+) -> std::collections::BTreeSet<String> {
+    let state = State::deserialize(repository.clone(), revision)
+        .await
+        .expect("load the revision");
+    let mut paths = std::collections::BTreeSet::new();
+    let mut pending = vec![(ROOT_NODE, String::new())];
+    while let Some((parent, prefix)) = pending.pop() {
+        for child in state
+            .node_children(repository.clone(), parent)
+            .await
+            .expect("list the children")
+        {
+            let node = state
+                .node(repository.clone(), child)
+                .await
+                .expect("read a child");
+            let name = state
+                .node_name_clone(repository.clone(), child)
+                .await
+                .expect("read a name");
+            let path = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            assert!(
+                !node.is_staged() && !node.is_dirty(),
+                "{path} is stored with flags {:#x}",
+                node.flags
+            );
+            if node.is_directory() {
+                pending.push((child, path.clone()));
+            }
+            paths.insert(path);
+        }
+    }
+    paths
+}
+
 /// Copy the fragment at `hash` alone, leaving everything it references absent
 /// in `target`.
 async fn hand_over_fragment(
@@ -236,6 +457,7 @@ async fn push_linear_revisions(
         let state = serialize_revision(repository, branch, parent, Hash::default(), number).await;
         parent = push(
             repository.clone(),
+            None,
             branch,
             state.revision(),
             crate::util::test_support::PUSH_ANY,
@@ -281,6 +503,7 @@ async fn push_jump_revision(
 
     let result = push(
         repository.clone(),
+        None,
         branch,
         state.revision(),
         crate::util::test_support::PUSH_ANY,
@@ -411,6 +634,9 @@ mod push {
     use lore_revision::node::NodeFileMetadata;
     use lore_revision::node::NodeFileMetadataBlock;
     use lore_revision::node::node_to_file_metadata;
+    use lore_revision::repository::prefetch::PrefetchCounts;
+    use lore_revision::store::composite::CompositeStoreBuilder;
+    use lore_storage::ImmutableStore;
 
     use super::*;
 
@@ -427,6 +653,7 @@ mod push {
                 immutable_store,
                 mutable_store,
                 repository_id,
+                allow_all_repositories(),
             ));
 
             let write_token = get_write_token();
@@ -450,6 +677,7 @@ mod push {
 
             let result = push(
                 repository_context,
+                None,
                 branch_id,
                 nonexistent_revision,
                 crate::util::test_support::PUSH_ANY,
@@ -487,11 +715,13 @@ mod push {
                 peer_store.clone(),
                 peer_mutable,
                 repository_id,
+                allow_all_repositories(),
             ));
             let repository = Arc::new(RepositoryContext::new_server_context(
                 store.clone(),
                 mutable_store,
                 repository_id,
+                allow_all_repositories(),
             ));
 
             let branch = create_test_branch(&repository).await;
@@ -501,6 +731,7 @@ mod push {
 
             let Err(status) = push(
                 repository,
+                None,
                 branch,
                 state.revision(),
                 crate::util::test_support::PUSH_ANY,
@@ -549,11 +780,13 @@ mod push {
                 peer_store.clone(),
                 peer_mutable,
                 repository_id,
+                allow_all_repositories(),
             ));
             let repository = Arc::new(RepositoryContext::new_server_context(
                 store.clone(),
                 mutable_store,
                 repository_id,
+                allow_all_repositories(),
             ));
 
             let branch = create_test_branch(&repository).await;
@@ -564,6 +797,7 @@ mod push {
 
             let Err(status) = push(
                 repository,
+                None,
                 branch,
                 state.revision(),
                 crate::util::test_support::PUSH_ANY,
@@ -610,11 +844,13 @@ mod push {
                 peer_store.clone(),
                 peer_mutable,
                 repository_id,
+                allow_all_repositories(),
             ));
             let repository = Arc::new(RepositoryContext::new_server_context(
                 store.clone(),
                 mutable_store,
                 repository_id,
+                allow_all_repositories(),
             ));
 
             let branch = create_test_branch(&repository).await;
@@ -628,6 +864,7 @@ mod push {
 
             let Err(status) = push(
                 repository,
+                None,
                 branch,
                 merge.revision(),
                 crate::util::test_support::PUSH_ANY,
@@ -677,11 +914,13 @@ mod push {
                 peer_store.clone(),
                 peer_mutable,
                 repository_id,
+                allow_all_repositories(),
             ));
             let repository = Arc::new(RepositoryContext::new_server_context(
                 store.clone(),
                 mutable_store,
                 repository_id,
+                allow_all_repositories(),
             ));
 
             let branch = create_test_branch(&repository).await;
@@ -700,6 +939,7 @@ mod push {
 
             let Err(status) = push(
                 repository,
+                None,
                 branch,
                 merge.revision(),
                 crate::util::test_support::PUSH_ANY,
@@ -738,6 +978,7 @@ mod push {
                 immutable_store,
                 mutable_store,
                 random::<RepositoryId>(),
+                allow_all_repositories(),
             ));
             let branch = create_test_branch(&repository).await;
 
@@ -769,6 +1010,7 @@ mod push {
                 immutable_store,
                 mutable_store,
                 random::<RepositoryId>(),
+                allow_all_repositories(),
             ));
             let branch = create_test_branch(&repository).await;
 
@@ -801,6 +1043,7 @@ mod push {
                 immutable_store,
                 mutable_store,
                 random::<RepositoryId>(),
+                allow_all_repositories(),
             ));
             let branch = create_test_branch(&repository).await;
 
@@ -831,6 +1074,7 @@ mod push {
                 immutable_store,
                 mutable_store,
                 random::<RepositoryId>(),
+                allow_all_repositories(),
             ));
             let branch = create_test_branch(&repository).await;
 
@@ -876,6 +1120,7 @@ mod push {
                 immutable_store,
                 mutable_store,
                 random::<RepositoryId>(),
+                allow_all_repositories(),
             ));
             let branch = create_test_branch(&repository).await;
             let chain = push_linear_revisions(&repository, branch, Hash::default(), 1..=1).await;
@@ -884,6 +1129,7 @@ mod push {
             let mut report = PushReport::new(PushHandler::Legacy, Default::default());
             let result = push(
                 repository.clone(),
+                None,
                 branch,
                 state.revision(),
                 crate::util::test_support::PUSH_ANY,
@@ -940,6 +1186,7 @@ mod push {
                 immutable_store,
                 mutable_store,
                 random::<RepositoryId>(),
+                allow_all_repositories(),
             ));
             let branch = create_test_branch(&repository).await;
             let chain = push_linear_revisions(&repository, branch, Hash::default(), 1..=1).await;
@@ -998,6 +1245,7 @@ mod push {
             let mut report = PushReport::new(PushHandler::Legacy, Default::default());
             let result = push(
                 repository.clone(),
+                None,
                 branch,
                 state.revision(),
                 crate::util::test_support::PUSH_ANY,
@@ -1028,6 +1276,7 @@ mod push {
                 immutable_store,
                 mutable_store,
                 random::<RepositoryId>(),
+                allow_all_repositories(),
             ));
             let branch = create_test_branch(&repository).await;
             let chain = push_linear_revisions(&repository, branch, Hash::default(), 1..=2).await;
@@ -1047,6 +1296,7 @@ mod push {
             let mut report = PushReport::new(PushHandler::Legacy, Default::default());
             let result = push(
                 repository.clone(),
+                None,
                 branch,
                 divergent.revision(),
                 crate::util::test_support::PUSH_ANY,
@@ -1073,6 +1323,272 @@ mod push {
         .await;
     }
 
+    /// Pushes `revision` to `branch`, merging it on the server where the branch moved past its
+    /// parent.
+    async fn push_merging(
+        repository: &Arc<RepositoryContext>,
+        branch: BranchId,
+        revision: Hash,
+    ) -> PushResult {
+        push(
+            repository.clone(),
+            None,
+            branch,
+            revision,
+            crate::util::test_support::PUSH_ANY,
+            false,
+            true,
+            DEFAULT_HISTORY_STEP_SIZE,
+            RevisionListAcceleration::default(),
+            &mut PushReport::new(PushHandler::Legacy, Default::default()),
+        )
+        .await
+        .expect("push with a fast-forward merge")
+    }
+
+    /// A fast-forward merge stores the tree a commit of the pushed changes on the latest revision
+    /// stores: no node staged, the deleted file gone, and every directory hashed over what it holds.
+    #[tokio::test]
+    async fn a_fast_forward_merge_stores_the_tree_a_commit_stores() {
+        let (immutable_store, mutable_store, execution) =
+            test_store_create().await.expect("Failed to create stores");
+
+        Box::pin(LORE_CONTEXT.scope(execution, async move {
+            let repository = Arc::new(RepositoryContext::new_server_context(
+                immutable_store,
+                mutable_store,
+                random::<RepositoryId>(),
+                allow_all_repositories(),
+            ));
+            let branch = create_test_branch(&repository).await;
+            let base = commit_files(
+                &repository,
+                branch,
+                Hash::default(),
+                &[Change::Add("dir/a.txt"), Change::Add("dir/b.txt")],
+            )
+            .await;
+            let latest = commit_files(&repository, branch, base, &[Change::Add("other.txt")]).await;
+            let pushed = [Change::Add("dir/c.txt"), Change::Delete("dir/b.txt")];
+            let incoming = commit_unpushed(&repository, branch, base, &pushed).await;
+            let expected = commit_unpushed(&repository, branch, latest, &pushed).await;
+
+            let result = push_merging(&repository, branch, incoming).await;
+            assert!(result.fast_forward_merged);
+
+            assert_eq!(
+                stored_paths(&repository, result.revision).await,
+                stored_paths(&repository, expected).await
+            );
+            let mut roots = Vec::new();
+            for revision in [result.revision, expected] {
+                let state = State::deserialize(repository.clone(), revision)
+                    .await
+                    .expect("load the revision");
+                roots.push(
+                    state
+                        .tree(repository.clone())
+                        .await
+                        .expect("read the tree")
+                        .hash_root,
+                );
+            }
+            assert_eq!(roots[0], roots[1]);
+        }))
+        .await;
+    }
+
+    /// The path, action and flags of each entry of the delta of `revision`, each failing the test
+    /// where it names a node the revision does not hold at its path. A deleted node is left out.
+    async fn delta_paths(
+        repository: &Arc<RepositoryContext>,
+        revision: Hash,
+    ) -> Vec<(String, u16, u16)> {
+        let state = State::deserialize(repository.clone(), revision)
+            .await
+            .expect("load the revision");
+        let delta = state
+            .delta_block(repository.clone())
+            .await
+            .expect("read the delta")
+            .to_aligned::<NodeDelta>();
+        let mut entries = Vec::new();
+        for entry in delta.as_type_slice::<NodeDelta>() {
+            if entry.action == FileAction::Delete as u16 {
+                continue;
+            }
+            let path = state
+                .node_path(repository.clone(), entry.node)
+                .await
+                .expect("read a delta path");
+            assert_eq!(
+                node_at(repository, &state, path.as_str()).await,
+                entry.node,
+                "the delta names {} at {path}",
+                entry.node
+            );
+            entries.push((path.clone(), entry.action, entry.flags));
+        }
+        entries
+    }
+
+    /// The revisions the first-parent and the second-parent history of the file at `path` name in
+    /// `revision`.
+    async fn history_of(
+        repository: &Arc<RepositoryContext>,
+        revision: Hash,
+        path: &str,
+    ) -> [Hash; 2] {
+        let state = State::deserialize(repository.clone(), revision)
+            .await
+            .expect("load the revision");
+        let metadata_node = node_to_file_metadata(node_at(repository, &state, path).await);
+        let block = state
+            .block_file_metadata(
+                repository.clone(),
+                NodeFileMetadataBlock::index(metadata_node),
+            )
+            .await
+            .expect("read the file metadata");
+        block
+            .read()
+            .node(NodeFileMetadata::index(metadata_node))
+            .revision
+    }
+
+    /// A fast-forward merge commits the merge as `lore branch merge` commits it: the moved file
+    /// keeps its node, the delta is the merge's own, naming the nodes the merge revision holds and
+    /// recording the move, the add and the add both sides make alike as merged, and the file
+    /// history names the latest revision for the file it added and the pushed revision for the file
+    /// the push added.
+    #[tokio::test]
+    async fn a_fast_forward_merge_records_its_own_delta_and_the_history_of_both_lines() {
+        let (immutable_store, mutable_store, execution) =
+            test_store_create().await.expect("Failed to create stores");
+
+        Box::pin(LORE_CONTEXT.scope(execution, async move {
+            let repository = Arc::new(RepositoryContext::new_server_context(
+                immutable_store,
+                mutable_store,
+                random::<RepositoryId>(),
+                lore_revision::state::allow_all_repositories(),
+            ));
+            let branch = create_test_branch(&repository).await;
+            let base = commit_files(
+                &repository,
+                branch,
+                Hash::default(),
+                &[Change::Add("dir/a.txt"), Change::Add("other.txt")],
+            )
+            .await;
+            let latest = commit_files(
+                &repository,
+                branch,
+                base,
+                &[Change::Add("dir/l.txt"), Change::Add("same.txt")],
+            )
+            .await;
+            let incoming = commit_unpushed(
+                &repository,
+                branch,
+                base,
+                &[
+                    Change::Move("dir/a.txt", "dir/z.txt"),
+                    Change::Add("dir/p.txt"),
+                    Change::Add("same.txt"),
+                ],
+            )
+            .await;
+
+            let result = push_merging(&repository, branch, incoming).await;
+            assert!(result.fast_forward_merged);
+            let merged = result.revision;
+
+            let latest_state = State::deserialize(repository.clone(), latest)
+                .await
+                .expect("load the latest revision");
+            let merged_state = State::deserialize(repository.clone(), merged)
+                .await
+                .expect("load the merged revision");
+            assert_eq!(
+                node_at(&repository, &merged_state, "dir/z.txt").await,
+                node_at(&repository, &latest_state, "dir/a.txt").await
+            );
+
+            let merge = lore_revision::change::Flags::Merge.bits();
+            let delta = delta_paths(&repository, merged).await;
+            for (path, action) in [
+                ("dir/z.txt", Some(FileAction::Move)),
+                ("dir/p.txt", Some(FileAction::Add)),
+                ("same.txt", None),
+            ] {
+                assert!(
+                    delta.iter().any(|(at, recorded, flags)| at == path
+                        && action.is_none_or(|action| *recorded == action as u16)
+                        && flags & merge != 0),
+                    "{path} in {delta:?}"
+                );
+            }
+            assert!(
+                !delta.iter().any(|(at, _, _)| at == "dir/l.txt"),
+                "{delta:?}"
+            );
+
+            assert_eq!(
+                history_of(&repository, merged, "dir/l.txt").await[0],
+                latest
+            );
+            assert_eq!(
+                history_of(&repository, merged, "dir/p.txt").await[1],
+                incoming
+            );
+        }))
+        .await;
+    }
+
+    /// A push moving a file that a fast-forward merge at the latest revision deleted is declined:
+    /// the merge revision's parents and branch reach the 3-way diff as a client's would.
+    #[tokio::test]
+    async fn a_push_moving_a_file_a_merge_at_latest_deleted_is_declined() {
+        let (immutable_store, mutable_store, execution) =
+            test_store_create().await.expect("Failed to create stores");
+
+        Box::pin(LORE_CONTEXT.scope(execution, async move {
+            let repository = Arc::new(RepositoryContext::new_server_context(
+                immutable_store,
+                mutable_store,
+                random::<RepositoryId>(),
+                allow_all_repositories(),
+            ));
+            let branch = create_test_branch(&repository).await;
+            let base = commit_files(
+                &repository,
+                branch,
+                Hash::default(),
+                &[Change::Add("dir/a.txt"), Change::Add("other.txt")],
+            )
+            .await;
+            let deleting =
+                commit_unpushed(&repository, branch, base, &[Change::Delete("dir/a.txt")]).await;
+            commit_files(&repository, branch, base, &[Change::Add("more.txt")]).await;
+            assert!(
+                push_merging(&repository, branch, deleting)
+                    .await
+                    .fast_forward_merged
+            );
+            let moving = commit_unpushed(
+                &repository,
+                branch,
+                base,
+                &[Change::Move("dir/a.txt", "dir/z.txt")],
+            )
+            .await;
+
+            assert!(!push_merging(&repository, branch, moving).await.success);
+        }))
+        .await;
+    }
+
     #[tokio::test]
     async fn a_push_onto_a_moved_head_without_a_merge_is_declined() {
         let (immutable_store, mutable_store, execution) =
@@ -1083,6 +1599,7 @@ mod push {
                 immutable_store,
                 mutable_store,
                 random::<RepositoryId>(),
+                allow_all_repositories(),
             ));
             let branch = create_test_branch(&repository).await;
             let chain = push_linear_revisions(&repository, branch, Hash::default(), 1..=2).await;
@@ -1099,6 +1616,7 @@ mod push {
             let mut report = PushReport::new(PushHandler::Legacy, Default::default());
             let result = push(
                 repository.clone(),
+                None,
                 branch,
                 stale.revision(),
                 crate::util::test_support::PUSH_ANY,
@@ -1115,6 +1633,204 @@ mod push {
 
             report.finish();
             assert_eq!(report.summary().outcome, PushOutcome::Declined);
+        }))
+        .await;
+    }
+
+    /// A context for `repository` over a composite of an empty local tier in front of `holding`,
+    /// and that local tier.
+    async fn behind_an_empty_local_tier(
+        holding: Arc<dyn ImmutableStore>,
+        mutable: Arc<dyn lore_storage::MutableStore>,
+        repository: RepositoryId,
+    ) -> (Arc<RepositoryContext>, Arc<dyn ImmutableStore>) {
+        let local = lore_storage::local::immutable_store::create(
+            None::<&str>,
+            lore_storage::local::immutable_store::ImmutableStoreCreateOptions::none(),
+            false,
+            lore_storage::local::immutable_store::ImmutableStoreSettings::default(),
+        )
+        .await
+        .expect("local tier");
+        let composite: Arc<dyn ImmutableStore> = Arc::new(
+            CompositeStoreBuilder::default()
+                .with_durable("holding".to_string(), holding)
+                .expect("durable tier")
+                .with_local("local".to_string(), local.clone())
+                .expect("local tier")
+                .build()
+                .expect("composite store"),
+        );
+        let context = Arc::new(RepositoryContext::new_server_context(
+            composite,
+            mutable,
+            repository,
+            allow_all_repositories(),
+        ));
+        (context, local)
+    }
+
+    /// A push given a local tier starts a prefetch beside its verification's walk, and none for a
+    /// merge when it merges nothing. What the prefetch fetches is not asserted: the walk can end
+    /// first and drop it at any point.
+    #[tokio::test]
+    async fn a_push_prefetches_beside_its_verification() {
+        let (immutable_store, mutable_store, execution) =
+            test_store_create().await.expect("Failed to create stores");
+
+        Box::pin(LORE_CONTEXT.scope(execution, async move {
+            let id = random::<RepositoryId>();
+            let holding = Arc::new(RepositoryContext::new_server_context(
+                immutable_store.clone(),
+                mutable_store.clone(),
+                id,
+                allow_all_repositories(),
+            ));
+            let branch = create_test_branch(&holding).await;
+            let chain = push_linear_revisions(&holding, branch, Hash::default(), 1..=1).await;
+            let state = serialize_revision_adding_a_file(
+                &holding,
+                branch,
+                chain[0],
+                Hash::default(),
+                2,
+                "file.txt",
+            )
+            .await;
+            let (repository, local) =
+                behind_an_empty_local_tier(immutable_store, mutable_store, id).await;
+
+            let mut report = PushReport::new(PushHandler::Legacy, Default::default());
+            let result = push(
+                repository,
+                Some(&local),
+                branch,
+                state.revision(),
+                crate::util::test_support::PUSH_ANY,
+                false,
+                false,
+                DEFAULT_HISTORY_STEP_SIZE,
+                RevisionListAcceleration::default(),
+                &mut report,
+            )
+            .await
+            .expect("push onto the head");
+            assert!(result.success);
+
+            let summary = report.summary();
+            assert_eq!(
+                summary.verify_prefetch.runs, 1,
+                "{}",
+                summary.verify_prefetch
+            );
+            assert_eq!(summary.merge_prefetch, PrefetchCounts::default());
+        }))
+        .await;
+    }
+
+    /// A push given no local tier runs no prefetch, though its store is a composite.
+    #[tokio::test]
+    async fn a_push_given_no_local_tier_prefetches_nothing() {
+        let (immutable_store, mutable_store, execution) =
+            test_store_create().await.expect("Failed to create stores");
+
+        Box::pin(LORE_CONTEXT.scope(execution, async move {
+            let id = random::<RepositoryId>();
+            let holding = Arc::new(RepositoryContext::new_server_context(
+                immutable_store.clone(),
+                mutable_store.clone(),
+                id,
+                allow_all_repositories(),
+            ));
+            let branch = create_test_branch(&holding).await;
+            let chain = push_linear_revisions(&holding, branch, Hash::default(), 1..=2).await;
+            let divergent = serialize_revision_adding_a_file(
+                &holding,
+                branch,
+                chain[0],
+                Hash::default(),
+                2,
+                "merged.txt",
+            )
+            .await;
+            let (repository, _local) =
+                behind_an_empty_local_tier(immutable_store, mutable_store, id).await;
+
+            let mut report = PushReport::new(PushHandler::Legacy, Default::default());
+            let result = push(
+                repository,
+                None,
+                branch,
+                divergent.revision(),
+                crate::util::test_support::PUSH_ANY,
+                false,
+                true,
+                DEFAULT_HISTORY_STEP_SIZE,
+                RevisionListAcceleration::default(),
+                &mut report,
+            )
+            .await
+            .expect("fast-forward merge");
+            assert!(result.fast_forward_merged);
+
+            let summary = report.summary();
+            assert_eq!(
+                (summary.verify_prefetch, summary.merge_prefetch),
+                (PrefetchCounts::default(), PrefetchCounts::default())
+            );
+        }))
+        .await;
+    }
+
+    /// A fast-forward merge given a local tier starts a prefetch beside its diff. What the prefetch
+    /// fetches is not asserted: the diff can end first and drop it at any point.
+    #[tokio::test]
+    async fn a_fast_forward_merge_prefetches_beside_its_diff() {
+        let (immutable_store, mutable_store, execution) =
+            test_store_create().await.expect("Failed to create stores");
+
+        Box::pin(LORE_CONTEXT.scope(execution, async move {
+            let id = random::<RepositoryId>();
+            let holding = Arc::new(RepositoryContext::new_server_context(
+                immutable_store.clone(),
+                mutable_store.clone(),
+                id,
+                allow_all_repositories(),
+            ));
+            let branch = create_test_branch(&holding).await;
+            let chain = push_linear_revisions(&holding, branch, Hash::default(), 1..=2).await;
+            // Rooted at revision 1 while the head is at 2, so the push has to merge.
+            let divergent = serialize_revision_adding_a_file(
+                &holding,
+                branch,
+                chain[0],
+                Hash::default(),
+                2,
+                "merged.txt",
+            )
+            .await;
+            let (repository, local) =
+                behind_an_empty_local_tier(immutable_store, mutable_store, id).await;
+
+            let mut report = PushReport::new(PushHandler::Legacy, Default::default());
+            let result = push(
+                repository,
+                Some(&local),
+                branch,
+                divergent.revision(),
+                crate::util::test_support::PUSH_ANY,
+                false,
+                true,
+                DEFAULT_HISTORY_STEP_SIZE,
+                RevisionListAcceleration::default(),
+                &mut report,
+            )
+            .await
+            .expect("fast-forward merge");
+            assert!(result.fast_forward_merged);
+
+            let summary = report.summary();
+            assert_eq!(summary.merge_prefetch.runs, 1, "{}", summary.merge_prefetch);
         }))
         .await;
     }
@@ -1219,6 +1935,7 @@ mod collect_new_addresses {
                 immutable_store,
                 mutable_store,
                 repository_id,
+                allow_all_repositories(),
             ));
 
             let branch = create_test_branch(&repository).await;
@@ -1308,11 +2025,13 @@ mod collect_new_addresses {
                 peer_store.clone(),
                 peer_mutable,
                 repository_id,
+                allow_all_repositories(),
             ));
             let repository = Arc::new(RepositoryContext::new_server_context(
                 store.clone(),
                 mutable_store,
                 repository_id,
+                allow_all_repositories(),
             ));
 
             let branch = create_test_branch(&repository).await;
@@ -1428,6 +2147,7 @@ mod push_protected_action {
                 immutable_store.clone(),
                 mutable_store.clone(),
                 repository_id,
+                allow_all_repositories(),
             ));
             let main = create_test_branch(&repository).await;
             if protected {
@@ -1451,11 +2171,14 @@ mod push_protected_action {
             let mut request = tier.with_token(request, repository_id, actions);
             if service_account {
                 // Replaces the claims with a token whose only privilege is the removed claim.
+                // The empty `resources` claim keeps it an access token, which every tier
+                // answers in place.
                 request
                     .extensions_mut()
                     .insert(lore_server::auth::jwt::AuthorizationToken {
                         user_id: "service-bot".into(),
                         is_service_account: Some(true),
+                        resources: Some(vec![]),
                         ..Default::default()
                     });
             }
@@ -1465,6 +2188,7 @@ mod push_protected_action {
                 request,
                 tier.authorizer(),
                 immutable_store.clone(),
+                None,
                 mutable_store.clone(),
                 notification_sender.clone(),
                 &hook_dispatcher,
