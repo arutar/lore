@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/arutar/lore/platform/control-plane/internal/model"
@@ -182,4 +183,63 @@ func switchState(disabled bool) string {
 		return "off"
 	}
 	return "on"
+}
+
+func (m *Memory) SearchMCPTokens(_ context.Context, query, after string, limit int) (model.Page[model.MCPToken], error) {
+	afterTime, afterID, err := parseTokenCursor(after)
+	if err != nil {
+		return model.Page[model.MCPToken]{}, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	tokens := []model.MCPToken{}
+	for _, record := range m.mcpTokens {
+		token := record.token
+		if token.RevokedAt != nil {
+			continue
+		}
+		user := m.users[token.UserID]
+		if !containsFold(query, token.Name, user.Username, user.DisplayName, user.Email) {
+			continue
+		}
+		if after != "" && !tokenBefore(token, afterTime, afterID) {
+			continue
+		}
+		token = cloneMCPToken(token)
+		token.UserLogin = user.Username
+		tokens = append(tokens, token)
+	}
+	sort.Slice(tokens, func(i, j int) bool { return tokenBefore(tokens[j], tokens[i].CreatedAt, tokens[i].ID) })
+	page := model.Page[model.MCPToken]{Items: tokens}
+	if len(tokens) > limit {
+		page.Items = tokens[:limit]
+		page.NextCursor = tokenCursor(tokens[limit-1])
+	}
+	return page, nil
+}
+
+// tokenBefore reports whether token sorts below (createdAt, id), comparing creation time and then
+// ID: the newest-first order lists it after that position, as PostgreSQL's
+// (created_at, id) < (createdAt, id) with ORDER BY created_at DESC, id DESC does.
+func tokenBefore(token model.MCPToken, createdAt time.Time, id string) bool {
+	if !token.CreatedAt.Equal(createdAt) {
+		return token.CreatedAt.Before(createdAt)
+	}
+	return token.ID < id
+}
+
+func tokenCursor(token model.MCPToken) string {
+	return token.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + token.ID
+}
+
+func parseTokenCursor(cursor string) (time.Time, string, error) {
+	if cursor == "" {
+		return time.Time{}, "", nil
+	}
+	at, id, ok := strings.Cut(cursor, "|")
+	parsed, err := time.Parse(time.RFC3339Nano, at)
+	if !ok || err != nil || id == "" {
+		return time.Time{}, "", ErrInvalidCursor
+	}
+	return parsed, id, nil
 }

@@ -127,6 +127,16 @@ A switch takes effect at once: the person's tokens stop working on their next ca
 download links stop working too, nothing needs to be revoked. The tokens come back to life when the
 switch is turned on again. Someone without MCP doesn't see the MCP page.
 
+**What happens to tokens when an account changes:**
+
+| The account is… | Its tokens | Status in the list |
+|---|---|---|
+| switched off for MCP (personally or through all its groups) | stop working at once; work again when MCP is turned on | MCP off |
+| disabled, here or in Active Directory, or no longer admitted from Active Directory | stop working at once; work again if the account is enabled | User disabled |
+| deleted | revoked, with their download links, and leave the list | — |
+
+A token past its expiry shows *Expired* until it's revoked.
+
 Turning MCP off for everyone at once is `LORE_MCP=off` on the server.
 
 What a token may read is decided like everything else in Lore: by the person's access to each
@@ -152,8 +162,12 @@ recognisable, also to secret scanners in code hosting services.
 The list shows each token's start (`lore_mcp_7Hq2…`), what it may read, when it was created and when
 it was last used. **Revoke** ends it at once, together with the download links it issued.
 
-An administrator sees **Everyone's tokens** on the same page and can revoke any of them, for
-example when a laptop is lost or someone leaves. Creating and revoking tokens, the MCP switches and
+An administrator sees **Everyone's tokens** on the same page: a table with the owner (name and
+login), the token's name and start, what it may read, when it was last used and its expiry, its
+status (*Works*, *MCP off*, *User disabled*, *Expired*; hover for why) and **Revoke**. The search
+finds tokens by the owner's name, login or email and by the token's name; the list shows the newest
+first, 50 at a time, with **Show more**. Revoke is the answer when a laptop is lost or someone
+leaves. Creating and revoking tokens, the MCP switches and
 every download link are recorded in the **Audit log**.
 
 Treat a token like a password: it reads what you may read. Don't commit it to a repository and don't

@@ -563,3 +563,79 @@ func TestMCPTokenAPI(t *testing.T) {
 		t.Fatalf("revoke own: status = %d", status)
 	}
 }
+
+func TestMCPAdminTokenListSearchesPagesAndShowsWhyATokenStopped(t *testing.T) {
+	fixture := newMCPFixture(t, MCPConfig{})
+	ctx := t.Context()
+	if _, err := fixture.storage.UpsertUser(ctx, model.User{ID: "maria", Username: "mlopez", DisplayName: "Maria Lopez", Email: "maria@example.com", Role: model.RoleUser}); err != nil {
+		t.Fatal(err)
+	}
+	add := func(id, userID, name string, created time.Time, expires *time.Time) {
+		token := model.MCPToken{ID: id, UserID: userID, Name: name, Hint: "lore_mcp_" + id, CreatedAt: created, ExpiresAt: expires}
+		if err := fixture.storage.CreateMCPToken(ctx, token, secretHash(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := time.Now().Add(-time.Hour).UTC()
+	past := time.Now().Add(-time.Minute)
+	add("t-active", "reader", "Claude Code", base, nil)
+	add("t-maria", "maria", "Cursor on laptop", base.Add(time.Minute), nil)
+	add("t-expired", "reader", "old agent", base.Add(2*time.Minute), &past)
+	add("t-owner", "owner", "Hermes", base.Add(3*time.Minute), nil)
+	if _, err := fixture.storage.UpdateUser(ctx, "admin", "owner", model.RoleUser, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.storage.SetUserMCP(ctx, "admin", "maria", true); err != nil {
+		t.Fatal(err)
+	}
+	client := &testClient{t: t, handler: fixture.handler}
+	client.login()
+	list := func(query string) (map[string]string, string) {
+		t.Helper()
+		status, body := client.request(http.MethodGet, "/web/v1/admin/mcp-tokens?"+query, nil, false)
+		if status != http.StatusOK {
+			t.Fatalf("list %q: status = %d, body = %v", query, status, body)
+		}
+		got := map[string]string{}
+		for _, item := range body["items"].([]any) {
+			token := item.(map[string]any)
+			got[token["id"].(string)] = token["status"].(string) + "/" + token["userLogin"].(string)
+		}
+		next, _ := body["nextCursor"].(string)
+		return got, next
+	}
+	all, _ := list("")
+	want := map[string]string{"t-active": "active/reader", "t-maria": "mcp_off/mlopez", "t-expired": "expired/reader", "t-owner": "user_disabled/owner"}
+	for id, value := range want {
+		if all[id] != value {
+			t.Errorf("token %s = %q, want %q (all %v)", id, all[id], value, all)
+		}
+	}
+	for query, ids := range map[string][]string{"q=maria": {"t-maria"}, "q=LOPEZ": {"t-maria"}, "q=claude": {"t-active"}, "q=reader": {"t-active", "t-expired"}, "q=nobody": {}} {
+		got, _ := list(query)
+		if len(got) != len(ids) {
+			t.Errorf("search %s = %v, want %v", query, got, ids)
+		}
+		for _, id := range ids {
+			if _, ok := got[id]; !ok {
+				t.Errorf("search %s misses %s: %v", query, id, got)
+			}
+		}
+	}
+	first, next := list("pageSize=2")
+	if len(first) != 2 || next == "" {
+		t.Fatalf("first page = %v, cursor %q", first, next)
+	}
+	second, last := list("pageSize=2&cursor=" + next)
+	for id := range second {
+		if _, ok := first[id]; ok {
+			t.Fatalf("token %s on both pages", id)
+		}
+	}
+	if len(first)+len(second) != 4 || last != "" {
+		t.Fatalf("pages = %v + %v, last cursor %q", first, second, last)
+	}
+	if status, _ := client.request(http.MethodGet, "/web/v1/admin/mcp-tokens?cursor=garbage", nil, false); status != http.StatusBadRequest {
+		t.Fatalf("bad cursor: status = %d, want 400", status)
+	}
+}

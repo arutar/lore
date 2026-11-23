@@ -107,7 +107,7 @@ const serverApi = {
   createMCPToken: (input: { name: string; repositories: string[]; expiresInDays: number }) =>
     request<{ token: MCPToken; secret: string; url: string }>("/mcp-tokens", { method: "POST", body: JSON.stringify(input) }),
   revokeMCPToken: (id: string) => request<void>(`/mcp-tokens/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  allMCPTokens: () => request<{ items: MCPToken[] }>("/admin/mcp-tokens"),
+  allMCPTokens: (q = "", cursor = "") => request<Page<MCPToken>>(`/admin/mcp-tokens?${query({ pageSize: 50, q, cursor })}`),
   adminRevokeMCPToken: (id: string) => request<void>(`/admin/mcp-tokens/${encodeURIComponent(id)}`, { method: "DELETE" }),
   setUserMCP: (id: string, enabled: boolean) => request<User>(`/admin/users/${encodeURIComponent(id)}/mcp`, { method: "PUT", body: JSON.stringify({ enabled }) }),
   setAccessMCP: (subjectType: "user" | "group", subject: string, enabled: boolean) =>

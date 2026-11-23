@@ -469,6 +469,19 @@ func (m *Memory) DeleteUser(_ context.Context, actorID, id string) error {
 			delete(m.sessions, key)
 		}
 	}
+	// The account's MCP tokens and their download links end with it.
+	now := time.Now().UTC()
+	for key, record := range m.mcpTokens {
+		if record.token.UserID == id && record.token.RevokedAt == nil {
+			record.token.RevokedAt = &now
+			m.mcpTokens[key] = record
+		}
+	}
+	for key, link := range m.mcpLinks {
+		if link.UserID == id {
+			delete(m.mcpLinks, key)
+		}
+	}
 	m.appendAuditLocked(actorID, "user.delete", "user", id, name, "")
 	return nil
 }

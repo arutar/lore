@@ -19,6 +19,8 @@ type DirectoryState struct {
 var (
 	ErrNotFound = errors.New("not found")
 	ErrConflict = errors.New("conflict")
+	// ErrInvalidCursor is a page cursor the store didn't hand out.
+	ErrInvalidCursor = errors.New("invalid cursor")
 )
 
 type Store interface {
@@ -77,6 +79,10 @@ type Store interface {
 	// ListMCPTokens returns the account's tokens, newest first; an empty userID lists everyone's.
 	// Revoked tokens aren't listed.
 	ListMCPTokens(ctx context.Context, userID string) ([]model.MCPToken, error)
+	// SearchMCPTokens pages through every account's unrevoked tokens, newest first, with the
+	// owner's username in UserLogin. A non-empty query keeps tokens whose name, or whose owner's
+	// username, display name or email, contain it, case-insensitively.
+	SearchMCPTokens(ctx context.Context, query, after string, limit int) (model.Page[model.MCPToken], error)
 	GetMCPToken(ctx context.Context, id string) (model.MCPToken, error)
 	GetMCPTokenByHash(ctx context.Context, hash string) (model.MCPToken, error)
 	// RevokeMCPToken ends a token at once, together with the download links issued through it.
