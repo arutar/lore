@@ -36,6 +36,8 @@ flowchart LR
         end
     end
     AD[("Active Directory")]
+    Agent["AI agent<br/>MCP client"]
+    Agent -->|"/mcp, read-only<br/>personal token"| Caddy
     Caddy --> CP
     Caddy --> KC
     CP --> PG
@@ -43,6 +45,7 @@ flowchart LR
     KC <-->|LDAP| AD
     CP <-->|LDAP: groups| AD
     Lore <--> CP
+    CP -->|"MCP reads<br/>files · history · locks"| Lore
     PG --- Disk
     Lore --- Disk
 ```
