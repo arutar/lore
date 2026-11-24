@@ -1,6 +1,6 @@
 # Текущее состояние Lore Platform
 
-Обновлено 2026-11-24 (ветка `linux_shell_extension`, шаги 1–3 клиента Linux); релиз `platform-v0.3.2`: прогресс проверки push перенесён в общее событие `Progress` (upstream его не отправляет); `BranchPushFragmentProgress` снова как у upstream.
+Обновлено 2026-11-24, к релизу `platform-v0.4.0`: клиент для Linux (меню и значки в GNOME Files, Nemo, Caja и Dolphin, пакеты `.rpm`/`.deb`), слит upstream main до 2b12dd47, на главной WebUI пакеты Linux, мобильная страница пользователей.
 
 История по версиям — `platform/docs/releases/`. Коротко:
 - 0.2.4–0.2.5 — окно Commit для сотен тысяч файлов (дерево папок, страницы, поиск), прогресс коммита и отправки, удаление репозитория администратором;
@@ -13,6 +13,7 @@
 - 0.3.0 — MCP для ИИ-агентов: `/mcp` в control plane, 9 инструментов только для чтения, токены `lore_mcp_…` (в базе SHA-256), переключатель MCP (личный сильнее группового), ссылки на скачивание на `LORE_MCP_LINK_TTL`, режимы `off|internal|on` в setup; мобильная вёрстка всех страниц. Руководство — `platform/docs/mcp.md`, решение — `platform/docs/decisions/0002-mcp.md`.
 - 0.3.1 — слияние upstream (prefetch проверки push, восстановление прерванного push, быстрый stage широких каталогов, докачка больших файлов, исправления FUSE); прогресс проверки push теперь в полях `server_*` события `BranchPushFragmentProgress` (у upstream 256 событий — предел `bitcode`); список токенов MCP с поиском и статусами.
 - 0.3.2 — прогресс проверки push в событии `Progress` (данные `LoreProgressEventData`: репозиторий, ветка, `server_phase`, `server_restarts`, `server_checked`) вместо полей в конце `BranchPushFragmentProgress`; когда upstream переделает `Progress` (их TODO про union), переходим на их вариант.
+- 0.4.0 — клиент для Linux: companion на GTK/WebKitGTK с окнами Windows-клиента, меню и значки статуса в GNOME Files, Nemo, Caja (расширение на Python) и Dolphin (плагины KF5/KF6), пакеты для Rocky/RHEL 9, Ubuntu 24.04, Debian 13 (`linux-client.yml`); слияние upstream до 2b12dd47; прогресс отправки в Windows Companion снова верный (LoreVcs 0.14.0). В CI пропускается тест upstream `idle_heaps_are_reaped`: на раннерах GitHub он падает, на Rocky 9 проходит.
 
 Замеры загрузки 703 009 файлов — в разделе Performance основного README.
 
@@ -107,13 +108,13 @@
 
 ## Следующие этапы
 
-1. Клиент для Linux (GNOME Files, Nemo, Caja, Dolphin): проект в `docs/proposals/2026-11-17-linux-file-manager-integration.md`, ветка `linux_shell_extension`, стенд сборки — Rocky Linux 9 (`~/lore-linux` на rockybalboa).
+1. Клиент для Linux (GNOME Files, Nemo, Caja, Dolphin) выпущен в 0.4.0: проект в `docs/proposals/2026-11-17-linux-file-manager-integration.md`, ветка `linux_shell_extension`, стенд сборки — Rocky Linux 9 (`~/lore-linux` на rockybalboa).
    - Сделан шаг 1 (2026-11-24): общая библиотека `platform/companion/LoreCompanion.Core` (операции и `OperationSession` — разговор с окном), Windows-хост стал тонким; Linux-хост `platform/linux/LoreCompanion.Linux` (GTK 3 + WebKitGTK 4.1/4.0 через P/Invoke, схема `lore://client/`); меню `platform/linux/file-manager/lore_menu.py` (теперь `lore_extension.py`); `Build-Linux.sh`, `Install-Dev.sh`. Проверено на Rocky 9 под Xvfb с локальным `loreserver`: меню вне и внутри рабочей копии, Commit с выбором файлов, Status, History.
    - Исправлено по ходу: `CommitList` не строил дерево папок для путей с `/` (перегрузка `Split`), история показывала имя типа вместо хэша (LoreVcs 0.14.0), JavaScriptCore на Rocky 9 падал на `Intl` — хост форматирует числа сам.
    - Сделан шаг 2 (2026-11-24): значки статуса как на Windows — companion после каждой операции пишет `$XDG_RUNTIME_DIR/lore/status-cache` (`FileStatusCache` в Core, раскладка общей памяти Windows, файл заменяется целиком переименованием), расширение `lore_extension.py` (бывший `lore_menu.py`) ставит эмблемы `emblem-lore-*` (оверлеи Windows, обрезанные по значку) и перерисовывает файлы по `Gio.FileMonitor`. Обновление только после операций, как на Windows; фоновое обновление — отдельным решением для обеих систем. Проверено в Nautilus 40: изменён, в индексе, замок, состояние папки, перерисовка без переоткрытия.
    - Сделан шаг 3 (2026-11-24): плагины Dolphin `platform/linux/dolphin` (C++, KF5 или KF6: меню `KAbstractFileItemActionPlugin`, эмблемы `KOverlayIconPlugin` из того же кэша, перерисовка по `QFileSystemWatcher`), иконки меню Windows как `lore-*` в hicolor. Проверено в Dolphin 23.08 / KF5 5.116 на Rocky 9 (EPEL, пакеты из CRB подключались разово): меню внутри и вне рабочей копии, подменю с иконками, эмблемы, Unstage из меню и перерисовка. Сборка под KF6 6.13 / Qt 6.8 проверена в контейнере Debian 13, запуск под KF6 — нет.
    - Проверено также в контейнерах Ubuntu 24.04 (Nautilus 46 с API 4.0, WebKitGTK 4.1, Dolphin на KF5) и Debian 13 (Nautilus 48, Dolphin 24.12 на KF6): окна, Commit до ревизии на сервере, меню, эмблемы. Самодостаточный companion и `liblore.so` с Rocky 9 (glibc 2.34) работают там без пересборки; плагины Dolphin собираются под KF дистрибутива.
-   - Дальше: шаг 4 — пакеты `.deb`/`.rpm` в релизе (плагины Dolphin туда, где их ищет Qt, без `QT_PLUGIN_PATH`); проверить на настоящих рабочих столах GNOME и KDE, на Ubuntu (Nautilus 46 — эмблемы), вход через Keycloak на стенде.
+   - Сделан шаг 4: пакеты `lore-client` и `lore-client-dolphin` (`platform/linux/packaging/make-packages.sh`, `.github/workflows/linux-client.yml`), установка в чистых контейнерах и в тестовых рабочих столах проверена. Дальше: проверить на настоящих рабочих столах GNOME и KDE и вход через Keycloak; фоновое обновление значков — отдельным решением для обеих систем.
 2. Публичный DNS/ACME на внешнем сервере.
 3. Подписанный релиз.
 4. Образы для linux/arm64.

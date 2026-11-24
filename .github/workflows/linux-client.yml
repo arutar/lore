@@ -8,9 +8,6 @@ name: Linux Client
 # other two accept; the Dolphin plugins are built on each system for its KDE Frameworks.
 on:
   workflow_dispatch:
-  # TEMPORARY: lets the branch check the workflow before it reaches main. Removed before the merge.
-  push:
-    branches: [linux_shell_extension]
   # platform-release.yml calls this for platform-v* tags and publishes the packages with the
   # rest of the release.
   workflow_call:
