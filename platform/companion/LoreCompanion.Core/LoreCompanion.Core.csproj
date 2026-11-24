@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The companion's operations, shared by the Windows and Linux hosts: everything but the window,
+       the web view and the file manager's status cache. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- ServerProgressEvent reads the native event the LoreVcs package holds. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>LoreCompanion.Core</AssemblyName>
+    <RootNamespace>LoreCompanion</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="LoreCompanion" />
+    <InternalsVisibleTo Include="LoreCompanion.Linux" />
+    <InternalsVisibleTo Include="LoreCompanion.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="LoreVcs" Version="0.14.0" />
+  </ItemGroup>
+</Project>

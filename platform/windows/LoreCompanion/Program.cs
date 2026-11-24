@@ -26,6 +26,7 @@ internal static class Program
             var json = File.ReadAllText(path, Encoding.UTF8);
             File.Delete(path);
             var request = OperationRequest.Parse(json);
+            StatusCache.Current = new ExplorerStatusCache();
             if (!WebViewOperationWindow.IsRuntimeAvailable())
             {
                 throw new InvalidOperationException("WebView2 Runtime is required. Run the Lore installer to install it, then try again.");

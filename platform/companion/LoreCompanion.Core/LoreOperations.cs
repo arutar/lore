@@ -219,7 +219,7 @@ public static class LoreOperations
 
     // Whether the user chose <paramref name="choice"/> for every one of <paramref name="files"/>.
     private static bool Confirmed(OperationRequest request, string choice, IReadOnlyCollection<string> files) =>
-        request.Choice == choice && files.All(file => request.Files.Contains(file, StringComparer.OrdinalIgnoreCase));
+        request.Choice == choice && files.All(file => request.Files.Contains(file, PathText.Comparer));
 
     // Runs a sync. Null when it went through; the files Lore refused it for when a file changed
     // both here and on the server (then nothing was downloaded or changed).
@@ -236,7 +236,7 @@ public static class LoreOperations
                 var text = loreEvent.Tag == LoreEventTag.LOG ? loreEvent.GetData<LoreLogEventDataFFI>().Message
                     : loreEvent.Tag == LoreEventTag.ERROR ? loreEvent.GetData<LoreErrorEventDataFFI>().ErrorInner : null;
                 var match = text is null ? null : LocalChangeLine.Match(text);
-                if (match is { Success: true }) changedHere.Add(match.Groups[1].Value.Trim().Replace('/', '\\'));
+                if (match is { Success: true }) changedHere.Add(PathText.Native(match.Groups[1].Value.Trim()));
             }).WaitAsync();
             return null;
         }
@@ -250,7 +250,7 @@ public static class LoreOperations
                 try { changedHere.AddRange((await ReadStatus(request, scan: true)).Select(file => file.Path)); } catch (LoreError) { }
             }
             if (changedHere.Count == 0) throw;
-            return changedHere.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            return changedHere.Distinct(PathText.Comparer).ToList();
         }
     }
 
@@ -274,13 +274,13 @@ public static class LoreOperations
         }
         var isSelected = StatusPathSelection(request);
         return status.Where(file => !file.Conflicted && (file.Staged || isSelected(file.Path)))
-            .OrderBy(file => file.Path, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(file => file.Path, PathText.Comparer)
             .Select(file => new CommitCandidate(file.Path, file.Added ? "added" : file.Deleted ? "deleted" : "modified", file.Staged, ""))
             .ToList();
     }
 
     private static string RelativePath(OperationRequest request, string path) =>
-        Path.IsPathRooted(path) ? Path.GetRelativePath(request.RepositoryRoot(), path) : path.Replace('/', '\\');
+        Path.IsPathRooted(path) ? Path.GetRelativePath(request.RepositoryRoot(), path) : PathText.Native(path);
 
     // Commit stages the selection, refuses if another user holds a lock on any file it would
     // commit (before anything is recorded, so nothing has to be undone), then commits and sends.
@@ -482,11 +482,11 @@ public static class LoreOperations
     /// unstaged, what it unstaged is staged again. File contents are never touched.</summary>
     internal static async Task RestoreStage(OperationRequest request, IReadOnlyCollection<string> staged, Action<string> report)
     {
-        var wanted = new HashSet<string>(staged, StringComparer.OrdinalIgnoreCase);
+        var wanted = new HashSet<string>(staged, PathText.Comparer);
         var now = (await ReadStatus(request)).Where(file => file.Staged).Select(file => file.Path).ToList();
         var extra = now.Where(path => !wanted.Contains(path)).Select(path => FullPath(request, path)).ToArray();
         if (extra.Length > 0) await UnstagePaths(request, extra, report);
-        var missing = wanted.Except(now, StringComparer.OrdinalIgnoreCase).Select(path => FullPath(request, path)).ToArray();
+        var missing = wanted.Except(now, PathText.Comparer).Select(path => FullPath(request, path)).ToArray();
         if (missing.Length > 0)
         {
             using var globals = Globals(request);
@@ -526,7 +526,7 @@ public static class LoreOperations
 
     private static string[] BulkCommitExclusions(OperationRequest request, IEnumerable<string> staged)
     {
-        var excluded = request.Excluded.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var excluded = request.Excluded.ToHashSet(PathText.Comparer);
         return staged.Where(path => excluded.Contains(path) || request.DisplayedPaths?.Contains(path) == false).ToArray();
     }
 
@@ -535,7 +535,7 @@ public static class LoreOperations
     // records every staged file.
     private static async Task StageExactly(OperationRequest request, List<FileState> before, string[] files, Action<string> report)
     {
-        var wanted = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
+        var wanted = new HashSet<string>(files, PathText.Comparer);
         var extra = before.Where(file => file.Staged && !wanted.Contains(file.Path)).Select(file => FullPath(request, file.Path)).ToArray();
         if (extra.Length > 0) await UnstagePaths(request, extra, report);
         using var globals = Globals(request);
@@ -585,7 +585,7 @@ public static class LoreOperations
     // Discards the local changes to <paramref name="files"/>: they get the last synced version back.
     private static async Task Discard(OperationRequest request, List<string> files, Action<string> report)
     {
-        var states = (await ReadStatus(request)).ToDictionary(file => file.Path, StringComparer.OrdinalIgnoreCase);
+        var states = (await ReadStatus(request)).ToDictionary(file => file.Path, PathText.Comparer);
         var staged = files.Where(path => states.TryGetValue(path, out var state) && state.Staged).Select(path => FullPath(request, path)).ToArray();
         // Lore can't reset a staged file; unstaged, it resets like any other.
         if (staged.Length > 0) await UnstagePaths(request, staged, report);
@@ -684,7 +684,7 @@ public static class LoreOperations
             if (loreEvent.Tag != LoreEventTag.REPOSITORY_STATUS_FILE) return;
             var status = loreEvent.GetData<LoreRepositoryStatusFileEventDataFFI>();
             if (status.Type == LoreNodeType.DIRECTORY) return;
-            var path = Path.IsPathRooted(status.Path) ? Path.GetRelativePath(root, status.Path) : status.Path.Replace('/', '\\');
+            var path = Path.IsPathRooted(status.Path) ? Path.GetRelativePath(root, status.Path) : PathText.Native(status.Path);
             var conflicted = status.FlagConflictUnresolved || status.FlagConflict && !status.FlagStaged;
             var action = status.Action.ToString();
             var added = action.StartsWith("ADD", StringComparison.OrdinalIgnoreCase);
@@ -704,7 +704,7 @@ public static class LoreOperations
     {
         if (paths.Count == 0) return [];
         var me = await CurrentUserId(request);
-        var wanted = new HashSet<string>(paths.Select(path => Normalize(RelativePath(request, path))), StringComparer.OrdinalIgnoreCase);
+        var wanted = new HashSet<string>(paths.Select(path => Normalize(RelativePath(request, path))), PathText.Comparer);
         var held = new List<(string Path, string Owner, ulong LockedAt)>();
         var branch = await CurrentBranchName(request);
         using (var globals = Globals(request))
@@ -727,7 +727,7 @@ public static class LoreOperations
 
     private static readonly TimeSpan LockCheckWait = TimeSpan.FromSeconds(20);
 
-    private static string Normalize(string path) => path.Replace('/', '\\').Trim('\\');
+    private static string Normalize(string path) => PathText.Native(path).Trim(PathText.Separator);
 
     /// <summary>The working copy's branch, read locally. Empty when unknown, which asks for the locks
     /// of every branch: the cautious answer.</summary>
@@ -826,7 +826,7 @@ public static class LoreOperations
     {
         var root = request.RepositoryRoot();
         var selected = request.Paths.Select(path => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            .ToHashSet(PathText.Comparer);
         if (selected.Contains(Path.TrimEndingDirectorySeparator(root))) return _ => true;
 
         return relative =>
@@ -853,9 +853,9 @@ public static class LoreOperations
     {
         var root = request.RepositoryRoot();
         HideMetadata(root);
-        OverlayCacheAccessor.Clear(root);
-        var folderStates = new Dictionary<string, OverlayState>(StringComparer.OrdinalIgnoreCase);
-        var fileStates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        StatusCache.Current.Clear(root);
+        var folderStates = new Dictionary<string, OverlayState>(PathText.Comparer);
+        var fileStates = new HashSet<string>(PathText.Comparer);
         void TrackParents(string path, OverlayState state)
         {
             for (var directory = Path.GetDirectoryName(path); !string.IsNullOrEmpty(directory); directory = Path.GetDirectoryName(directory))
@@ -882,7 +882,7 @@ public static class LoreOperations
                     : status.FlagStaged ? OverlayState.Staged
                     : OverlayState.Modified;
                 var path = Path.IsPathRooted(status.Path) ? Path.GetRelativePath(root, status.Path) : status.Path;
-                OverlayCacheAccessor.Set(root, path, state);
+                StatusCache.Current.Set(root, path, state);
                 fileStates.Add(Path.GetFullPath(Path.Combine(root, path)));
                 TrackParents(path, state);
                 report($"{status.Path}: {state}");
@@ -890,7 +890,7 @@ public static class LoreOperations
             else if (loreEvent.Tag == LoreEventTag.PATH_IGNORE)
             {
                 var ignored = loreEvent.GetData<LorePathIgnoreEventDataFFI>();
-                OverlayCacheAccessor.Set(root, ignored.Path, OverlayState.Ignored);
+                StatusCache.Current.Set(root, ignored.Path, OverlayState.Ignored);
             }
         }).WaitAsync();
         // The status above is local and knows nothing about locks, and clearing the cache dropped
@@ -924,14 +924,14 @@ public static class LoreOperations
         foreach (var path in locked)
         {
             if (fileStates.Contains(Path.GetFullPath(Path.Combine(root, path)))) continue;
-            OverlayCacheAccessor.Set(root, path, OverlayState.Locked);
+            StatusCache.Current.Set(root, path, OverlayState.Locked);
             TrackParents(path, OverlayState.Locked);
         }
         foreach (var (path, state) in folderStates)
         {
-            OverlayCacheAccessor.Set(root, path, state);
+            StatusCache.Current.Set(root, path, state);
         }
-        ShellNotify.RepositoryChanged(root, request.Paths);
+        StatusCache.Current.Changed(root, request.Paths);
     }
 
     public static OverlayState CombineOverlayStates(OverlayState left, OverlayState right)
@@ -957,7 +957,7 @@ public static class LoreOperations
             if (loreEvent.Tag == LoreEventTag.REVISION_HISTORY_ENTRY)
             {
                 var entry = loreEvent.GetData<LoreRevisionHistoryEntryEventDataFFI>();
-                report($"Revision {entry.RevisionNumber}: {entry.Revision}");
+                report($"Revision {entry.RevisionNumber}: {Convert.ToHexStringLower(entry.Revision.Data)}");
             }
         }).WaitAsync();
     }
@@ -986,11 +986,11 @@ public static class LoreOperations
             await Lore.LockFileRelease(globals, args).Callback(LogCallback(report)).WaitAsync();
         }
         var root = request.RepositoryRoot();
-        var known = LockCache.Load(root).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var known = LockCache.Load(root).ToHashSet(PathText.Comparer);
         foreach (var path in request.Paths)
         {
             var relative = Path.GetRelativePath(root, path);
-            OverlayCacheAccessor.Set(root, relative, acquire ? OverlayState.Locked : OverlayState.Normal);
+            StatusCache.Current.Set(root, relative, acquire ? OverlayState.Locked : OverlayState.Normal);
             if (acquire) known.Add(relative); else known.Remove(relative);
         }
         LockCache.Save(root, known);
@@ -1015,50 +1015,6 @@ public static class LoreOperations
     };
 }
 
-internal static class OverlayCacheAccessor
-{
-    private static readonly Lazy<OverlayCache> Cache = new();
-
-    public static void Set(string root, string path, OverlayState state) => Cache.Value.Set(root, path, state);
-
-    public static void Clear(string root) => Cache.Value.ClearRepository(root);
-}
-
-// Tells Explorer that overlays under a working copy changed, so open windows redraw them at once
-// instead of after the next manual refresh. Every folder is announced (a file whose state was cleared
-// isn't in the new status, and its folder redraw picks that up), plus the paths the operation touched.
-internal static class ShellNotify
-{
-    private const int UpdateItem = 0x00002000; // SHCNE_UPDATEITEM
-    private const int UpdateDirectory = 0x00001000; // SHCNE_UPDATEDIR
-    private const uint PathAndNoWait = 0x0005 | 0x3000; // SHCNF_PATHW | SHCNF_FLUSHNOWAIT
-    private const int MaximumFolders = 5000;
-
-    [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
-    private static extern void SHChangeNotify(int eventId, uint flags, string item1, IntPtr item2);
-
-    public static void RepositoryChanged(string root, IEnumerable<string> paths)
-    {
-        try
-        {
-            var folders = new List<string> { root };
-            var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint };
-            foreach (var folder in Directory.EnumerateDirectories(root, "*", options))
-            {
-                if (folder.Contains($"{Path.DirectorySeparatorChar}.lore", StringComparison.OrdinalIgnoreCase)) continue;
-                folders.Add(folder);
-                if (folders.Count >= MaximumFolders) break;
-            }
-            foreach (var path in paths) SHChangeNotify(UpdateItem, PathAndNoWait, path, IntPtr.Zero);
-            foreach (var folder in folders) SHChangeNotify(UpdateDirectory, PathAndNoWait, folder, IntPtr.Zero);
-        }
-        catch (Exception)
-        {
-            // Only a redraw hint: the overlays are already in the cache and appear on the next refresh.
-        }
-    }
-}
-
 // The locks the server reported last for each working copy, so the padlock overlays survive a
 // refresh while the server is unreachable. Kept per user in %LOCALAPPDATA%\Lore\locks, one file
 // per working copy (named by a hash of its path); only paths, nothing secret.
@@ -1067,7 +1023,7 @@ internal static class LockCache
     private static string FileFor(string root)
     {
         var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Lore", "locks");
-        return Path.Combine(directory, $"{OverlayCache.HashPath(root):x16}.json");
+        return Path.Combine(directory, $"{PathText.Hash(root):x16}.json");
     }
 
     public static List<string> Load(string root)
@@ -1089,7 +1045,7 @@ internal static class LockCache
         {
             var file = FileFor(root);
             Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-            File.WriteAllText(file, System.Text.Json.JsonSerializer.Serialize(paths.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToList()));
+            File.WriteAllText(file, System.Text.Json.JsonSerializer.Serialize(paths.Distinct(PathText.Comparer).Order(PathText.Comparer).ToList()));
         }
         catch (Exception)
         {

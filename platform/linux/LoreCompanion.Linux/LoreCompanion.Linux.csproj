@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The Linux companion: hosts the operation dialogs of platform/windows/LoreCompanion.Web in a
+       GTK 3 window with WebKitGTK, for the file manager plugins in platform/linux. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>LoreCompanion.Linux</AssemblyName>
+    <RootNamespace>LoreCompanion</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../companion/LoreCompanion.Core/LoreCompanion.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="../../windows/LoreCompanion.Web/dist/**" Link="Web/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="../../windows/shared/svg/app.svg" Link="lore.svg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <!-- The companion must run on this fork's Lore library, as on Windows: Build-Linux.sh builds it
+       into target/release. -->
+  <PropertyGroup>
+    <ForkLoreLibrary>$(MSBuildThisFileDirectory)../../../target/release/liblore.so</ForkLoreLibrary>
+  </PropertyGroup>
+  <Target Name="UseForkLoreLibrary" AfterTargets="Build;Publish" Condition="Exists('$(ForkLoreLibrary)')">
+    <Copy SourceFiles="$(ForkLoreLibrary)" DestinationFiles="$(OutDir)liblorelib.so" />
+    <Copy SourceFiles="$(ForkLoreLibrary)" DestinationFiles="$(PublishDir)liblorelib.so" Condition="'$(PublishDir)' != ''" />
+  </Target>
+</Project>

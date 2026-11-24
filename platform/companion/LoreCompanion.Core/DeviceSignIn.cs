@@ -1,29 +1,34 @@
 using System.Diagnostics;
 using System.Text.Json;
-using System.Windows;
-using Microsoft.Web.WebView2.Wpf;
 
 namespace LoreCompanion;
 
-internal static class DeviceSignIn
+/// <summary>Shows the identity provider's sign-in page for a device code. The host opens a window
+/// on <c>url</c> titled with <c>code</c>, calls <c>closed</c> when the user closes it, and returns
+/// what closes it again.</summary>
+public delegate Task<IDisposable> SignInPage(Uri url, string code, Action closed);
+
+public static class DeviceSignIn
 {
+    /// <summary>The Lore CLI installed beside the companion.</summary>
+    public static string LoreExecutable => Path.Combine(AppContext.BaseDirectory, OperatingSystem.IsWindows() ? "lore.exe" : "lore");
+
     // The device flow runs in its own process so closing either window stops polling immediately.
-    internal static async Task<string> Run(string remote, Window owner, CancellationToken cancellation)
+    public static async Task<string> Run(string remote, SignInPage showPage, CancellationToken cancellation)
     {
         using var canceled = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         var token = canceled.Token;
-        var start = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "lore.exe"))
+        var start = new ProcessStartInfo(LoreExecutable)
         {
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
             ArgumentList = { "--json", "auth", "login", "--no-browser", remote },
         };
-        // The window owns the poll even when Explorer uses the shared Lore service.
+        // The window owns the poll even when the file manager uses the shared Lore service.
         start.Environment["LORE_USE_SERVICE"] = "0";
         using var process = Process.Start(start) ?? throw new IOException("Could not start Lore sign-in.");
-        Window? dialog = null;
-        WebView2? browser = null;
+        IDisposable? page = null;
         string? userId = null;
         try
         {
@@ -37,16 +42,8 @@ internal static class DeviceSignIn
                         var data = root.GetProperty("data");
                         var url = new Uri(data.GetProperty("url").GetString()!);
                         if (url.Scheme != "http" && url.Scheme != "https") throw new InvalidDataException("Unsupported sign-in URL.");
-                        var code = data.GetProperty("userCode").GetString();
-                        browser = new WebView2();
-                        dialog = new Window { Owner = owner, Title = $"Lore sign-in  {code}", Content = browser, Width = 680, Height = 720 };
-                        dialog.Closed += (_, _) => canceled.Cancel();
-                        dialog.Show();
-                        await browser.EnsureCoreWebView2Async(((WebView2)owner.Content).CoreWebView2.Environment);
+                        page = await showPage(url, data.GetProperty("userCode").GetString() ?? "", canceled.Cancel);
                         token.ThrowIfCancellationRequested();
-                        browser.CoreWebView2.Settings.IsWebMessageEnabled = false;
-                        browser.CoreWebView2.Settings.AreHostObjectsAllowed = false;
-                        browser.CoreWebView2.Navigate(url.AbsoluteUri);
                         break;
                     case "authUserInfo":
                         userId = root.GetProperty("data").GetProperty("id").GetString();
@@ -62,8 +59,7 @@ internal static class DeviceSignIn
         {
             if (!process.HasExited) process.Kill();
             await process.WaitForExitAsync();
-            if (dialog?.IsVisible == true) dialog.Close();
-            browser?.Dispose();
+            page?.Dispose();
         }
     }
 }

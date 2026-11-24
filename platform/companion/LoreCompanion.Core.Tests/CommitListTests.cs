@@ -36,6 +36,22 @@ public sealed class CommitListTests
         Assert.AreEqual(2, list.Page(nested.Path, "", 0, 100).Total);
     }
 
+    /// <summary>Lore reports paths with '/' on Linux: they fold into the same tree, keyed with '\'
+    /// as the page asks for it, and a file's box answers to the path the page sends back.</summary>
+    [TestMethod]
+    public void FoldsPathsWithForwardSlashes()
+    {
+        var list = List(File("Art/hero.bin"), File("Docs/notes.txt"), File("Docs/readme.txt"));
+
+        var folders = list.Folders();
+
+        CollectionAssert.AreEqual(new[] { "Art", "Docs" }, folders.Select(folder => folder.Path).ToArray());
+        Assert.AreEqual(2, list.Page("Docs", "", 0, 100).Total);
+        list.SelectFile("Docs/notes.txt", false);
+        CollectionAssert.AreEqual(new[] { "Docs/notes.txt" }, list.ExcludedFiles());
+        Assert.AreEqual(1, list.Folders().Single(folder => folder.Path == "Docs").Selected);
+    }
+
     [TestMethod]
     public void PageReturnsTheFilesOfOneFolderOnly()
     {

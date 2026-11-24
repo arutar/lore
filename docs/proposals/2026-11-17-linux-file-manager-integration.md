@@ -5,7 +5,7 @@ authors:
   - arutar
 status: Draft
 created: 2026-11-17
-updated: 2026-11-17
+updated: 2026-11-24
 discussion: pending
 ---
 
@@ -44,13 +44,15 @@ Linux desktops in the target organizations use both GNOME and KDE, so one file m
 
 The Windows companion's operation layer — operations, request validation, accounts, client settings, the lock cache — already depends only on the [LoreVcs](https://www.nuget.org/packages/LoreVcs) SDK and the native `lore-capi` library, which builds on Linux. This proposal moves it into a platform-neutral library that both companions use. The Windows-specific parts stay in the Windows host: the WebView2 window, the named shared-memory overlay cache, and `SHChangeNotify` redraw hints. Each host supplies its own status-cache writer and redraw hint.
 
-The Linux companion is a separate executable with the same `--request <file>` contract as on Windows. It hosts the existing operation dialogs (`platform/windows/LoreCompanion.Web`) in a WebKitGTK window and exchanges the same JSON messages with them. The request file lives in `$XDG_RUNTIME_DIR` with mode `0600`, carries paths and an operation identifier, never tokens, and the companion deletes it after reading.
+The Linux companion is a separate executable with the same `--request <file>` contract as on Windows. It hosts the existing operation dialogs (`platform/windows/LoreCompanion.Web`) in a WebKitGTK window and exchanges the same JSON messages with them.
+
+The window calls GTK 3 and WebKitGTK directly through P/Invoke rather than through a webview library: Photino.NET needs WebKitGTK 4.1, and Rocky Linux 9 ships only 4.0. The companion loads `libwebkit2gtk-4.1` where it exists and `libwebkit2gtk-4.0` otherwise; both offer the same API. The dialogs load from the companion's folder under a `lore://client/` scheme, the counterpart of WebView2's `https://lore.client` virtual host, and a user script gives them the `window.chrome.webview` object they use on Windows. The same script formats numbers without `Intl`, because JavaScriptCore in WebKitGTK 2.54 on Rocky Linux 9 aborts the page's process the first time `Intl` formats a number. The request file lives in `$XDG_RUNTIME_DIR` with mode `0600`, carries paths and an operation identifier, never tokens, and the companion deletes it after reading.
 
 Credentials use the existing store in [`lore-credential/src/token_store.rs`](../../lore-credential/src/token_store.rs), which on Linux uses the kernel session keyring.
 
 ### Status cache
 
-The companion writes file states to a per-user cache file at `$XDG_RUNTIME_DIR/lore/status-cache`. It keeps the Windows layout: a fixed number of fixed-size entries keyed by a path hash, with the same state values and precedence (conflicted, staged and modified, staged, modified, locked, ignored, normal). Linux paths are case-sensitive, so the hash covers the exact UTF-8 path. Writers serialize through an advisory lock. Readers don't take the lock: they validate each entry and treat a torn or unknown entry as no state.
+The companion writes file states to a per-user cache file at `$XDG_RUNTIME_DIR/lore/status-cache`. It keeps the Windows layout: a fixed number of fixed-size entries keyed by a path hash, with the same state values and precedence (conflicted, staged and modified, staged, modified, locked, ignored, normal). Linux paths are case-sensitive, so the hash covers the exact UTF-8 path. Writers serialize through an advisory lock and replace the file whole, by a rename, once an operation's states are complete; the replacement is what tells the plugins to redraw. Readers don't take the lock: they read the file as one piece and treat a file of another version, or an unknown entry, as no state.
 
 A cache miss shows no icon. A plugin never waits for the companion. After an operation the companion rewrites the affected entries, and plugins watch the cache file and redraw.
 
@@ -157,5 +159,4 @@ The Nextcloud desktop client's [shell integration](https://github.com/nextcloud/
 ## Unresolved Questions
 
 - Which distributions and versions form the supported baseline, and do they need KDE Frameworks 5 as well as 6?
-- Which .NET WebKitGTK host to use: a webview library such as Photino.NET or GObject bindings such as GirCore.
 - Whether the companion should become a per-session service later, to refresh status after edits made outside Lore, as the Windows design plans.

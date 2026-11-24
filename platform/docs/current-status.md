@@ -1,6 +1,6 @@
 # Текущее состояние Lore Platform
 
-Обновлено 2026-11-23, к релизу `platform-v0.3.2`: прогресс проверки push перенесён в общее событие `Progress` (upstream его не отправляет); `BranchPushFragmentProgress` снова как у upstream.
+Обновлено 2026-11-24 (ветка `linux_shell_extension`, шаги 1–2 клиента Linux); релиз `platform-v0.3.2`: прогресс проверки push перенесён в общее событие `Progress` (upstream его не отправляет); `BranchPushFragmentProgress` снова как у upstream.
 
 История по версиям — `platform/docs/releases/`. Коротко:
 - 0.2.4–0.2.5 — окно Commit для сотен тысяч файлов (дерево папок, страницы, поиск), прогресс коммита и отправки, удаление репозитория администратором;
@@ -18,7 +18,7 @@
 
 ## Цель
 
-Простой аналог SVN на основе Lore: self-hosted сервер с WebUI, интеграция с Проводником Windows, работа во внутренней сети без интернета и во внешней сети, установка одной командой через Docker Compose. Вход через Keycloak: учётки Active Directory и локальные (email). Роли admin/user, права на репозиторий `none < read < write < owner`, приватные репозитории без права не видны. Windows-клиент — CLI, Companion и расширение Проводника; Linux — CLI (интеграция с файловыми менеджерами в работе).
+Простой аналог SVN на основе Lore: self-hosted сервер с WebUI, интеграция с Проводником Windows, работа во внутренней сети без интернета и во внешней сети, установка одной командой через Docker Compose. Вход через Keycloak: учётки Active Directory и локальные (email). Роли admin/user, права на репозиторий `none < read < write < owner`, приватные репозитории без права не видны. Windows-клиент — CLI, Companion и расширение Проводника; Linux — CLI и, в ветке `linux_shell_extension`, меню GNOME Files (Nemo, Caja) с теми же окнами операций, что на Windows.
 
 ## Состав
 
@@ -98,7 +98,8 @@
 - Windows даёт ограниченное число слотов overlay-иконок; при установленных OneDrive, Dropbox или TortoiseSVN значки состояния Lore могут не отображаться.
 - Сетевая папка: Windows несколько секунд кэширует содержимое каталогов на SMB-шаре, поэтому файлы, созданные прямо перед открытием окна Commit, могут не попасть в его список (и в этот коммит); они появятся при следующем открытии. Повторного сканирования не делаем — решение 2026-11-17.
 - Хранилище `remote` не умеет записывать пару (ветка и результат push), поэтому там push остаётся одним запросом с пределом `request_handler_timeout_seconds`; сервер пишет об этом предупреждение при старте.
-- Прогресс проверки push Companion читает из события, которого нет в пакете LoreVcs 0.13.0, по раскладке `lore.h`; при смене пакета это место надо проверить (`ServerProgressEvent` в `LoreOperations.cs`).
+- Прогресс проверки push Companion читает из события `Progress`, данные которого пакет LoreVcs знает только как заглушку, по раскладке `lore.h`; при смене пакета это место надо проверить (`ServerProgressEvent` в `LoreOperations.cs`).
+- LoreVcs 0.13.0 читал `BranchPushFragmentProgress` по раскладке до слияния upstream 0.3.1 (без репозитория и ветки), и прогресс отправки в Companion с 0.3.1 был мусорным; в ветке `linux_shell_extension` пакет обновлён до 0.14.0.
 - Нативный протокол использует порт 41337 (TCP и UDP); из внешних сетей он может быть закрыт.
 - Установка на Linux-хосте проверяется сквозным тестом в GitHub Actions (Ubuntu); стенд — Windows с Docker Desktop.
 - Образы сервера собираются только для linux/amd64.
@@ -106,7 +107,11 @@
 
 ## Следующие этапы
 
-1. Клиент для Linux (GNOME Files, Nemo, Caja, Dolphin): проект в `docs/proposals/2026-11-17-linux-file-manager-integration.md`, ветка `linux_shell_extension`, стенд сборки — Rocky Linux 9.
+1. Клиент для Linux (GNOME Files, Nemo, Caja, Dolphin): проект в `docs/proposals/2026-11-17-linux-file-manager-integration.md`, ветка `linux_shell_extension`, стенд сборки — Rocky Linux 9 (`~/lore-linux` на rockybalboa).
+   - Сделан шаг 1 (2026-11-24): общая библиотека `platform/companion/LoreCompanion.Core` (операции и `OperationSession` — разговор с окном), Windows-хост стал тонким; Linux-хост `platform/linux/LoreCompanion.Linux` (GTK 3 + WebKitGTK 4.1/4.0 через P/Invoke, схема `lore://client/`); меню `platform/linux/file-manager/lore_menu.py` (теперь `lore_extension.py`); `Build-Linux.sh`, `Install-Dev.sh`. Проверено на Rocky 9 под Xvfb с локальным `loreserver`: меню вне и внутри рабочей копии, Commit с выбором файлов, Status, History.
+   - Исправлено по ходу: `CommitList` не строил дерево папок для путей с `/` (перегрузка `Split`), история показывала имя типа вместо хэша (LoreVcs 0.14.0), JavaScriptCore на Rocky 9 падал на `Intl` — хост форматирует числа сам.
+   - Сделан шаг 2 (2026-11-24): значки статуса как на Windows — companion после каждой операции пишет `$XDG_RUNTIME_DIR/lore/status-cache` (`FileStatusCache` в Core, раскладка общей памяти Windows, файл заменяется целиком переименованием), расширение `lore_extension.py` (бывший `lore_menu.py`) ставит эмблемы `emblem-lore-*` (оверлеи Windows, обрезанные по значку) и перерисовывает файлы по `Gio.FileMonitor`. Обновление только после операций, как на Windows; фоновое обновление — отдельным решением для обеих систем. Проверено в Nautilus 40: изменён, в индексе, замок, состояние папки, перерисовка без переоткрытия.
+   - Дальше: шаг 3 — Dolphin, затем пакеты; проверить на настоящем рабочем столе GNOME и на Ubuntu (Nautilus 46 — эмблемы), вход через Keycloak на стенде.
 2. Публичный DNS/ACME на внешнем сервере.
 3. Подписанный релиз.
 4. Образы для linux/arm64.

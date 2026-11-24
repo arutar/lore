@@ -3,17 +3,6 @@ using System.IO.MemoryMappedFiles;
 
 namespace LoreCompanion;
 
-public enum OverlayState
-{
-    Normal = 0,
-    Modified = 1,
-    Staged = 2,
-    Conflicted = 3,
-    Locked = 4,
-    Ignored = 5,
-    StagedModified = 6,
-}
-
 public sealed class OverlayCache : IDisposable
 {
     public const int Capacity = 4096;
@@ -118,21 +107,59 @@ public sealed class OverlayCache : IDisposable
         view.Write(offset + 20, 0U);
     }
 
-    public static ulong HashPath(string path)
-    {
-        var normalized = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant();
-        var hash = 14695981039346656037UL;
-        foreach (var character in normalized)
-        {
-            hash ^= character;
-            hash *= 1099511628211UL;
-        }
-        return hash;
-    }
+    public static ulong HashPath(string path) => PathText.Hash(path);
 
     public void Dispose()
     {
         file.Dispose();
         mutex.Dispose();
+    }
+}
+
+/// <summary>Explorer's side of the status cache: the overlay states go to the shared memory the
+/// shell extension reads, and Explorer is told to redraw.</summary>
+internal sealed class ExplorerStatusCache : IStatusCache
+{
+    private readonly Lazy<OverlayCache> cache = new();
+
+    public void Set(string root, string relativePath, OverlayState state) => cache.Value.Set(root, relativePath, state);
+
+    public void Clear(string root) => cache.Value.ClearRepository(root);
+
+    public void Changed(string root, IEnumerable<string> paths) => ShellNotify.RepositoryChanged(root, paths);
+}
+
+// Tells Explorer that overlays under a working copy changed, so open windows redraw them at once
+// instead of after the next manual refresh. Every folder is announced (a file whose state was cleared
+// isn't in the new status, and its folder redraw picks that up), plus the paths the operation touched.
+internal static class ShellNotify
+{
+    private const int UpdateItem = 0x00002000; // SHCNE_UPDATEITEM
+    private const int UpdateDirectory = 0x00001000; // SHCNE_UPDATEDIR
+    private const uint PathAndNoWait = 0x0005 | 0x3000; // SHCNF_PATHW | SHCNF_FLUSHNOWAIT
+    private const int MaximumFolders = 5000;
+
+    [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern void SHChangeNotify(int eventId, uint flags, string item1, IntPtr item2);
+
+    public static void RepositoryChanged(string root, IEnumerable<string> paths)
+    {
+        try
+        {
+            var folders = new List<string> { root };
+            var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint };
+            foreach (var folder in Directory.EnumerateDirectories(root, "*", options))
+            {
+                if (folder.Contains($"{Path.DirectorySeparatorChar}.lore", StringComparison.OrdinalIgnoreCase)) continue;
+                folders.Add(folder);
+                if (folders.Count >= MaximumFolders) break;
+            }
+            foreach (var path in paths) SHChangeNotify(UpdateItem, PathAndNoWait, path, IntPtr.Zero);
+            foreach (var folder in folders) SHChangeNotify(UpdateDirectory, PathAndNoWait, folder, IntPtr.Zero);
+        }
+        catch (Exception)
+        {
+            // Only a redraw hint: the overlays are already in the cache and appear on the next refresh.
+        }
     }
 }

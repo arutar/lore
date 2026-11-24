@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Tests of the shared companion library that need no window, server or working copy; they run
+       on Windows and Linux alike. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>LoreCompanion.Tests</AssemblyName>
+    <RootNamespace>LoreCompanion.Tests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MSTest" Version="4.0.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Microsoft.VisualStudio.TestTools.UnitTesting" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../LoreCompanion.Core/LoreCompanion.Core.csproj" />
+  </ItemGroup>
+</Project>

@@ -25,9 +25,9 @@ public sealed class CommitList
     private readonly Node root = new("", "", -1);
     // Paths left out of the commit; the empty set means "everything", which is what the window
     // starts with.
-    private readonly HashSet<string> excluded = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> excluded = new(PathText.Comparer);
 
-    private readonly HashSet<string> lockedPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> lockedPaths = new(PathText.Comparer);
 
     private sealed class Node(string path, string name, int depth)
     {
@@ -47,11 +47,11 @@ public sealed class CommitList
     public CommitList(IEnumerable<CommitCandidate> candidates)
     {
         files = candidates.ToList();
-        var nodes = new Dictionary<string, Node>(StringComparer.OrdinalIgnoreCase) { [""] = root };
+        var nodes = new Dictionary<string, Node>(PathText.Comparer) { [""] = root };
         for (var index = 0; index < files.Count; index++)
         {
             if (files[index].LockedBy.Length > 0) excluded.Add(files[index].Path);
-            var parts = files[index].Path.Split('\\', '/', StringSplitOptions.RemoveEmptyEntries);
+            var parts = files[index].Path.Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries);
             var node = root;
             for (var depth = 0; depth < parts.Length - 1; depth++)
             {
@@ -153,7 +153,7 @@ public sealed class CommitList
         var rows = new List<CommitFolder>();
         void Walk(Node node)
         {
-            foreach (var child in node.Folders.OrderBy(child => child.Name, StringComparer.OrdinalIgnoreCase))
+            foreach (var child in node.Folders.OrderBy(child => child.Name, PathText.Comparer))
             {
                 rows.Add(new CommitFolder(child.Path, child.Name, child.Depth, child.Count, child.Added,
                     child.Modified, child.Deleted, child.Locked, child.Selected));
@@ -217,7 +217,7 @@ public sealed class CommitList
     public void SelectFile(string path, bool on)
     {
         var wanted = (path ?? "").Replace('/', '\\').Trim('\\');
-        var index = files.FindIndex(file => file.Path.Equals(wanted, StringComparison.OrdinalIgnoreCase));
+        var index = files.FindIndex(file => file.Path.Replace('/', '\\').Equals(wanted, PathText.Comparison));
         if (index < 0 || files[index].LockedBy.Length > 0) return;
         if (on) excluded.Remove(files[index].Path); else excluded.Add(files[index].Path);
         Recount(root);
@@ -262,7 +262,7 @@ public sealed class CommitList
     {
         foreach (var child in node.Folders)
         {
-            if (child.Path.Equals(path, StringComparison.OrdinalIgnoreCase)) return child;
+            if (child.Path.Equals(path, PathText.Comparison)) return child;
             var found = Find(child, path);
             if (found is not null) return found;
         }
