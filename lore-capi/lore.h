@@ -2257,6 +2257,10 @@ typedef struct lore_repository_status_revision_event_data_t {
   uint8_t remote_authorized;
   // Branch exists on the remote and the query returned a latest revisoin (possibly zero if branch does not exist on remote)
   uint8_t remote_branch_exist;
+  // No valid login reached the remote: none is stored for its server, it expired and could not
+  // be refreshed, or the remote rejected the token presented. Set where `remote_available` is
+  // zero too, since a login refused at the connect leaves the remote unreachable.
+  uint8_t remote_unauthenticated;
 } lore_repository_status_revision_event_data_t;
 
 // Status of a single file or node reported by a repository status operation.
@@ -2593,6 +2597,9 @@ typedef struct lore_revision_sync_target_event_data_t {
   uint8_t remote_available;
   // Remote branch query returned an authoritative answer, identity is authorized to access the repository.
   uint8_t remote_authorized;
+  // No valid login reached the remote: none is stored for its server, it expired and could not
+  // be refreshed, or the remote rejected the token presented.
+  uint8_t remote_unauthenticated;
 } lore_revision_sync_target_event_data_t;
 
 // Details of a single file changed by a sync.
@@ -13708,7 +13715,10 @@ int32_t lore_shutdown(void);
 // # What is not counted
 //
 // Threads the host application or a linked library creates. Lore accounts only
-// for its own.
+// for its own threads, except one: unless an allocator was installed with
+// `lore_set_allocator` or `LORE_ALLOCATOR` selects the system allocator, Lore
+// runs a thread outside the limit, `lore-heap-reap`, which sleeps except while
+// it returns the memory of idle threads.
 //
 // Must be called before the first Lore operation, while the runtime is still
 // unconstructed. Returns `0` if the limit was applied, `1` if it had already

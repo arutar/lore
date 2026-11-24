@@ -2639,6 +2639,12 @@ Updating the link to a different revision is an explicit `link update` operation
 produces a new parent revision; the previous parent revision still pins the previous
 linked revision.
 
+A parent may link one repository at several paths, each mount exposing another folder of
+it. The mounts share one pin, branch and flags ([ADR-00043](../developing/decisions/00043-one-pin-per-linked-repository.md)):
+`link add` of a repository the parent already links takes the pin of its other mounts, and
+`link update` and a commit through any one mount move every mount together, as unstaging
+an update does in the top-level repository.
+
 A branch create also reaches nested links, so the repositories those link to get the
 branch too, up to the link depth limit of 8. It follows three rules:
 
@@ -2655,7 +2661,11 @@ branch too, up to the link depth limit of 8. It follows three rules:
   branches it already created there. A branch it fails to delete stays, with a warning.
 
 Merging the parent carries its link changes as the parent's diff records them. A link the
-merged branch removes is removed, and its repository is not merged. The repository of an
+merged branch removes is removed, and its repository is not merged, unless this branch changed
+it: outside a linked repository, a link one branch removes and the other changes conflicts at
+the mount, as does a link against a folder, a file or a link to another repository. `theirs`
+takes the merged branch's side whole, landing a link as a merge brings one in; `mine` keeps
+this branch's. The repository of an
 auto-following link the merged branch adds is merged into the linked branch the link lands
 on, and the link pins the result: the pin it was given names a revision of the merged
 branch's counterpart, which the target's need not hold. A link with an explicit branch keeps
