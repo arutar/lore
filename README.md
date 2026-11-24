@@ -62,7 +62,9 @@ the fork can shrink as Lore matures.
   It never decides for you where work could be lost: when someone changed the same file, or
   files are staged, it lists the files and asks how to go on; discarding your changes is always
   confirmed first. Sign in once in the browser; the session is kept.
-- **Linux CLI** built from this fork.
+- **Linux client** — packages for Rocky Linux / RHEL 9, Ubuntu 24.04 and Debian 13 with the `lore`
+  CLI, the same context menu, status icons and operation windows as on Windows in GNOME Files,
+  Nemo and Caja, and in KDE Dolphin. Other distributions get the CLI as an archive.
 - **MCP for AI agents** — Claude Code, Cursor, Hermes or any other MCP client reads repositories
   with a personal token: list and browse repositories, read text files in parts or search them,
   follow the history and locks, get a short-lived download link for any file. Read-only by design:
@@ -126,7 +128,7 @@ offers the ways forward; **Cancel** always leaves everything as it was:
 ```mermaid
 flowchart TB
     Browser["🌐 Browser"]
-    Desktop["🪟 Windows Explorer · lore CLI<br/>🐧 Linux lore CLI"]
+    Desktop["🪟 Windows Explorer · lore CLI<br/>🐧 GNOME Files · Dolphin · lore CLI"]
     Agent["🤖 AI agent<br/>any MCP client"]
     AD[("Active Directory<br/>users · groups")]
 
@@ -242,8 +244,10 @@ Add Active Directory by passing `LORE_LDAP_URL`, `LORE_LDAP_BASE_DN`, `LORE_LDAP
 - **[Installation guide](platform/docs/install.md)** — step by step: choosing the name, Active
   Directory, HTTPS, mail, clients, upgrades, troubleshooting.
 
-Clients: `LoreClient-<version>-x64.msi` for Windows, `lore-cli-<version>-<arch>.tar.gz` for Linux,
-both on the [Releases](../../releases/latest) page.
+Clients: `LoreClient-<version>-x64.msi` for Windows; for Linux the `lore-client` package of your
+system (`.rpm` for Rocky Linux and RHEL 9, `.deb` for Ubuntu 24.04 and Debian 13, with
+`lore-client-dolphin` for KDE), or `lore-cli-<version>-<arch>.tar.gz` with the CLI alone. All are on
+the [Releases](../../releases/latest) page and on the server's home page.
 
 ## How this differs from upstream Lore
 
@@ -255,6 +259,7 @@ both on the [Releases](../../releases/latest) page.
 | Active Directory | — | Sign-in, nested groups, account status followed within minutes |
 | Local accounts, registration, password reset | — | Through Keycloak |
 | Windows Explorer integration | — | Context menu, status icons, MSI installer; asks before anything that could lose work |
+| Linux file manager integration | — | The same menu, status icons and windows in GNOME Files, Nemo, Caja and Dolphin; `.rpm` and `.deb` packages |
 | Server deployment | Server binary / container, you assemble the rest | Docker Compose bundle with setup, backup and restore |
 | Plain HTTP inside an internal network | Sign-in requires HTTPS (except localhost) | Allowed to the same host as the Lore server, no client configuration |
 | Anonymous clone of public repositories | — | Supported |

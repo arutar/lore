@@ -78,6 +78,9 @@ jobs:
     needs: el9
     runs-on: ubuntu-24.04
     container: ${{ matrix.image }}
+    defaults:
+      run:
+        shell: bash
     permissions:
       contents: read
     strategy:

@@ -188,162 +188,30 @@ as `LORE_ADMIN_PASSWORD`.
 and restarts what changed. Settings you pass once are saved to `.env`, so a plain `sh setup.sh`
 later reuses them.
 
-**Client downloads.** The WebUI's home page offers the client of the server's version for Windows
-and Linux. By default (`online`) it links to the files of the release on GitHub. If your users
-can't reach github.com, keep the files on the server instead (about 340 MB):
-
-```sh
-sh setup.sh --client-downloads offline
-```
-
-```powershell
-.\setup.ps1 -ClientDownloads offline
-```
-
-Setup downloads them from the release, or takes them from a `clients/` folder next to it on a
-host without internet access, and checks their SHA-256. See
-[docker.md](docker.md#client-downloads).
-
-**MCP for AI agents (optional).** AI agents such as Claude Code, Cursor or Hermes can read
-repositories over MCP with a personal token. It's off unless you turn it on, for your internal
-networks only or for everyone who can reach the WebUI:
-
-```sh
-sh setup.sh --mcp internal --mcp-networks "10.0.0.0/16;192.168.0.0/24"
-sh setup.sh --mcp on
-```
-
-```powershell
-.\setup.ps1 -Mcp internal -McpNetworks "10.0.0.0/16;192.168.0.0/24"
-```
-
-See [mcp.md](mcp.md) for tokens, who may use MCP and how to connect an agent.
-
-### 4.4 Check
-
-```sh
-docker compose ps            # all services "healthy"
-curl -fsS http://lore.corp.local:8080/healthz
-```
-
-Optional end-to-end self-test — **only on a test installation**, it runs backup and restore:
-
-```sh
-LORE_E2E=destroy-test-data bash test/e2e.sh                          # Linux
-LORE_E2E=destroy-test-data LORE_E2E_POWERSHELL=true bash test/e2e.sh  # Windows, from Git Bash
-```
-
-## 5. Connect Active Directory
-
-Pass the LDAP settings to `setup` (once; they are saved in `.env`):
-
-```sh
-LORE_LDAP_URL=ldaps://dc01.corp.local:636 \
-LORE_LDAP_BASE_DN="DC=corp,DC=local" \
-LORE_LDAP_BIND_DN="CN=svc-lore,OU=Service Accounts,DC=corp,DC=local" \
-LORE_LDAP_BIND_PASSWORD='bind-password' \
-sh setup.sh
-```
-
-```powershell
-$env:LORE_LDAP_URL = "ldaps://dc01.corp.local:636"
-$env:LORE_LDAP_BASE_DN = "DC=corp,DC=local"
-$env:LORE_LDAP_BIND_DN = "CN=svc-lore,OU=Service Accounts,DC=corp,DC=local"
-$env:LORE_LDAP_BIND_PASSWORD = "bind-password"
-.\setup.ps1
-```
-
-- The bind account needs only read access to users and groups. Nothing is ever written to AD.
-- Plain `ldap://...:389` works too; add `LORE_LDAP_STARTTLS=true` to encrypt it. For a domain
-  controller with an internal CA that the containers don't trust, `LORE_LDAP_INSECURE_SKIP_VERIFY=true`
-  skips certificate checks (prefer adding the CA instead).
-- Users sign in with their Windows login name (`sAMAccountName`) and password.
-- Accounts are identified by `objectGUID`, so renaming a user in AD keeps their access.
-- Groups, including nested groups, can be given access to repositories. Changes in AD — removing
-  someone from a group, disabling an account — take effect within `LORE_LDAP_REFRESH` (5 minutes),
-  for the WebUI and for the Lore clients.
-- If AD becomes unreachable, signed-in users keep their last known groups for
-  `LORE_LDAP_OUTAGE_GRACE` (8 hours); after that group-based access is withheld until AD is back.
-  Local accounts are not affected.
-- The local `admin` always wins over an AD account with the same name.
-
-A short host name (`ldap://dc01:389`) is resolved on the host during `setup` and passed into the
-containers, so internal DNS names work even when Docker uses a different resolver.
-
-## 6. Email (optional)
-
-Without mail, administrators create local accounts with a temporary password and registration
-stays closed. With mail, Keycloak can verify addresses, reset passwords and you can open
-self-registration for external users in **Settings**.
-
-```sh
-LORE_SMTP_HOST=smtp.example.com LORE_SMTP_PORT=587 LORE_SMTP_STARTTLS=true \
-LORE_SMTP_FROM=lore@example.com LORE_SMTP_USERNAME=lore@example.com LORE_SMTP_PASSWORD='...' \
-sh setup.sh
-```
-
-For SMTPS on port 465 use `LORE_SMTP_PORT=465 LORE_SMTP_SSL=true LORE_SMTP_STARTTLS=false`.
-
-## 7. HTTPS
-
-### Built-in (Let's Encrypt)
-
-```sh
-LORE_PUBLIC_HOST=lore.example.com LORE_PUBLIC_SCHEME=https LORE_DIRECT_CADDY=true sh setup.sh
-```
-
-```powershell
-.\setup.ps1 -PublicHost lore.example.com -Scheme https -DirectCaddy
-```
-
-Caddy listens on 80 and 443 and obtains and renews the certificate itself. The DNS name must
-resolve to the host and ports 80/443 must be reachable from the internet. For names ending in
-`.internal` or `localhost` Caddy uses its own local CA instead.
-
-### Behind your reverse proxy
-
-```sh
-LORE_PUBLIC_HOST=lore.example.com LORE_PUBLIC_SCHEME=https LORE_PROXY_BIND=127.0.0.1 sh setup.sh
-```
-
-Forward `https://lore.example.com/*` to `http://127.0.0.1:8080` and pass the usual headers
-(`Host`, `X-Forwarded-For`, `X-Forwarded-Proto: https`). `LORE_PROXY_BIND=127.0.0.1` keeps port 8080
-closed to everyone except the proxy on the same host; leave it out if the proxy runs elsewhere.
-
-Port 41337 for the Lore clients is not HTTP and does not go through the proxy; open it directly.
-
-### Sign-in on a separate domain
-
-`LORE_AUTH_PUBLIC_URL=https://login.example.com` serves Keycloak on its own name (Caddy gets a
-certificate for it too). Most installations don't need this.
-
-## 8. First steps after installing
-
-1. Sign in as `admin`. Change the password on the account page
-   `<WebUI address>/auth/realms/lore/account` → *Signing in*, or keep the generated one in your
-   password manager.
-2. **Settings** — interface language and theme for everyone, registration on/off.
-3. **Users** — add people from Active Directory (search by name) or create local accounts for
-   external partners (email + temporary password).
-4. **New repository** — name it like `team/project`; it is private by default.
-5. Repository → **Access** — give *Read*, *Write* or *Owner* to users and AD groups, or switch on
-   "all signed-in users" / "public".
-6. Copy the repository address (`lore://...`) with the copy button and send it to the team.
-7. **MCP** (when it's on) — people create their own tokens for AI agents in the left menu; in
-   **Users and groups** the MCP switch turns it off for a person or a group. See [mcp.md](mcp.md).
-
-## 9. Install the clients
-
-The WebUI's home page offers the client of the server's version, with a copyable `curl` command for
+**Client downloads.** The WebUI's home page offers the client of the server's version, with a copyable install command for
 Linux. The same files are on the [Releases](../../../../releases/latest) page:
 
 - **Windows:** `LoreClient-<version>-x64.msi`. Installs the `lore` CLI, the Explorer integration
   (context menu, status icons) and the sign-in companion. Requires the Microsoft Edge WebView2
   Runtime, which current Windows 10/11 already have.
-- **Linux:** `lore-cli-<version>-<arch>.tar.gz`:
+- **Linux, Rocky Linux and RHEL 9, Ubuntu 24.04, Debian 13:** the `lore-client` package of your system
+  installs the `lore` CLI, the Lore menu, status icons and operation windows in GNOME Files, Nemo
+  and Caja; `lore-client-dolphin` adds them to KDE Dolphin (on Rocky Linux and RHEL, Dolphin comes
+  from EPEL).
 
   ```sh
-  tar -xzf lore-cli-0.3.2-x86_64-unknown-linux-gnu.tar.gz
+  sudo dnf install ./lore-client-0.4.0-1.el9.x86_64.rpm                 # Rocky Linux, RHEL 9
+  sudo apt install ./lore-client_0.4.0-1.ubuntu24.04_amd64.deb          # Ubuntu 24.04
+  sudo apt install ./lore-client-dolphin_0.4.0-1.ubuntu24.04_amd64.deb  # with KDE
+  nautilus -q                                                           # GNOME Files loads the menu
+  ```
+
+  After installing the Dolphin package, open a new Dolphin window. Details:
+  [platform/linux/README.md](../linux/README.md).
+- **Other Linux distributions:** `lore-cli-<version>-<arch>.tar.gz` holds the CLI alone:
+
+  ```sh
+  tar -xzf lore-cli-0.4.0-x86_64-unknown-linux-gnu.tar.gz
   install -m 0755 lore ~/.local/bin/lore
   ```
 

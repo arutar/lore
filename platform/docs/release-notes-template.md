@@ -7,7 +7,11 @@
 | `lore-platform-server-{{VERSION}}.tar.gz` / `.zip` | **Server.** Docker Compose bundle: unpack and run `setup.sh` (Linux) or `setup.ps1` (Windows). It pulls the images below; no source code or build tools needed. |
 | `LoreClient-{{VERSION}}-x64.msi` | **Windows client**: CLI, Explorer integration, sign-in companion. Per-machine install. |
 | `LoreClient-{{VERSION}}-win-x64.zip` | Windows client without an installer (portable / scripted installs). |
-| `lore-cli-{{VERSION}}-x86_64-unknown-linux-gnu.tar.gz` | Linux CLI, x86-64. |
+| `lore-client-{{VERSION}}-1.el9.x86_64.rpm` | **Linux client** for Rocky Linux and RHEL 9: CLI, menus and status icons in GNOME Files, Nemo and Caja, operation windows. `sudo dnf install ./lore-client-{{VERSION}}-1.el9.x86_64.rpm` |
+| `lore-client_{{VERSION}}-1.ubuntu24.04_amd64.deb` | **Linux client** for Ubuntu 24.04. `sudo apt install ./lore-client_{{VERSION}}-1.ubuntu24.04_amd64.deb` |
+| `lore-client_{{VERSION}}-1.debian13_amd64.deb` | **Linux client** for Debian 13. |
+| `lore-client-dolphin…` (one per system above) | The same menus and status icons in KDE Dolphin; install it with `lore-client`. |
+| `lore-cli-{{VERSION}}-x86_64-unknown-linux-gnu.tar.gz` | Linux CLI only, x86-64, for other distributions. |
 | `lore-cli-{{VERSION}}-aarch64-unknown-linux-gnu.tar.gz` | Linux CLI, ARM64. |
 | `SHA256SUMS` | Checksums of all files above: `sha256sum -c SHA256SUMS --ignore-missing`. |
 
