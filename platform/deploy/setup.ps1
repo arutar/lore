@@ -12,10 +12,11 @@ param(
     # Where the WebUI's home page gets the client from; see "Client downloads" below.
     [ValidateSet("", "online", "offline", "off")]
     [string]$ClientDownloads = $env:LORE_CLIENT_DOWNLOADS,
-    # The MCP endpoint for AI agents (docs/mcp.md): off, internal (only -McpNetworks) or on.
+    # The MCP endpoint for AI agents (docs/mcp.md): off or on. internal, which the Linux setup
+    # offers, needs each client's address, and Docker Desktop hides it.
     [ValidateSet("", "off", "internal", "on")]
     [string]$Mcp = $env:LORE_MCP,
-    # Networks MCP answers in internal mode, such as "10.0.0.0/16;192.168.0.0/24".
+    # The networks of internal mode, which only setup.sh on Linux offers; kept in .env as they are.
     [string]$McpNetworks = $env:LORE_MCP_NETWORKS
 )
 
@@ -146,24 +147,25 @@ New-Item -ItemType Directory -Force -Path "$generated/caddy", "$dataRoot/postgre
 
 # MCP for AI agents, always with a personal token (docs/mcp.md).
 #   off (default): no MCP endpoint.
-#   internal: only clients in LORE_MCP_NETWORKS, which you must give, such as
-#     "10.0.0.0/16;192.168.0.0/24" (networks in CIDR form, separated by ";").
-#   on: from anywhere the WebUI is reachable.
+#   on: from anywhere the WebUI is reachable. Every request still needs a personal token, and the
+#     MCP switch in Users and groups decides who may create one.
+# internal (only the networks in LORE_MCP_NETWORKS) needs each client's own address. Docker
+# Desktop gives the server its own address for every client, so on Windows internal would refuse
+# everyone; it is offered only by setup.sh on Linux.
 if (-not $Mcp) { $Mcp = if ($settings.LORE_MCP) { $settings.LORE_MCP } else { "off" } }
-if ($Mcp -notin @("off", "internal", "on")) { throw "LORE_MCP must be off, internal or on" }
+if ($Mcp -eq "internal") {
+    throw "-Mcp internal isn't available on Windows: Docker Desktop shows the server every client with its own address, so no network could be told apart. Use -Mcp on (each request still needs a personal token; the MCP switch in Users and groups decides who may use it), or run the server on Linux for internal."
+}
+if ($Mcp -notin @("off", "on")) { throw "LORE_MCP must be off or on" }
 if (-not $PSBoundParameters.ContainsKey("McpNetworks") -and -not $McpNetworks) { $McpNetworks = $settings.LORE_MCP_NETWORKS }
 $mcpNetworkList = @("$McpNetworks" -split "[;, ]+" | Where-Object { $_ })
 foreach ($network in $mcpNetworkList) {
     if ($network -notmatch '^[0-9A-Fa-f:./]+$') { throw "LORE_MCP_NETWORKS: `"$network`" isn't a network such as 10.0.0.0/16" }
 }
-if ($Mcp -eq "internal" -and $mcpNetworkList.Count -eq 0) {
-    throw "-Mcp internal needs the networks it answers, for example: -McpNetworks `"10.0.0.0/16;192.168.0.0/24`""
-}
 Set-EnvSetting "LORE_MCP" $Mcp
 Set-EnvSetting "LORE_MCP_NETWORKS" ($mcpNetworkList -join ";")
 $mcpSummary = switch ($Mcp) {
     "off" { "off" }
-    "internal" { "internal ($($mcpNetworkList -join ';')): $PublicUrl/mcp" }
     "on" { "on: $PublicUrl/mcp" }
 }
 
@@ -285,7 +287,7 @@ $realm | ConvertTo-Json -Depth 100 | Write-Utf8NoBom "$generated/lore-realm.json
 Remove-Item "$generated/caddy/auth.conf" -ErrorAction SilentlyContinue
 if ($AuthUrl -ne "$PublicUrl/auth") {
     $authAddress = ([Uri]$AuthUrl).Authority
-    Write-Utf8NoBom "$generated/caddy/auth.conf" "$authAddress {`n`timport keycloak_guard`n`thandle {`n`t`treverse_proxy keycloak:8080`n`t}`n}`n"
+    Write-Utf8NoBom "$generated/caddy/auth.conf" "$authAddress {`n`timport keycloak_guard`n`thandle {`n`t`treverse_proxy {`$LORE_KEYCLOAK_UPSTREAM:keycloak:8080}`n`t}`n}`n"
 }
 
 $env:LORE_WEB_PUBLIC_URL = $PublicUrl

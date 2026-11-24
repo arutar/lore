@@ -101,6 +101,7 @@
 - Хранилище `remote` не умеет записывать пару (ветка и результат push), поэтому там push остаётся одним запросом с пределом `request_handler_timeout_seconds`; сервер пишет об этом предупреждение при старте.
 - Прогресс проверки push Companion читает из события `Progress`, данные которого пакет LoreVcs знает только как заглушку, по раскладке `lore.h`; при смене пакета это место надо проверить (`ServerProgressEvent` в `LoreOperations.cs`).
 - LoreVcs 0.13.0 читал `BranchPushFragmentProgress` по раскладке до слияния upstream 0.3.1 (без репозитория и ветки), и прогресс отправки в Companion с 0.3.1 был мусорным; в ветке `linux_shell_extension` пакет обновлён до 0.14.0.
+- Адрес клиента (для MCP `internal` и аудита): на Linux setup запускает Caddy в сети хоста (`LORE_PROXY_NETWORK=host`, `compose.caddy-host.yaml`), иначе Docker подставлял адрес своего шлюза `172.x.0.1` для подключений по IPv6 и с самого сервера (проверено на rockybalboa: было `172.18.0.1`, стало `127.0.0.1` / `::1`). На Windows Docker Desktop адрес не сохраняет: `setup.ps1` предлагает MCP только `off`/`on`, `internal` отклоняет с объяснением. Вариант для Windows через nginx и PROXY protocol не проверялся.
 - Нативный протокол использует порт 41337 (TCP и UDP); из внешних сетей он может быть закрыт.
 - Установка на Linux-хосте проверяется сквозным тестом в GitHub Actions (Ubuntu); стенд — Windows с Docker Desktop.
 - Образы сервера собираются только для linux/amd64.

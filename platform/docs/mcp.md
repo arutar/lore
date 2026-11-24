@@ -31,7 +31,7 @@ two modes:
 | Mode | Who can reach `<WebUI address>/mcp` |
 |---|---|
 | `off` (default) | Nobody. There is no MCP endpoint, and the WebUI shows no MCP page |
-| `internal` | Only clients whose address is in the networks you list; anyone else gets 404 |
+| `internal` | Only clients whose address is in the networks you list; anyone else gets 404. **Linux servers only** |
 | `on` | Anyone who can reach the WebUI, always with a token |
 
 ```sh
@@ -44,10 +44,16 @@ sh setup.sh --mcp off
 ```
 
 ```powershell
-# Windows
-.\setup.ps1 -Mcp internal -McpNetworks "10.0.0.0/16;192.168.0.0/24"
+# Windows: on or off only
 .\setup.ps1 -Mcp on
+.\setup.ps1 -Mcp off
 ```
+
+**On a Windows server only `on` is available.** Docker Desktop shows the server every client with
+its own address, so `internal` couldn't tell one network from another and would refuse everyone;
+`setup.ps1 -Mcp internal` stops with this explanation. With `on`, every request still needs a
+personal token, and the **MCP** switch in **Users and groups** decides who may create one: turn it
+off for a group or a person to keep MCP from them.
 
 Networks are written in CIDR form (`10.0.0.0/16`, `192.168.0.0/24`, `fd00::/8`) and separated by
 `;`. A single address (`10.1.2.3`) means that one host. `internal` without networks stops setup with
@@ -62,8 +68,11 @@ MCP: internal (10.0.0.0/16;192.168.0.0/24): http://lore.corp.local:8080/mcp
 
 The networks are checked against the client address the Caddy proxy in front of the control plane
 sees. When another reverse proxy or load balancer sits in front of Caddy, Caddy sees that proxy's
-address, not the person's: list the proxy's address, or use `on`. **Docker Desktop (checked on
-Windows) replaces every client address with its own**, so `internal` works only on a Linux host; see
+address, not the person's: list the proxy's address, or use `on`. On Linux setup runs Caddy in the
+host's network (`LORE_PROXY_NETWORK=host`, the default there), so it sees each client's own address;
+with `bridge`, Docker gives Caddy its gateway's address (`172.x.0.1`) for connections over IPv6 or
+from the host itself. **Docker Desktop (checked on Windows) replaces every client address with its
+own**, so `internal` works only on a Linux host; see
 [Troubleshooting](#8-troubleshooting). A refused request is logged with the address the server saw:
 `docker compose logs control-plane`.
 
@@ -328,7 +337,8 @@ There is no size limit on a download.
 | "…is a binary file" | `read_text` on a binary file | Use `download_link` |
 | "Repository not found, or this token can't read it" | Wrong name, no access, or the token is limited to other repositories | Check the name with `list_repositories` |
 | 404 "The download link has expired or isn't valid" | The link is older than `LORE_MCP_LINK_TTL`, or the token, the access or the switch changed | Ask for a new link |
-| `internal` answers 404 to everyone on a Windows host | Docker Desktop shows the proxy every connection as coming from its own address (such as `172.21.0.1`); the control plane log says `MCP request from 172.21.0.1 refused` | Run the server on Linux for `internal`, or use `on` with per-group switches. Don't add Docker's address to the networks: that lets everyone in |
+| `internal` answers 404 to some or all clients on Linux; the log says `MCP request from 172.x.0.1 refused` | Caddy runs behind Docker's published ports (`LORE_PROXY_NETWORK=bridge`) | Run `setup.sh --proxy-network host` |
+| `internal` answers 404 to everyone on a Windows host set up before 0.4.1 | Docker Desktop shows the proxy every connection as coming from its own address (such as `172.21.0.1`); the control plane log says `MCP request from 172.21.0.1 refused` | Run `setup.ps1 -Mcp on`, with the MCP switches in Users and groups, or run the server on Linux for `internal`. Don't add Docker's address to the networks: that lets everyone in |
 
 Logs: `docker compose logs control-plane` in the scripts' folder. The audit log in the WebUI shows
 token and switch changes and downloads.

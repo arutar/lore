@@ -6,6 +6,8 @@ cd "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 # (LORE_CLIENT_DOWNLOADS, saved in .env). See "Client downloads" below.
 # --mcp off|internal|on and --mcp-networks "10.0.0.0/16;192.168.0.0/24": the MCP endpoint for AI
 # agents (LORE_MCP, LORE_MCP_NETWORKS, saved in .env). See "MCP" below and docs/mcp.md.
+# --proxy-network host|bridge: where Caddy runs (LORE_PROXY_NETWORK, saved in .env). See "Client
+# addresses" below.
 while [ $# -gt 0 ]; do
     case "$1" in
         --client-downloads=*) LORE_CLIENT_DOWNLOADS=${1#*=}; export LORE_CLIENT_DOWNLOADS ;;
@@ -17,6 +19,9 @@ while [ $# -gt 0 ]; do
         --mcp-networks=*) LORE_MCP_NETWORKS=${1#*=}; export LORE_MCP_NETWORKS ;;
         --mcp-networks) [ $# -ge 2 ] || { echo "--mcp-networks needs networks such as \"10.0.0.0/16;192.168.0.0/24\"" >&2; exit 1; }
             LORE_MCP_NETWORKS=$2; export LORE_MCP_NETWORKS; shift ;;
+        --proxy-network=*) LORE_PROXY_NETWORK=${1#*=}; export LORE_PROXY_NETWORK ;;
+        --proxy-network) [ $# -ge 2 ] || { echo "--proxy-network needs host or bridge" >&2; exit 1; }
+            LORE_PROXY_NETWORK=$2; export LORE_PROXY_NETWORK; shift ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
     shift
@@ -144,7 +149,7 @@ for name in LORE_LDAP_URL LORE_LDAP_BASE_DN LORE_LDAP_BIND_DN LORE_LDAP_BIND_PAS
     LORE_LDAP_REFRESH LORE_LDAP_OUTAGE_GRACE \
     LORE_SMTP_HOST LORE_SMTP_PORT LORE_SMTP_FROM LORE_SMTP_FROM_NAME LORE_SMTP_USERNAME LORE_SMTP_PASSWORD \
     LORE_SMTP_STARTTLS LORE_SMTP_SSL LORE_DATA_ROOT LORE_PROXY_BIND LORE_CONTROL_PLANE_IMAGE LORE_SERVER_IMAGE \
-    LORE_MCP_CONCURRENCY LORE_MCP_MAX_READ LORE_MCP_LINK_TTL; do
+    LORE_MCP_CONCURRENCY LORE_MCP_MAX_READ LORE_MCP_LINK_TTL LORE_CONTROL_PLANE_LOCAL_PORT LORE_KEYCLOAK_LOCAL_PORT; do
     eval "value=\${$name:-}"
     if [ -n "$value" ]; then set_env "$name" "$value"; fi
 done
@@ -168,6 +173,30 @@ if [ "$MCP_MODE" = internal ] && [ -z "$MCP_NETWORKS" ]; then
 fi
 set_env LORE_MCP "$MCP_MODE"
 set_env LORE_MCP_NETWORKS "$MCP_NETWORKS"
+# Client addresses: the control plane needs each client's own address for LORE_MCP=internal and
+# the audit log, and Caddy hands it on (docs/docker.md).
+#   host: Caddy runs in the host's network and sees it (compose.caddy-host.yaml). The default on
+#     Linux with a rootful Docker Engine.
+#   bridge: Caddy runs behind published ports, where Docker replaces the address with its
+#     gateway's for every connection its userland proxy forwards (IPv6, the host itself). Docker
+#     Desktop and rootless Docker can't do better, and LORE_PROXY_BIND other than 0.0.0.0, a Caddy
+#     behind another proxy, needs it.
+PROXY_NETWORK=${LORE_PROXY_NETWORK:-}
+if [ -z "$PROXY_NETWORK" ]; then
+    if [ "$(uname -s)" = Linux ] && [ "${LORE_PROXY_BIND:-0.0.0.0}" = 0.0.0.0 ] \
+        && ! docker info --format '{{.OperatingSystem}} {{.SecurityOptions}}' 2>/dev/null | grep -qiE 'docker desktop|rootless'; then
+        PROXY_NETWORK=host
+    else
+        PROXY_NETWORK=bridge
+    fi
+fi
+case "$PROXY_NETWORK" in host|bridge) ;; *) echo "LORE_PROXY_NETWORK must be host or bridge" >&2; exit 1 ;; esac
+if [ "$PROXY_NETWORK" = host ] && [ "${LORE_PROXY_BIND:-0.0.0.0}" != 0.0.0.0 ]; then
+    echo "LORE_PROXY_NETWORK=host listens on every address; LORE_PROXY_BIND=$LORE_PROXY_BIND needs --proxy-network bridge" >&2
+    exit 1
+fi
+set_env LORE_PROXY_NETWORK "$PROXY_NETWORK"
+
 case "$MCP_MODE" in
     off) MCP_SUMMARY=off ;;
     internal) MCP_SUMMARY="internal ($MCP_NETWORKS): $WEB_URL/mcp" ;;
@@ -294,7 +323,8 @@ fi
 rm -f "$GENERATED/caddy/auth.conf"
 if [ "$KEYCLOAK_URL" != "$WEB_URL/auth" ]; then
     AUTH_ADDRESS=$(printf '%s' "$KEYCLOAK_URL" | sed -E 's|^https?://||; s|/.*$||')
-    printf '%s {\n\timport keycloak_guard\n\thandle {\n\t\treverse_proxy keycloak:8080\n\t}\n}\n' "$AUTH_ADDRESS" > "$GENERATED/caddy/auth.conf"
+    # shellcheck disable=SC2016 # a Caddy placeholder, which Caddy expands
+    printf '%s {\n\timport keycloak_guard\n\thandle {\n\t\treverse_proxy {$LORE_KEYCLOAK_UPSTREAM:keycloak:8080}\n\t}\n}\n' "$AUTH_ADDRESS" > "$GENERATED/caddy/auth.conf"
 fi
 
 export POSTGRES_PASSWORD KEYCLOAK_ADMIN_PASSWORD LORE_SERVICE_CLIENT_SECRET
@@ -336,6 +366,7 @@ if [ "${LORE_DIRECT_CADDY:-false}" = "true" ]; then
             ;;
     esac
 fi
+if [ "$PROXY_NETWORK" = host ]; then set -- "$@" -f compose.caddy-host.yaml; fi
 docker compose "$@" up -d "$BUILD" --wait --wait-timeout 240
 
 # The realm file is imported only on the first start; bring an existing realm in line with
@@ -349,5 +380,5 @@ docker compose "$@" exec -T \
     -e LORE_LDAP_STARTTLS="${LORE_LDAP_STARTTLS:-}" -e LORE_LDAP_INSECURE_SKIP_VERIFY="${LORE_LDAP_INSECURE_SKIP_VERIFY:-}" \
     keycloak bash /opt/lore/configure-realm.sh
 
-printf '\nLore is ready.\nWebUI: %s\nKeycloak: %s\nAdministrator: admin\nInitial administrator password: %s\nData: %s\nClient downloads: %s\nMCP: %s\n' \
-    "$WEB_URL" "$KEYCLOAK_URL" "$LORE_ADMIN_PASSWORD" "$(cd "$DATA_ROOT" && pwd)" "$CLIENT_MODE" "$MCP_SUMMARY"
+printf '\nLore is ready.\nWebUI: %s\nKeycloak: %s\nAdministrator: admin\nInitial administrator password: %s\nData: %s\nClient downloads: %s\nMCP: %s\nProxy network: %s\n' \
+    "$WEB_URL" "$KEYCLOAK_URL" "$LORE_ADMIN_PASSWORD" "$(cd "$DATA_ROOT" && pwd)" "$CLIENT_MODE" "$MCP_SUMMARY" "$PROXY_NETWORK"

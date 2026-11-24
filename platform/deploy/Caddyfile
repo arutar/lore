@@ -1,3 +1,6 @@
+# Caddy reaches the control plane and Keycloak by their container names, or, when it runs in the
+# host's network (compose.caddy-host.yaml), at the loopback ports they are published on there.
+
 # The Keycloak administration console and the master realm are never published: Lore
 # accounts are managed in the WebUI. Every site that proxies Keycloak imports this.
 (keycloak_guard) {
@@ -12,12 +15,12 @@
 {$LORE_PUBLIC_ADDRESS:http://host.docker.internal:8080} {
 	import keycloak_guard
 	handle /auth* {
-		reverse_proxy keycloak:8080
+		reverse_proxy {$LORE_KEYCLOAK_UPSTREAM:keycloak:8080}
 	}
 	handle {
 		# The client's address as Caddy sees it, never one the client claims: the control plane
 		# uses it for LORE_MCP=internal.
-		reverse_proxy control-plane:8080 {
+		reverse_proxy {$LORE_CONTROL_PLANE_UPSTREAM:control-plane:8080} {
 			header_up X-Real-IP {client_ip}
 			header_up -True-Client-IP
 		}

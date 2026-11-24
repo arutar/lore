@@ -1,0 +1,33 @@
+# Caddy in the host's network, so it sees each client's own address. With its ports published,
+# Docker hands Caddy the address of its bridge's gateway (172.x.0.1) for every connection that its
+# userland proxy forwards: over IPv6, from the host itself, or with the userland proxy configured.
+# The control plane needs the client's address for LORE_MCP=internal and the audit log.
+#
+# setup.sh adds this file on Linux with a rootful Docker Engine (LORE_PROXY_NETWORK=host). Caddy
+# then listens on the host's ports itself and reaches the control plane and Keycloak at loopback
+# ports they're published on, which nothing outside the host can reach. The containers that call
+# the public address reach it on the host instead of through Caddy's network alias.
+services:
+  caddy:
+    network_mode: host
+    ports: !reset []
+    networks: !reset {}
+    environment:
+      LORE_CONTROL_PLANE_UPSTREAM: 127.0.0.1:${LORE_CONTROL_PLANE_LOCAL_PORT:-18081}
+      LORE_KEYCLOAK_UPSTREAM: 127.0.0.1:${LORE_KEYCLOAK_LOCAL_PORT:-18082}
+
+  control-plane:
+    ports:
+      - "127.0.0.1:${LORE_CONTROL_PLANE_LOCAL_PORT:-18081}:8080"
+    extra_hosts:
+      - "${LORE_PUBLIC_HOST:-host.docker.internal}:host-gateway"
+
+  keycloak:
+    ports:
+      - "127.0.0.1:${LORE_KEYCLOAK_LOCAL_PORT:-18082}:8080"
+    extra_hosts:
+      - "${LORE_PUBLIC_HOST:-host.docker.internal}:host-gateway"
+
+  lore:
+    extra_hosts:
+      - "${LORE_PUBLIC_HOST:-host.docker.internal}:host-gateway"

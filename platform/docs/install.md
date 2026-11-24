@@ -296,7 +296,7 @@ complete list, with the parameters of every script, is in [docker.md](docker.md#
 | `LORE_PROXY_BIND` | `0.0.0.0` | Interface for port 8080; `127.0.0.1` behind a local reverse proxy |
 | `LORE_DATA_ROOT` | `./data` | Where all data is stored |
 | `LORE_CLIENT_DOWNLOADS` | `online` | Client downloads on the home page: `online` (links to GitHub), `offline` (files kept on the server) or `off` |
-| `LORE_MCP` | `off` | MCP for AI agents: `off`, `internal` (only `LORE_MCP_NETWORKS`) or `on`; see [mcp.md](mcp.md) |
+| `LORE_MCP` | `off` | MCP for AI agents: `off`, `internal` (only `LORE_MCP_NETWORKS`, Linux servers only) or `on`; see [mcp.md](mcp.md) |
 | `LORE_MCP_NETWORKS` | — | Networks for `internal`, e.g. `10.0.0.0/16;192.168.0.0/24` |
 | `LORE_MCP_CONCURRENCY` | `8` | MCP calls one token may run at once; `0`: no limit |
 | `LORE_MCP_MAX_READ` | `1048576` | Most bytes of text one `read_text` call returns |

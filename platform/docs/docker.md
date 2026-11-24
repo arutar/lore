@@ -135,6 +135,8 @@ works too.
 | `LORE_PUBLIC_ADDRESS` | the WebUI address (`http`), the host name (`https`) | The site address Caddy serves; other names on port 8080 are redirected to it |
 | `LORE_DIRECT_CADDY` | `false` | `true`: Caddy binds 80/443 and manages certificates |
 | `LORE_PROXY_BIND` | `0.0.0.0` | Interface of port 8080; `127.0.0.1` behind your own reverse proxy on the same host |
+| `LORE_PROXY_NETWORK` | `host` on Linux with a rootful Docker Engine, else `bridge` | `host`: Caddy runs in the host's network and sees each client's own address (`compose.caddy-host.yaml`). `bridge`: behind published ports, where Docker can replace the address with its gateway's (`172.x.0.1`). `setup.sh --proxy-network host\|bridge` |
+| `LORE_CONTROL_PLANE_LOCAL_PORT`, `LORE_KEYCLOAK_LOCAL_PORT` | `18081`, `18082` | With `LORE_PROXY_NETWORK=host`: the loopback ports Caddy reaches the control plane and Keycloak at. Change them when something else uses those ports |
 | `LORE_NATIVE_PUBLIC_URL` | `lore://HOST:41337` | Address the WebUI shows for clients (Clone) |
 
 **Data**
@@ -322,7 +324,7 @@ what its owner may read, never more.
 | Mode | Who can reach `/mcp` |
 |---|---|
 | `off` (default) | Nobody: there is no MCP endpoint and the WebUI shows no MCP page |
-| `internal` | Clients whose address is in `LORE_MCP_NETWORKS`; the rest get 404 |
+| `internal` | Clients whose address is in `LORE_MCP_NETWORKS`; the rest get 404. Linux servers only |
 | `on` | Anyone who can reach the WebUI, always with a token |
 
 ```sh
@@ -332,14 +334,17 @@ sh setup.sh --mcp off
 ```
 
 ```powershell
-.\setup.ps1 -Mcp internal -McpNetworks "10.0.0.0/16;192.168.0.0/24"
+.\setup.ps1 -Mcp on    # Windows: on or off; internal is refused, see below
 ```
 
 The mode and networks are saved in `.env`; run setup again to change them. `internal` without
 networks stops setup with an error. The address check uses the client address Caddy sees; behind
 another reverse proxy in front of Caddy, that proxy's address is what counts, so list it or use
-`on`. Docker Desktop (checked on Windows) shows every client with its own address, so `internal` needs
-a Linux host; the control plane logs each refused address. `LORE_MCP_CONCURRENCY`, `LORE_MCP_MAX_READ` and `LORE_MCP_LINK_TTL` (see
+`on`. On Linux, setup runs Caddy in the host's network (`LORE_PROXY_NETWORK=host`) so it sees each
+client's own address; with Caddy behind published ports (`bridge`), Docker hands it its gateway's
+address (`172.x.0.1`) for connections over IPv6 or from the host itself. Docker Desktop (checked on
+Windows) shows every client with its own address, so on Windows only `on` is available: `setup.ps1
+-Mcp internal` stops with that explanation. The control plane logs each refused address. `LORE_MCP_CONCURRENCY`, `LORE_MCP_MAX_READ` and `LORE_MCP_LINK_TTL` (see
 [Settings](#settings-environment-variables-and-env)) are passed to setup the same way, or edited in
 `.env` followed by `docker compose up -d control-plane`.
 
