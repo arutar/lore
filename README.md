@@ -17,6 +17,7 @@ Web interface · Active Directory sign-in · Windows Explorer integration · enf
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 <a href="https://arutar.github.io/lore/"><img src="https://img.shields.io/badge/Live%20preview-open%20the%20web%20interface-1f6feb?style=for-the-badge&labelColor=0d419d" alt="Live preview: open the web interface" height="36"></a>
+<a href="platform/docs/mcp.md"><img src="https://img.shields.io/badge/MCP-connect%20AI%20agents-8250df?style=for-the-badge&labelColor=5a32a3" alt="MCP: connect AI agents" height="36"></a>
 
 [Live preview](https://arutar.github.io/lore/) · [Install](platform/docs/install.md) · [Docker reference](platform/docs/docker.md) · [MCP for AI agents](platform/docs/mcp.md) · [Download](../../releases/latest) · [How it works](#how-it-works) · [Differences from Lore](#how-this-differs-from-upstream-lore) · [Status](#status)
 
@@ -77,20 +78,33 @@ the fork can shrink as Lore matures.
 
 ## Screenshots
 
-| | |
-|---|---|
-| <img src="platform/docs/images/repository-history.png" alt="Revision history" width="440"><br>**History** — every revision with its author; click one to see the files it changed | <img src="platform/docs/images/repository-locks.png" alt="File locks" width="440"><br>**Locks** — who is editing which binary file; owners can release a lock someone left behind |
-| <img src="platform/docs/images/repository-lock-release.png" alt="Releasing a lock" width="440"><br>**Release a lock** — confirmed, and recorded in the audit log | <img src="platform/docs/images/audit.png" alt="Audit log" width="440"><br>**Audit log** — who changed what |
-| <img src="platform/docs/images/repository-grant.png" alt="Granting access" width="440"><br>**Access** — grant to users and AD groups as you type | <img src="platform/docs/images/users.png" alt="Users" width="440"><br>**Users** — Active Directory and local accounts |
-| <img src="platform/docs/images/settings.png" alt="Settings" width="440"><br>**Settings** — theme, language, registration | <img src="platform/docs/images/theme-sky.png" alt="Sky theme" width="440"><br>**Themes** — nine built-in themes |
-| <img src="platform/docs/images/palette.png" alt="Command palette" width="440"><br>**Ctrl K** — jump to any repository or page | |
+<div align="center">
+
+<img src="platform/docs/images/web-tour.webp" alt="A tour of the web interface: history, locks, releasing a lock, access, users, audit log, settings, a theme and the command palette" width="900">
+
+<sub>History · Locks · Release a lock · Access · Users · Audit log · Settings · Themes · Ctrl K</sub>
+
+</div>
+
+- **History** — every revision with its author; click one to see the files it changed.
+- **Locks** — who is editing which binary file; owners can release a lock someone left behind, confirmed and recorded in the audit log.
+- **Access** — grant to users and AD groups as you type; **Users** — Active Directory and local accounts; **Audit log** — who changed what.
+- **Settings** — theme, language, registration; nine built-in themes; **Ctrl K** jumps to any repository or page.
 
 ### Windows client
 
-| | |
-|---|---|
-| <img src="platform/docs/images/companion-commit.png" alt="Commit window" width="300"><br>**Lore Commit...** from the Explorer menu | <img src="platform/docs/images/companion-accounts.png" alt="Accounts window" width="300"><br>**Accounts** — one sign-in per server, window theme |
-| <img src="platform/docs/images/companion-sync-question.png" alt="Sync asks what to do" width="300"><br>**Sync asks first** — the same files changed here and on the server: keep yours or take the server's | <img src="platform/docs/images/companion-discard.png" alt="Confirm discarding changes" width="300"><br>**Nothing is lost silently** — discarding your changes is confirmed, file by file |
+<div align="center">
+
+<img src="platform/docs/images/companion-tour.webp" alt="Windows client windows: Commit, Sync asking what to do, confirming a discard, Accounts and Clone" width="420">
+
+<sub>Commit · Sync asks first · Confirm discard · Accounts · Clone</sub>
+
+</div>
+
+- **Lore Commit...** from the Explorer menu.
+- **Sync asks first** — the same files changed here and on the server: keep yours or take the server's.
+- **Nothing is lost silently** — discarding your changes is confirmed, file by file.
+- **Accounts** — one sign-in per server, window theme.
 
 The Explorer context menu and status icons follow the Windows light or dark mode. The Lore
 windows (Clone, Commit, Accounts...) use the same nine themes as the WebUI: pick one under

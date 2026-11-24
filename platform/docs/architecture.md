@@ -8,6 +8,7 @@ flowchart LR
     User["Пользователь<br/>React WebUI"]
     Admin["Администратор<br/>пользователи, репозитории, ACL"]
     Explorer["Windows Explorer<br/>C++ COM + C# Companion"]
+    Agent["AI-агент<br/>любой MCP-клиент"]
 
     subgraph Edge["Веб и интеграционный контур"]
         Caddy["Caddy<br/>единый HTTPS вход"]
@@ -25,12 +26,14 @@ flowchart LR
     Guest -->|"HTTPS"| Caddy
     User -->|"HTTPS + session cookie"| Caddy
     Admin -->|"HTTPS + CSRF"| Caddy
+    Agent -->|"/mcp, только чтение<br/>Bearer lore_mcp_…"| Caddy
     Caddy --> CP
     Caddy -->|"/auth"| KC
     CP <-->|"OIDC"| KC
     KC <-->|"LDAP / LDAPS"| AD
     CP <-->|"SQL"| PG
     CP -->|"gRPC RepositoryCreate<br/>service identity + creator"| Lore
+    CP -->|"MCP: файлы, история, блокировки<br/>чтение от имени владельца токена"| Lore
     Lore -->|"gRPC UserService<br/>RepositoryRegistryService + user JWT"| CP
     Lore <--> CAS
     Explorer -->|"LoreVcs SDK<br/>Clone · Sync · Commit"| Lore
@@ -41,7 +44,7 @@ flowchart LR
     classDef service fill:#172554,stroke:#60a5fa,color:#eff6ff,stroke-width:1px;
     classDef data fill:#3b0764,stroke:#c084fc,color:#faf5ff,stroke-width:1px;
     classDef windows fill:#14532d,stroke:#4ade80,color:#f0fdf4,stroke-width:1px;
-    class Guest,User,Admin person;
+    class Guest,User,Admin,Agent person;
     class CP,KC,AD,Caddy service;
     class PG,Lore,CAS data;
     class Explorer windows;
