@@ -13,12 +13,15 @@ target="$HOME/.local/lib/lore"
 data="${XDG_DATA_HOME:-$HOME/.local/share}"
 extensions=("$data/nautilus-python/extensions" "$data/nemo-python/extensions" "$data/caja-python/extensions")
 emblems="$data/icons/hicolor/scalable/emblems"
+icons="$data/icons/hicolor/scalable/apps"
+# Dolphin looks for plugins only on Qt's plugin path, which Plasma takes from these scripts at login.
+plasma_env="${XDG_CONFIG_HOME:-$HOME/.config}/plasma-workspace/env/lore-plugins.sh"
 
 if [ "${1:-}" = "--uninstall" ]; then
   rm -rf "$target"
   rm -f "$HOME/.local/bin/lore"
   for folder in "${extensions[@]}"; do rm -f "$folder/lore_extension.py"; done
-  rm -f "$emblems"/emblem-lore-*.svg
+  rm -f "$emblems"/emblem-lore-*.svg "$icons"/lore-*.svg "$plasma_env"
   echo "Removed the Lore Linux client. Restart the file manager (nautilus -q) to drop its menu."
   exit 0
 fi
@@ -43,8 +46,17 @@ for pair in "nautilus:${extensions[0]}" "nemo:${extensions[1]}" "caja:${extensio
     installed=$((installed + 1))
   fi
 done
-mkdir -p "$emblems"
+mkdir -p "$emblems" "$icons"
 install -m 0644 "$target"/emblems/emblem-lore-*.svg "$emblems/"
+install -m 0644 "$target"/icons/lore-*.svg "$icons/"
+
+if [ -d "$target/plugins" ]; then
+  mkdir -p "$(dirname "$plasma_env")"
+  # shellcheck disable=SC2016 # the variable is expanded at login, not here
+  printf 'export QT_PLUGIN_PATH="%s${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"\n' "$target/plugins" > "$plasma_env"
+  installed=$((installed + 1))
+  echo "Dolphin: log out and in again (or start dolphin with QT_PLUGIN_PATH=$target/plugins) to load the Lore plugins."
+fi
 [ "$installed" -gt 0 ] || echo "No file manager Python bindings found: install nautilus-python (python3-nautilus on Debian and Ubuntu)." >&2
 
 echo "Installed the Lore Linux client in $target. Restart the file manager (nautilus -q) to load its menu."

@@ -67,7 +67,7 @@ A menu command writes a request file and starts the companion, then returns.
 
 ### KDE Dolphin
 
-A C++ plugin built against KDE Frameworks provides the same menu through `KAbstractFileItemActionPlugin` and the same status icons through [`KOverlayIconPlugin`](https://api.kde.org/frameworks/kio/html/classKOverlayIconPlugin.html), reading the same status cache.
+A C++ plugin built against KDE Frameworks provides the same menu through `KAbstractFileItemActionPlugin` and the same status icons through [`KOverlayIconPlugin`](https://api.kde.org/frameworks/kio/html/classKOverlayIconPlugin.html), reading the same status cache. The same source builds against KDE Frameworks 5, as Rocky Linux 9 has it, and 6. Dolphin finds plugins only on Qt's plugin path: the packages install them there, and a per-user installation adds its folder to the path through the Plasma session's environment.
 
 ### Packaging and release
 
@@ -158,5 +158,5 @@ The Nextcloud desktop client's [shell integration](https://github.com/nextcloud/
 
 ## Unresolved Questions
 
-- Which distributions and versions form the supported baseline, and do they need KDE Frameworks 5 as well as 6?
+- Which distributions and versions form the supported baseline.
 - Whether the companion should become a per-session service later, to refresh status after edits made outside Lore, as the Windows design plans.

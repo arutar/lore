@@ -50,8 +50,9 @@ internal static class Program
         if (Path.GetDirectoryName(full) != folder) throw new InvalidDataException("The request is not in the Lore runtime folder.");
         var info = new FileInfo(full);
         if (!info.Exists || info.LinkTarget is not null) throw new InvalidDataException("The request file is missing.");
-        const UnixFileMode others = UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute
-            | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+        // Every permission bit but the owner's: what the group and other users may do.
+        const UnixFileMode owner = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+        const UnixFileMode others = (UnixFileMode)0x1FF & ~owner;
         if ((File.GetUnixFileMode(folder) & others) != 0 || (info.UnixFileMode & others) != 0)
             throw new InvalidDataException("The request file can be read by other users.");
         if (info.Length <= 0 || info.Length > MaximumRequestBytes) throw new InvalidDataException("Invalid request size");

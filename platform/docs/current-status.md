@@ -1,6 +1,6 @@
 # Текущее состояние Lore Platform
 
-Обновлено 2026-11-24 (ветка `linux_shell_extension`, шаги 1–2 клиента Linux); релиз `platform-v0.3.2`: прогресс проверки push перенесён в общее событие `Progress` (upstream его не отправляет); `BranchPushFragmentProgress` снова как у upstream.
+Обновлено 2026-11-24 (ветка `linux_shell_extension`, шаги 1–3 клиента Linux); релиз `platform-v0.3.2`: прогресс проверки push перенесён в общее событие `Progress` (upstream его не отправляет); `BranchPushFragmentProgress` снова как у upstream.
 
 История по версиям — `platform/docs/releases/`. Коротко:
 - 0.2.4–0.2.5 — окно Commit для сотен тысяч файлов (дерево папок, страницы, поиск), прогресс коммита и отправки, удаление репозитория администратором;
@@ -111,7 +111,8 @@
    - Сделан шаг 1 (2026-11-24): общая библиотека `platform/companion/LoreCompanion.Core` (операции и `OperationSession` — разговор с окном), Windows-хост стал тонким; Linux-хост `platform/linux/LoreCompanion.Linux` (GTK 3 + WebKitGTK 4.1/4.0 через P/Invoke, схема `lore://client/`); меню `platform/linux/file-manager/lore_menu.py` (теперь `lore_extension.py`); `Build-Linux.sh`, `Install-Dev.sh`. Проверено на Rocky 9 под Xvfb с локальным `loreserver`: меню вне и внутри рабочей копии, Commit с выбором файлов, Status, History.
    - Исправлено по ходу: `CommitList` не строил дерево папок для путей с `/` (перегрузка `Split`), история показывала имя типа вместо хэша (LoreVcs 0.14.0), JavaScriptCore на Rocky 9 падал на `Intl` — хост форматирует числа сам.
    - Сделан шаг 2 (2026-11-24): значки статуса как на Windows — companion после каждой операции пишет `$XDG_RUNTIME_DIR/lore/status-cache` (`FileStatusCache` в Core, раскладка общей памяти Windows, файл заменяется целиком переименованием), расширение `lore_extension.py` (бывший `lore_menu.py`) ставит эмблемы `emblem-lore-*` (оверлеи Windows, обрезанные по значку) и перерисовывает файлы по `Gio.FileMonitor`. Обновление только после операций, как на Windows; фоновое обновление — отдельным решением для обеих систем. Проверено в Nautilus 40: изменён, в индексе, замок, состояние папки, перерисовка без переоткрытия.
-   - Дальше: шаг 3 — Dolphin, затем пакеты; проверить на настоящем рабочем столе GNOME и на Ubuntu (Nautilus 46 — эмблемы), вход через Keycloak на стенде.
+   - Сделан шаг 3 (2026-11-24): плагины Dolphin `platform/linux/dolphin` (C++, KF5 или KF6: меню `KAbstractFileItemActionPlugin`, эмблемы `KOverlayIconPlugin` из того же кэша, перерисовка по `QFileSystemWatcher`), иконки меню Windows как `lore-*` в hicolor. Проверено в Dolphin 23.08 / KF5 5.116 на Rocky 9 (EPEL, пакеты из CRB подключались разово): меню внутри и вне рабочей копии, подменю с иконками, эмблемы, Unstage из меню и перерисовка. Сборка под KF6 6.13 / Qt 6.8 проверена в контейнере Debian 13, запуск под KF6 — нет.
+   - Дальше: шаг 4 — пакеты `.deb`/`.rpm` в релизе (плагины Dolphin туда, где их ищет Qt, без `QT_PLUGIN_PATH`); проверить на настоящих рабочих столах GNOME и KDE, на Ubuntu (Nautilus 46 — эмблемы), вход через Keycloak на стенде.
 2. Публичный DNS/ACME на внешнем сервере.
 3. Подписанный релиз.
 4. Образы для linux/arm64.

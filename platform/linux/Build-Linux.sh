@@ -33,5 +33,20 @@ for state in modified staged conflicted locked ignored clean staged-modified; do
   sed -e "s|width=\"512\" height=\"512\" viewBox=\"0 0 512 512\"|width=\"64\" height=\"64\" viewBox=\"$box\"|" \
     "$root/platform/windows/shared/svg/overlay-$state.svg" > "$out/emblems/emblem-lore-$state.svg"
 done
+# The menu icons, named lore-<name>.
+mkdir -p "$out/icons"
+for name in clone sync commit stage unstage revert resolve status history lock unlock accounts menu; do
+  install -m 0644 "$root/platform/windows/shared/svg/$name.svg" "$out/icons/lore-$name.svg"
+done
+# The Dolphin plugins, where KDE Frameworks are installed: 6 if they are there, else 5.
+if command -v cmake >/dev/null && { [ -d /usr/include/KF6/KIOWidgets ] || [ -d /usr/include/KF5/KIOWidgets ]; }; then
+  frameworks=5; [ -d /usr/include/KF6/KIOWidgets ] && frameworks=6
+  cmake -S "$here/dolphin" -B "$here/bin/dolphin-build" -DCMAKE_BUILD_TYPE=Release -DLORE_KF=$frameworks
+  cmake --build "$here/bin/dolphin-build" -j "$(nproc)"
+  mkdir -p "$out/plugins"
+  cp -r "$here/bin/dolphin-build/bin/kf$frameworks" "$out/plugins/"
+else
+  echo "KDE Frameworks development files not found: the Dolphin plugins are not built" >&2
+fi
 install -m 0755 "$here/Install-Dev.sh" "$out/install.sh"
 echo "Built the Linux client in $out"

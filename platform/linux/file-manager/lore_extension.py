@@ -42,6 +42,12 @@ SUBMENU = (
     (ACCOUNTS, "Accounts"),
 )
 
+# The Windows menu's icons, installed in the hicolor theme as lore-<name>.
+ICONS = {
+    CLONE: "clone", SYNC: "sync", COMMIT: "commit", STAGE: "stage", STATUS: "status", HISTORY: "history",
+    LOCK: "lock", UNLOCK: "unlock", ACCOUNTS: "accounts", UNSTAGE: "unstage", REVERT: "revert", RESOLVE: "resolve",
+}
+
 MAXIMUM_PATHS = 256
 
 # The status cache, as LoreCompanion.FileStatusCache writes it.
@@ -156,7 +162,8 @@ def menu_items(paths):
         return []
 
     def item(name, label, operation):
-        entry = FileManager.MenuItem(name=f"Lore::{name}", label=label, tip="", icon="")
+        icon = f"lore-{ICONS[operation]}"
+        entry = FileManager.MenuItem(name=f"Lore::{name}", label=label, tip="", icon=icon)
         entry.connect("activate", lambda *_: start(operation, paths))
         return entry
 
@@ -166,7 +173,7 @@ def menu_items(paths):
     submenu = FileManager.Menu()
     for operation, label in SUBMENU:
         submenu.append_item(item(label.split()[0], label, operation))
-    lore = FileManager.MenuItem(name="Lore::Submenu", label="Lore", tip="", icon="")
+    lore = FileManager.MenuItem(name="Lore::Submenu", label="Lore", tip="", icon="lore-menu")
     lore.set_submenu(submenu)
     return [item("Sync", "Lore Sync", SYNC), item("Commit", "Lore Commit...", COMMIT), lore]
 
