@@ -1,8 +1,10 @@
 {
     "KPlugin": {
-        "Id": "lore_fileitemaction",
         "Name": "Lore",
         "Description": "Lore version control commands",
-        "MimeTypes": ["application/octet-stream", "inode/directory"]
+        "MimeTypes": [
+            "application/octet-stream",
+            "inode/directory"
+        ]
     }
 }

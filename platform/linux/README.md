@@ -15,6 +15,21 @@ operation dialogs as the Windows client. The design is in
 
 `.deb` and `.rpm` packages come next.
 
+## Where it was checked
+
+Under Xvfb against a local `loreserver`: operation windows, menus inside and outside a working copy,
+emblems, and their redraw after an operation.
+
+| System | Nautilus | WebKitGTK | Dolphin |
+|---|---|---|---|
+| Rocky Linux 9 | 40 (extension API 3.0) | 4.0 | 23.08, KDE Frameworks 5 (EPEL) |
+| Ubuntu 24.04 | 46 (API 4.0) | 4.1 | 23.08, KDE Frameworks 5 |
+| Debian 13 | 48 (API 4.0) | 4.1 | 24.12, KDE Frameworks 6 |
+
+Nautilus 46 and 48 draw emblems smaller, in the icon's upper right corner, and 48 draws them
+translucent. Dolphin on KDE Frameworks 6 needs Qt's SVG image plugin (`qt6-svg-plugins` on Debian)
+for the emblems and menu icons, as for any SVG icon theme; a Plasma desktop has it.
+
 ## Requirements
 
 - To run: GTK 3 and WebKitGTK 4.1 or 4.0 (`webkit2gtk3` on Rocky Linux and RHEL 9, `libwebkit2gtk-4.1-0`
