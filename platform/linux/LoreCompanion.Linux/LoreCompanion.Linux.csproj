@@ -8,6 +8,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Nothing is formatted by culture, so the packages need no ICU. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
     <AssemblyName>LoreCompanion.Linux</AssemblyName>
     <RootNamespace>LoreCompanion</RootNamespace>
   </PropertyGroup>

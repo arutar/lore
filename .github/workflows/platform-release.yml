@@ -3,6 +3,8 @@
 # Publishes a Lore Platform release when a platform-vX.Y.Z tag is pushed:
 #   - Windows client: MSI and ZIP (windows-client.yml, built and smoke-tested there)
 #   - Linux CLI built from this fork (the HTTP and sign-in changes live in the client)
+#   - Linux client packages, .rpm for Rocky Linux and RHEL 9 and .deb for Ubuntu 24.04 and Debian 13
+#     (linux-client.yml)
 #   - server bundle: the deploy directory with compose.yaml pointing at this version's images
 #   - SHA256SUMS over everything
 # Nothing is published until the Rust tests (pr-validate.yml), lint (lint.yml) and the platform
@@ -68,6 +70,15 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/windows-client.yml
+
+  linux-client:
+    name: Linux client
+    needs: version
+    permissions:
+      contents: read
+    uses: ./.github/workflows/linux-client.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
 
   linux-cli:
     name: Linux CLI (${{ matrix.target }})
@@ -144,7 +155,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: [version, validate, lint, server-checks, end-to-end, windows, linux-cli, server-bundle, images]
+    needs: [version, validate, lint, server-checks, end-to-end, windows, linux-cli, linux-client, server-bundle, images]
     runs-on: ubuntu-latest
     environment: platform-release
     permissions:
@@ -165,22 +176,29 @@ jobs:
           cp "artifacts/windows-client-${GITHUB_SHA}/LoreClient-x64.msi" "release/LoreClient-$VERSION-x64.msi"
           cp "artifacts/windows-client-${GITHUB_SHA}/LoreClient-win-x64.zip" "release/LoreClient-$VERSION-win-x64.zip"
           cp artifacts/linux-cli-*/lore-cli-*.tar.gz release/
+          cp artifacts/linux-packages-*/* release/
           cp artifacts/server-bundle/* release/
           # clients.tsv lists the client builds for setup, which offers them on the WebUI's home
           # page (online: links here; offline: copies on the server). It goes into the bundle too.
           (cd release
-            for file in LoreClient-*.msi LoreClient-*.zip lore-cli-*.tar.gz; do
+            for file in LoreClient-*.msi LoreClient-*.zip lore-cli-*.tar.gz lore-client*.rpm lore-client*.deb; do
               case "$file" in
                 *.msi) platform=windows kind=msi arch=x86_64 ;;
                 *.zip) platform=windows kind=zip arch=x86_64 ;;
                 lore-cli-*-x86_64-*) platform=linux kind=tar arch=x86_64 ;;
                 lore-cli-*-aarch64-*) platform=linux kind=tar arch=aarch64 ;;
+                lore-client-dolphin-*.el9.x86_64.rpm) platform=linux kind=rpm_el9_dolphin arch=x86_64 ;;
+                lore-client-*.el9.x86_64.rpm) platform=linux kind=rpm_el9 arch=x86_64 ;;
+                lore-client-dolphin_*.ubuntu24.04_amd64.deb) platform=linux kind=deb_ubuntu2404_dolphin arch=x86_64 ;;
+                lore-client_*.ubuntu24.04_amd64.deb) platform=linux kind=deb_ubuntu2404 arch=x86_64 ;;
+                lore-client-dolphin_*.debian13_amd64.deb) platform=linux kind=deb_debian13_dolphin arch=x86_64 ;;
+                lore-client_*.debian13_amd64.deb) platform=linux kind=deb_debian13 arch=x86_64 ;;
                 *) echo "unexpected client file $file" >&2; exit 1 ;;
               esac
               printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$platform" "$kind" "$arch" "$(stat -c %s "$file")" "$(sha256sum "$file" | cut -d' ' -f1)" "$file"
             done > clients.tsv)
           cat release/clients.tsv
-          [ "$(wc -l < release/clients.tsv)" -eq 4 ] || { echo "expected four client builds" >&2; exit 1; }
+          [ "$(wc -l < release/clients.tsv)" -eq 10 ] || { echo "expected ten client builds" >&2; exit 1; }
           bundle="lore-platform-server-$VERSION"
           stage=$(mktemp -d)
           tar -xzf "release/$bundle.tar.gz" -C "$stage"

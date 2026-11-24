@@ -13,7 +13,7 @@ command -v cargo >/dev/null || { echo "Rust and Cargo are required to build the 
 command -v npm >/dev/null || { echo "Node.js and npm are required to build the operation dialogs" >&2; exit 1; }
 command -v dotnet >/dev/null || { echo "The .NET 10 SDK is required to build the companion" >&2; exit 1; }
 
-cargo build --release -p lore-capi -p lore-client --manifest-path "$root/Cargo.toml"
+cargo build --release --locked -p lore-capi -p lore-client --manifest-path "$root/Cargo.toml"
 
 web="$root/platform/windows/LoreCompanion.Web"
 (cd "$web" && npm ci --no-audit --no-fund && npm run build)

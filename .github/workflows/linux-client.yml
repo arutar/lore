@@ -1,0 +1,124 @@
+# SPDX-License-Identifier: MIT
+
+name: Linux Client
+
+# Builds the Linux client packages: lore-client (the companion, the CLI, the file manager
+# extension and icons) and lore-client-dolphin, as .rpm for Rocky Linux and RHEL 9 and .deb for
+# Ubuntu 24.04 and Debian 13. The client itself is built once, on Rocky Linux 9, whose glibc the
+# other two accept; the Dolphin plugins are built on each system for its KDE Frameworks.
+on:
+  workflow_dispatch:
+  # TEMPORARY: lets the branch check the workflow before it reaches main. Removed before the merge.
+  push:
+    branches: [linux_shell_extension]
+  # platform-release.yml calls this for platform-v* tags and publishes the packages with the
+  # rest of the release.
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: linux-client-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  el9:
+    name: Client and Rocky Linux 9 packages
+    runs-on: ubuntu-24.04
+    container: rockylinux:9
+    permissions:
+      contents: read
+    steps:
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          dnf install -y -q epel-release dnf-plugins-core
+          dnf config-manager --set-enabled crb
+          dnf module enable -y -q nodejs:22
+          dnf install -y -q gcc gcc-c++ make git cmake protobuf-compiler nodejs npm dotnet-sdk-10.0 rpm-build \
+            binutils extra-cmake-modules kf5-kio-devel kf5-kcoreaddons-devel qt5-qtbase-devel
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the client
+        env:
+          VERSION: ${{ inputs.version || '0.0.0' }}
+        run: |
+          set -euo pipefail
+          source "$HOME/.cargo/env"
+          PLATFORM_VERSION="$VERSION" platform/linux/Build-Linux.sh
+          platform/linux/bin/lore/lore --version
+      - name: Package
+        env:
+          VERSION: ${{ inputs.version || '0.0.0' }}
+        run: |
+          set -euo pipefail
+          platform/linux/packaging/make-packages.sh el9 platform/linux/bin/lore platform/linux/bin/dolphin-build "$VERSION" dist
+          # The other systems' jobs pack the same client; a tar keeps its file modes.
+          tar -C platform/linux/bin -czf client.tar.gz --exclude=lore/plugins lore
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-packages-el9
+          path: dist/*.rpm
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-client-build
+          path: client.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  deb:
+    name: ${{ matrix.distro }} packages
+    needs: el9
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - distro: ubuntu2404
+            image: ubuntu:24.04
+            frameworks: libkf5kio-dev libkf5coreaddons-dev qtbase5-dev
+            kf: 5
+          - distro: debian13
+            image: debian:trixie
+            frameworks: libkf6kio-dev libkf6coreaddons-dev qt6-base-dev
+            kf: 6
+    steps:
+      - name: Install build tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          FRAMEWORKS: ${{ matrix.frameworks }}
+        run: |
+          apt-get update -qq
+          # shellcheck disable=SC2086 # one package per word
+          apt-get install -y -qq --no-install-recommends cmake g++ make extra-cmake-modules dpkg-dev xz-utils $FRAMEWORKS
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux-client-build
+      - name: Build the Dolphin plugins and package
+        env:
+          VERSION: ${{ inputs.version || '0.0.0' }}
+          DISTRO: ${{ matrix.distro }}
+          KF: ${{ matrix.kf }}
+        run: |
+          set -euo pipefail
+          tar -xzf client.tar.gz
+          cmake -S platform/linux/dolphin -B dolphin-build -DCMAKE_BUILD_TYPE=Release -DLORE_KF="$KF"
+          cmake --build dolphin-build -j "$(nproc)"
+          platform/linux/packaging/make-packages.sh "$DISTRO" lore dolphin-build "$VERSION" dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-packages-${{ matrix.distro }}
+          path: dist/*.deb
+          if-no-files-found: error
