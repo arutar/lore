@@ -1,6 +1,6 @@
 # Текущее состояние Lore Platform
 
-Обновлено 2026-11-24, к релизу `platform-v0.4.0`: клиент для Linux (меню и значки в GNOME Files, Nemo, Caja и Dolphin, пакеты `.rpm`/`.deb`), слит upstream main до 2b12dd47, на главной WebUI пакеты Linux, мобильная страница пользователей.
+Обновлено 2026-11-24, к релизу `platform-v0.4.1`: на Linux Caddy в сети хоста видит настоящий адрес клиента (`LORE_PROXY_NETWORK=host`); на Windows MCP только `off`/`on`.
 
 История по версиям — `platform/docs/releases/`. Коротко:
 - 0.2.4–0.2.5 — окно Commit для сотен тысяч файлов (дерево папок, страницы, поиск), прогресс коммита и отправки, удаление репозитория администратором;
@@ -14,6 +14,7 @@
 - 0.3.1 — слияние upstream (prefetch проверки push, восстановление прерванного push, быстрый stage широких каталогов, докачка больших файлов, исправления FUSE); прогресс проверки push теперь в полях `server_*` события `BranchPushFragmentProgress` (у upstream 256 событий — предел `bitcode`); список токенов MCP с поиском и статусами.
 - 0.3.2 — прогресс проверки push в событии `Progress` (данные `LoreProgressEventData`: репозиторий, ветка, `server_phase`, `server_restarts`, `server_checked`) вместо полей в конце `BranchPushFragmentProgress`; когда upstream переделает `Progress` (их TODO про union), переходим на их вариант.
 - 0.4.0 — клиент для Linux: companion на GTK/WebKitGTK с окнами Windows-клиента, меню и значки статуса в GNOME Files, Nemo, Caja (расширение на Python) и Dolphin (плагины KF5/KF6), пакеты для Rocky/RHEL 9, Ubuntu 24.04, Debian 13 (`linux-client.yml`); слияние upstream до 2b12dd47; прогресс отправки в Windows Companion снова верный (LoreVcs 0.14.0). В CI пропускается тест upstream `idle_heaps_are_reaped`: на раннерах GitHub он падает, на Rocky 9 проходит.
+- 0.4.1 — адрес клиента на Linux: Caddy в сети хоста (`compose.caddy-host.yaml`), control plane и Keycloak на loopback-портах 18081/18082; на Windows `setup.ps1 -Mcp internal` отклоняется.
 
 Замеры загрузки 703 009 файлов — в разделе Performance основного README.
 
