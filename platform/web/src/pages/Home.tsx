@@ -43,6 +43,11 @@ function InstallClient() {
     downloads?.items.find((item) => item.platform === platform && item.kind === kind && item.arch === which);
   const size = (item: ClientDownload) => formatSize(item.size, language);
   const msi = find("windows", "msi"), zip = find("windows", "zip"), tar = find("linux", "tar", arch);
+  const systems = packageSystems.filter((system) => find("linux", system.kind));
+  const [chosen, setChosen] = useState<PackageSystem["kind"] | null>(null);
+  const system = systems.find((candidate) => candidate.kind === chosen) ?? systems.find((candidate) => candidate.guess.test(navigator.userAgent)) ?? systems[0];
+  const linuxPackage = system && find("linux", system.kind), dolphin = system && find("linux", `${system.kind}_dolphin` as ClientDownload["kind"]);
+  const installCommand = linuxPackage && `curl -fLO ${new URL(linuxPackage.url, window.location.href).href} && sudo ${system.rpm ? "dnf" : "apt"} install ./${linuxPackage.file}`;
   const arches = (["x86_64", "aarch64"] as const).filter((which) => find("linux", "tar", which));
   const command = tar && `curl -fLO ${new URL(tar.url, window.location.href).href} && tar -xzf ${tar.file}`;
   return <div className="card install">
@@ -62,9 +67,20 @@ function InstallClient() {
         <a className="btn primary" href={msi.url} download={msi.file}><Icon name="download" />{t("home.windows")}</a>
       </div>
     </div>}
+    {linuxPackage && <div className="dl-row">
+      <span className="os-tile linux"><Icon name="folder" /></span>
+      <div className="grow"><b>Linux</b> <small>· {t("home.packagesNote", { size: size(linuxPackage) })}</small></div>
+      <div className="dl-actions">
+        {systems.length > 1 && <div className="seg systems" role="group" aria-label={t("home.system")}>{systems.map((candidate) =>
+          <button key={candidate.kind} className={candidate === system ? "on" : ""} aria-pressed={candidate === system} onClick={() => setChosen(candidate.kind)}>{candidate.label}</button>)}</div>}
+        {installCommand && <CopyTextButton text={installCommand} label={t("home.installCommand")} message={t("home.commandCopied")} />}
+        {dolphin && <a className="btn" href={dolphin.url} download={dolphin.file} title={`${dolphin.file} · ${size(dolphin)}`}>{t("home.dolphin")}</a>}
+        <a className="btn primary" href={linuxPackage.url} download={linuxPackage.file}><Icon name="download" />{t(system.rpm ? "home.rpm" : "home.deb")}</a>
+      </div>
+    </div>}
     {tar && <div className="dl-row">
       <span className="os-tile linux"><Icon name="terminal" /></span>
-      <div className="grow"><b>Linux</b> <small>· {t("home.linuxNote", { size: size(tar) })}</small></div>
+      <div className="grow"><b>{t(linuxPackage ? "home.cli" : "home.linuxTitle")}</b> <small>· {t(linuxPackage ? "home.cliNote" : "home.linuxNote", { size: size(tar) })}</small></div>
       <div className="dl-actions">
         {arches.length > 1 && <div className="seg" role="group" aria-label={t("home.arch")}>{arches.map((which) =>
           <button key={which} className={arch === which ? "on" : ""} aria-pressed={arch === which} onClick={() => setArch(which)}>{which}</button>)}</div>}
@@ -74,6 +90,15 @@ function InstallClient() {
     </div>}
   </div>;
 }
+
+/** The systems the Linux packages are built for, in the order the home page offers them. A browser
+ * that names its system picks it; otherwise the first one shown. */
+type PackageSystem = { kind: "rpm_el9" | "deb_ubuntu2404" | "deb_debian13"; label: string; rpm: boolean; guess: RegExp };
+const packageSystems: PackageSystem[] = [
+  { kind: "deb_ubuntu2404", label: "Ubuntu 24.04", rpm: false, guess: /ubuntu/i },
+  { kind: "rpm_el9", label: "RHEL 9", rpm: true, guess: /rocky|red hat|rhel|centos|alma|fedora/i },
+  { kind: "deb_debian13", label: "Debian 13", rpm: false, guess: /debian/i },
+];
 
 /** A labelled button that copies text, as the curl command. */
 function CopyTextButton({ text, label, message }: { text: string; label: string; message: string }) {

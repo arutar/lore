@@ -39,7 +39,7 @@ jobs:
           dnf install -y -q epel-release dnf-plugins-core
           dnf config-manager --set-enabled crb
           dnf module enable -y -q nodejs:22
-          dnf install -y -q gcc gcc-c++ make git cmake protobuf-compiler nodejs npm dotnet-sdk-10.0 rpm-build \
+          dnf install -y -q gcc gcc-c++ make git cmake protobuf-compiler protobuf-devel nodejs npm dotnet-sdk-10.0 rpm-build \
             binutils extra-cmake-modules kf5-kio-devel kf5-kcoreaddons-devel qt5-qtbase-devel
           curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

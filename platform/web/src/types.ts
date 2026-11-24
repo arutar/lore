@@ -57,7 +57,8 @@ export interface MCPToken {
 /** A client build the server hands out from /downloads, as its manifest.json lists it. */
 export interface ClientDownload {
   platform: "windows" | "linux";
-  kind: "msi" | "zip" | "tar";
+  /** Linux packages name their system, and the Dolphin plugins' package adds _dolphin. */
+  kind: "msi" | "zip" | "tar" | "rpm_el9" | "rpm_el9_dolphin" | "deb_ubuntu2404" | "deb_ubuntu2404_dolphin" | "deb_debian13" | "deb_debian13_dolphin";
   arch: "x86_64" | "aarch64";
   file: string;
   url: string;

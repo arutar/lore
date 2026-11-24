@@ -535,6 +535,9 @@ label.btn input[type=file] { display:none; }
   .dl-actions .seg { display:flex; flex:1 1 0; } .dl-actions .seg button { flex:1; }
   .dl-actions > .btn.quiet { flex:0 0 36px; width:36px; padding:0; font-size:0; gap:0; border:1px solid var(--line); }
   .dl-row:has(.os-tile.linux) .dl-actions > .btn.primary { flex-basis:100%; }
+  /* пакеты Linux: выбор системы своей строкой, названия не переносятся */
+  .dl-actions .seg.systems { flex:1 0 100%; }
+  .dl-actions .seg.systems button { white-space:nowrap; padding:0 6px; }
 }
 /* MCP: токены и примеры подключения */
 .mcp-examples { display:grid; gap:10px; min-width:0; }
