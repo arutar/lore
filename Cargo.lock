@@ -2409,6 +2409,7 @@ dependencies = [
  "parking_lot",
  "quinn",
  "quinn-proto",
+ "rand 0.9.5",
  "rcgen",
  "reqwest",
  "rustls",
