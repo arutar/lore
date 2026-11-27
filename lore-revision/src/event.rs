@@ -274,14 +274,19 @@ pub fn convert_event_callback(callback: LoreEventCallbackConfig) -> LoreEventCal
 
 /// Data for a generic progress event.
 // TODO(vri): Implement with a union to enable command-specific progress events
-//
-// Until upstream does, this fork reports on it the remote's progress verifying a pushed revision:
-// the event enum holds the 256 variants it may, so that progress can't have a variant of its own,
-// and upstream sends no `Progress` event.
 #[repr(C)]
 #[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreProgressEventData {
+    /// Placeholder field; carries no meaningful value.
+    pub _unused: u32,
+}
+
+/// Data for this fork's event reporting the remote's progress verifying a pushed revision.
+#[repr(C)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LoreForkBranchPushVerifyProgressEventData {
     /// The repository being pushed.
     pub repository: RepositoryId,
     /// The branch being pushed.
@@ -289,11 +294,11 @@ pub struct LoreProgressEventData {
     /// The step the remote is in while it verifies the pushed revision: 1 preparing, 2 verifying
     /// fragments, 3 merging onto a branch that moved, 4 moving the branch, 5 running the post-push
     /// hooks.
-    pub server_phase: u32,
+    pub phase: u32,
     /// Times the remote restarted the verification after it stalled or hit a transient failure.
-    pub server_restarts: u32,
+    pub restarts: u32,
     /// Store requests the remote's verification has completed so far.
-    pub server_checked: u64,
+    pub checked: u64,
 }
 
 /// cbindgen:prefix-with-name
@@ -1402,6 +1407,10 @@ pub enum LoreEvent {
     StoragePutStats(LoreStoragePutStatsEventData),
     /// A branch push's outcome.
     RevisionGraphBranchPushed(LoreRevisionGraphBranchPushedEventData),
+    // This fork's events stay last, after every upstream event, with tags of their own far above
+    // upstream's: an upstream event added above them keeps upstream's tag.
+    /// The remote's progress verifying a pushed revision.
+    ForkBranchPushVerifyProgress(LoreForkBranchPushVerifyProgressEventData) = 65536,
 }
 
 /// Encodes as the event it refers to, so that a sender can encode an event it only borrows.

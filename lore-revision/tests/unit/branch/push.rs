@@ -517,17 +517,17 @@ mod offer {
         }
     }
 
-    /// The remote's progress verifying the offered revision reaches the client as the generic
-    /// progress event, its step at least preparing, and not as fragment transfer progress.
+    /// The remote's progress verifying the offered revision reaches the client as the fork's own
+    /// event, its step at least preparing, and not as fragment transfer progress.
     #[tokio::test]
-    async fn verification_progress_is_sent_as_the_progress_event() {
+    async fn verification_progress_is_sent_as_the_fork_event() {
         let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = sent.clone();
         let callback: lore_revision::interface::LoreEventCallback =
             Some(Box::new(move |event: &LoreEvent| {
                 let sent = match event {
-                    LoreEvent::Progress(data) => {
-                        Some((data.server_phase, data.server_restarts, data.server_checked))
+                    LoreEvent::ForkBranchPushVerifyProgress(data) => {
+                        Some((data.phase, data.restarts, data.checked))
                     }
                     // Fragment progress would be a mistake; it shows as a phase no step has.
                     LoreEvent::BranchPushFragmentProgress(_) => Some((u32::MAX, 0, 0)),

@@ -3456,15 +3456,16 @@ async fn offer_revision(
     fast_forward_merge: bool,
     recover: impl AsyncFnOnce() -> Result<(), PushError>,
 ) -> Result<BranchPushResponse, PushError> {
-    // The remote's verification of `revision` reports on the generic progress event.
     let progress = |progress: lore_transport::types::PushVerifyProgress| {
-        event::LoreEvent::Progress(event::LoreProgressEventData {
-            repository,
-            branch,
-            server_phase: progress.phase.max(1),
-            server_restarts: progress.restarts,
-            server_checked: progress.checked,
-        })
+        event::LoreEvent::ForkBranchPushVerifyProgress(
+            event::LoreForkBranchPushVerifyProgressEventData {
+                repository,
+                branch,
+                phase: progress.phase.max(1),
+                restarts: progress.restarts,
+                checked: progress.checked,
+            },
+        )
         .send();
     };
     let mut answer = revision_protocol

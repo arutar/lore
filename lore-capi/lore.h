@@ -467,46 +467,10 @@ typedef enum lore_compression_mode_t {
   LORE_COMPRESSION_MODE_ZSTD = 4,
 } lore_compression_mode_t;
 
-// Opaque 128-bit partition identifier.
-//
-// Binary-compatible with `Context`. In the Lore domain, a `Partition` represents
-// a repository identifier; the storage layer uses it to segregate data without
-// understanding what the partition represents.
-typedef struct lore_partition_t {
-  // The raw 16 bytes of the identifier.
-  uint8_t data[16];
-} lore_partition_t;
-
-// Alias: a repository is identified by a `Partition`.
-typedef struct lore_partition_t lore_repository_id_t;
-
-// Opaque 128-bit context identifier.
-//
-// Binary-compatible with `Partition`. In the storage layer, `Context` is the
-// association tag within an `Address` (e.g., file identity for dedup reasoning),
-// distinct from the `Partition` which identifies the data partition.
-typedef struct lore_context_t {
-  // The raw 16 bytes of the identifier.
-  uint8_t data[16];
-} lore_context_t;
-
-// Alias: a branch is identified by a `Context`.
-typedef struct lore_context_t lore_branch_id_t;
-
 // Data for a generic progress event.
 typedef struct lore_progress_event_data_t {
-  // The repository being pushed.
-  lore_repository_id_t repository;
-  // The branch being pushed.
-  lore_branch_id_t branch;
-  // The step the remote is in while it verifies the pushed revision: 1 preparing, 2 verifying
-  // fragments, 3 merging onto a branch that moved, 4 moving the branch, 5 running the post-push
-  // hooks.
-  uint32_t server_phase;
-  // Times the remote restarted the verification after it stalled or hit a transient failure.
-  uint32_t server_restarts;
-  // Store requests the remote's verification has completed so far.
-  uint64_t server_checked;
+  // Placeholder field; carries no meaningful value.
+  uint32_t _unused;
 } lore_progress_event_data_t;
 
 // A string described by a pointer to its character data and a length, holding
@@ -604,6 +568,16 @@ typedef struct lore_hash_t {
   // The raw 32 bytes of the hash digest.
   uint8_t data[32];
 } lore_hash_t;
+
+// Opaque 128-bit context identifier.
+//
+// Binary-compatible with `Partition`. In the storage layer, `Context` is the
+// association tag within an `Address` (e.g., file identity for dedup reasoning),
+// distinct from the `Partition` which identifies the data partition.
+typedef struct lore_context_t {
+  // The raw 16 bytes of the identifier.
+  uint8_t data[16];
+} lore_context_t;
 
 // Full address of a piece of content.
 //
@@ -747,6 +721,9 @@ typedef struct lore_branch_create_event_data_t {
   // Set when creating the branch also produced a new commit.
   uint8_t is_commit;
 } lore_branch_create_event_data_t;
+
+// Alias: a branch is identified by a `Context`.
+typedef struct lore_context_t lore_branch_id_t;
 
 // A unique identity for a repository instance (a local checkout).
 //
@@ -975,6 +952,19 @@ typedef struct lore_branch_merge_conflict_file_event_data_t {
   // The path of the conflicted file.
   struct lore_string_t path;
 } lore_branch_merge_conflict_file_event_data_t;
+
+// Opaque 128-bit partition identifier.
+//
+// Binary-compatible with `Context`. In the Lore domain, a `Partition` represents
+// a repository identifier; the storage layer uses it to segregate data without
+// understanding what the partition represents.
+typedef struct lore_partition_t {
+  // The raw 16 bytes of the identifier.
+  uint8_t data[16];
+} lore_partition_t;
+
+// Alias: a repository is identified by a `Partition`.
+typedef struct lore_partition_t lore_repository_id_t;
 
 // Data for the event sent when a link is skipped during a merge.
 typedef struct lore_branch_merge_link_skipped_event_data_t {
@@ -3913,6 +3903,22 @@ typedef struct lore_revision_graph_branch_pushed_event_data_t {
   struct lore_hash_t local_latest;
 } lore_revision_graph_branch_pushed_event_data_t;
 
+// Data for this fork's event reporting the remote's progress verifying a pushed revision.
+typedef struct lore_fork_branch_push_verify_progress_event_data_t {
+  // The repository being pushed.
+  lore_repository_id_t repository;
+  // The branch being pushed.
+  lore_branch_id_t branch;
+  // The step the remote is in while it verifies the pushed revision: 1 preparing, 2 verifying
+  // fragments, 3 merging onto a branch that moved, 4 moving the branch, 5 running the post-push
+  // hooks.
+  uint32_t phase;
+  // Times the remote restarted the verification after it stalled or hit a transient failure.
+  uint32_t restarts;
+  // Store requests the remote's verification has completed so far.
+  uint64_t checked;
+} lore_fork_branch_push_verify_progress_event_data_t;
+
 // An event delivered to a callback. Each variant names a kind of event and
 // carries the data for that event.
 //
@@ -4431,6 +4437,8 @@ enum lore_event_id_t {
   LORE_EVENT_STORAGE_PUT_STATS,
   // A branch push's outcome.
   LORE_EVENT_REVISION_GRAPH_BRANCH_PUSHED,
+  // The remote's progress verifying a pushed revision.
+  LORE_EVENT_FORK_BRANCH_PUSH_VERIFY_PROGRESS = 65536,
 };
 typedef uint32_t lore_event_tag_t;
 
@@ -4692,6 +4700,7 @@ typedef struct lore_event_t {
     struct lore_branch_merge_link_pin_resolved_event_data_t branch_merge_link_pin_resolved;
     struct lore_storage_put_stats_event_data_t storage_put_stats;
     struct lore_revision_graph_branch_pushed_event_data_t revision_graph_branch_pushed;
+    struct lore_fork_branch_push_verify_progress_event_data_t fork_branch_push_verify_progress;
   };
 } lore_event_t;
 

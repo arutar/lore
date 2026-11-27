@@ -361,6 +361,22 @@ fn event_tags_keep_their_values() {
     assert!(moved.is_empty(), "{moved:#?}");
 }
 
+/// This fork's events keep the tags the companion knows them by, above every upstream tag. An
+/// upstream event declared after them would take the tag after theirs instead of upstream's.
+#[test]
+fn fork_event_tags_stay_above_upstream() {
+    let declared = enumerators(&workspace_file("lore-capi/lore.h"), "lore_event_id_t");
+    assert_eq!(
+        declared.get("LORE_EVENT_FORK_BRANCH_PUSH_VERIFY_PROGRESS"),
+        Some(&65536)
+    );
+    let above: Vec<_> = declared
+        .iter()
+        .filter(|(tag, value)| **value >= 65536 && !tag.starts_with("LORE_EVENT_FORK_"))
+        .collect();
+    assert!(above.is_empty(), "{above:#?}");
+}
+
 #[test]
 fn error_codes_name_every_registry_code() {
     let declared = enumerators(&workspace_file("lore-capi/lore.h"), "lore_error_code_t");

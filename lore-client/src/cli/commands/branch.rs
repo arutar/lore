@@ -971,10 +971,8 @@ pub fn handle_branch_push(globals: LoreGlobalArgs, args: &BranchPushArgs) -> u8 
                     data.branch,
                 );
             }
-            // This fork reports the remote verifying a pushed revision on the generic progress
-            // event.
-            LoreEvent::Progress(data) => {
-                let step = match data.server_phase {
+            LoreEvent::ForkBranchPushVerifyProgress(data) => {
+                let step = match data.phase {
                     1 => "preparing",
                     2 => "verifying fragments",
                     3 => "merging",
@@ -982,14 +980,14 @@ pub fn handle_branch_push(globals: LoreGlobalArgs, args: &BranchPushArgs) -> u8 
                     5 => "running server hooks",
                     _ => "working",
                 };
-                let restarts = if data.server_restarts > 0 {
-                    format!(", restarted {} times", data.server_restarts)
+                let restarts = if data.restarts > 0 {
+                    format!(", restarted {} times", data.restarts)
                 } else {
                     String::new()
                 };
                 println!(
                     "Server is verifying the pushed revision: {step}, {} checks done{restarts}",
-                    data.server_checked
+                    data.checked
                 );
             }
             LoreEvent::BranchPushFragmentProgress(data) => {

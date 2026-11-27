@@ -411,6 +411,7 @@ include = [
 "LoreLinkStagedEntryEventData" = "lore_link_staged_entry_event_data_t"
 "LorePathIgnoreEventData" = "lore_path_ignore_event_data_t"
 "LoreProgressEventData" = "lore_progress_event_data_t"
+"LoreForkBranchPushVerifyProgressEventData" = "lore_fork_branch_push_verify_progress_event_data_t"
 "LoreDependencyResolveBeginEventData" = "lore_dependency_resolve_begin_event_data_t"
 "LoreDependencyResolveItemEventData" = "lore_dependency_resolve_item_event_data_t"
 "LoreDependencyResolveEndEventData" = "lore_dependency_resolve_end_event_data_t"

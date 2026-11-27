@@ -38,25 +38,24 @@ public sealed record CommitCandidate(string Path, string Change, bool Staged, st
 // counts the checks it has done.
 public sealed record CommitProgress(string Phase, ulong Complete = 0, ulong Total = 0, ulong Bytes = 0, string Step = "", uint Restarts = 0);
 
-// The server's progress verifying a push. This fork's lorelib reports it on the generic progress
-// event (lore_progress_event_data_t), which upstream sends nowhere: a separate event would take a
-// 257th event id, more than lorelib's event enum may hold. The LoreVcs package knows that event's
-// data only as a placeholder, so this reads the fields from the native event the package holds, at
-// the layout lore.h gives. If a package update changes that event, progress is just not shown.
+// The server's progress verifying a push, this fork's own lorelib event
+// (LORE_EVENT_FORK_BRANCH_PUSH_VERIFY_PROGRESS in lore.h). The LoreVcs package doesn't know the
+// event: it hands it over with its tag as a number and no way to its data, so this reads the
+// fields from the native event the package holds, at the layout lore.h gives.
 internal static class ServerProgressEvent
 {
-    public const LoreEventTag Tag = LoreEventTag.PROGRESS;
+    public const uint Tag = 65536;
     private static readonly System.Reflection.FieldInfo? Native = typeof(LoreEventFFI).GetField(
         "loreEvent", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
 
     public static CommitProgress? Read(LoreEventFFI loreEvent)
     {
-        if (loreEvent.Tag != Tag || Native?.GetValue(loreEvent) is not System.Reflection.Pointer pointer) return null;
+        if ((uint)loreEvent.Tag != Tag || Native?.GetValue(loreEvent) is not System.Reflection.Pointer pointer) return null;
         IntPtr data;
         unsafe { data = (IntPtr)System.Reflection.Pointer.Unbox(pointer); }
         if (data == IntPtr.Zero) return null;
-        // The tag, padding, then the data: repository (16 bytes), branch (16), then server_phase,
-        // server_restarts and server_checked.
+        // The tag, padding, then the data: repository (16 bytes), branch (16), then phase,
+        // restarts and checked.
         var phase = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(data, 8 + 32);
         if (phase == 0) return null;
         var restarts = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(data, 8 + 36);
@@ -233,8 +232,7 @@ public static class LoreOperations
             await Lore.RevisionSync(globals, args).Callback((loreEvent, _) =>
             {
                 LogCallback(report)(loreEvent, _);
-                var text = loreEvent.Tag == LoreEventTag.LOG ? loreEvent.GetData<LoreLogEventDataFFI>().Message
-                    : loreEvent.Tag == LoreEventTag.ERROR ? loreEvent.GetData<LoreErrorEventDataFFI>().ErrorInner : null;
+                var text = loreEvent.Tag == LoreEventTag.LOG ? loreEvent.GetData<LoreLogEventDataFFI>().Message : null;
                 var match = text is null ? null : LocalChangeLine.Match(text);
                 if (match is { Success: true }) changedHere.Add(PathText.Native(match.Groups[1].Value.Trim()));
             }).WaitAsync();
