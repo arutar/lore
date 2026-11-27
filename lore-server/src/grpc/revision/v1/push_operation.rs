@@ -61,6 +61,7 @@ use crate::grpc::get_repository;
 use crate::grpc::get_user_id;
 use crate::grpc::handlers::branch_push::PushAccess;
 use crate::grpc::handlers::branch_push::PushPhase;
+use crate::util::core_hop::outliving_request;
 use crate::util::setup_execution;
 
 /// How many times a push is restarted after it stopped making progress, or its worker vanished,
@@ -733,9 +734,10 @@ impl LoreRevisionV1Service {
             let (metadata, extensions, ()) = request.into_parts();
             let mut worker_request = Request::from_parts(metadata, extensions, push);
             worker_request.extensions_mut().insert(receipt.clone());
-            lore_base::lore_spawn!(async move {
+            // The push runs past this request, which ends with the reply below.
+            lore_base::lore_spawn!(outliving_request(async move {
                 Box::pin(service.run_push(worker_request, repo, receipt)).await;
-            });
+            }));
         }
         Ok(Response::new(carried.processing()))
     }
@@ -854,13 +856,13 @@ impl LoreRevisionV1Service {
             }
             swept.insert(repo.id, now);
         }
-        lore_base::lore_spawn!(async move {
+        lore_base::lore_spawn!(outliving_request(async move {
             match sweep(repo, workers.settings.retention).await {
                 Ok(0) => (),
                 Ok(removed) => tracing::info!(removed, "Removed expired push journal entries"),
                 Err(error) => tracing::warn!(%error, "Could not sweep the push journal"),
             }
-        });
+        }));
     }
 }
 

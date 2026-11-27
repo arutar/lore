@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! Push operations (`lore.platform.v1.BranchPushOperationService`): restarts after a stall,
-//! retries after a transient failure, fencing of a superseded worker, no limit on how many run at
-//! once, the journal sweep, and a restart after the journal was lost.
+//! retries after a transient failure, a push outliving the request that started it, fencing of
+//! a superseded worker, no limit on how many run at once, the journal sweep, and a restart after
+//! the journal was lost.
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -16,6 +17,7 @@ use lore_revision::branch::DEFAULT_HISTORY_STEP_SIZE;
 use lore_revision::lore::BranchId;
 use lore_revision::lore::RepositoryId;
 use lore_revision::repository::RepositoryContext;
+use lore_revision::runtime::Cancellation;
 use lore_server::auth::jwt::AuthorizationToken;
 use lore_server::grpc::revision::v1::push_operation::Lease;
 use lore_server::grpc::revision::v1::push_operation::MAX_STALLS;
@@ -28,6 +30,7 @@ use lore_server::hooks::HookDispatcher;
 use lore_server::hooks::HookError;
 use lore_server::hooks::HookPoint;
 use lore_server::hooks::StatusCode;
+use lore_server::util::core_hop::with_request_cancellation;
 use rand::random;
 use rpc::branch_push_operation::State;
 use rpc::branch_push_operation_service_server::BranchPushOperationService;
@@ -264,6 +267,49 @@ async fn stalled_push_is_restarted_and_completes() {
             "{state:?}"
         );
         assert!(restarts >= 1, "the restart is reported to the client");
+        assert_eq!(latest(&fixture.repo, branch).await, revision);
+    };
+    Box::pin(LORE_CONTEXT.scope(fixture.execution.clone(), run)).await;
+}
+
+/// The client's `Start` request ends with its reply, and the server then cancels it. The push
+/// it started goes on past that.
+#[tokio::test]
+async fn push_outlives_the_request_that_started_it() {
+    let request = Cancellation::new();
+    let cancel = request.clone();
+    // The verification runs after the reply to `Start`, as a hook on a real server does.
+    let fixture = fixture(fast(), 1..=1, move |_| {
+        cancel.cancel();
+        Step::Pass
+    })
+    .await;
+    let run = async {
+        let branch = create_root_branch(&fixture.repo, "main").await;
+        let revision = build_revision(&fixture.repo, Hash::default(), 1).await;
+        let id = operation_id();
+        let serving = Arc::new(
+            fixture
+                .execution
+                .outliving()
+                .await
+                .with_cancellation(request.clone()),
+        );
+        LORE_CONTEXT
+            .scope(
+                serving,
+                with_request_cancellation(
+                    request.clone(),
+                    fixture
+                        .service
+                        .start(start(fixture.repository, branch, revision, &id)),
+                ),
+            )
+            .await
+            .unwrap();
+        let (state, _) = decided(&fixture, branch, &id, Duration::from_secs(10)).await;
+        assert!(request.is_cancelled());
+        assert!(matches!(state, State::Accepted(_)), "{state:?}");
         assert_eq!(latest(&fixture.repo, branch).await, revision);
     };
     Box::pin(LORE_CONTEXT.scope(fixture.execution.clone(), run)).await;
