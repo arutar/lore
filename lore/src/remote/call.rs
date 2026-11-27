@@ -226,22 +226,29 @@ fn blocking_check_answer<Reader: Read>(
 }
 
 /// Writes a request that the service stop and reads the status and message it answers with,
-/// failing with `ServiceUnavailable` where the service closes the connection without answering.
+/// failing with `ServiceUnavailable` where the service closes the connection without answering,
+/// whether it closed it before or after the request was written.
 #[lore_macro::test_pub]
 fn blocking_request_stop<Writer: Write, Reader: Read>(
     writer: &mut Writer,
     reader: &mut Reader,
     force: bool,
 ) -> Result<(i32, String), ServiceCallError> {
-    write_stop(writer, force)
-        .and_then(|()| blocking_read_stop_result(reader))
+    // A service that closed the connection fails the write as well, so the answer, or its
+    // absence, decides, as it does for a call.
+    let sent = write_stop(writer, force);
+    match blocking_read_stop_result(reader)
         .forward::<ServiceCallError>("asking the service to stop")?
-        .ok_or_else(|| {
-            ServiceUnavailable {
-                reason: UNANSWERED.to_string(),
-            }
-            .into()
-        })
+    {
+        Some(answer) => Ok(answer),
+        None => {
+            let reason = match sent {
+                Ok(()) => UNANSWERED.to_string(),
+                Err(err) => format!("{UNANSWERED}; sending the stop failed: {err}"),
+            };
+            Err(ServiceUnavailable { reason }.into())
+        }
+    }
 }
 
 /// Asks the service on `connection` to stop, with a request that a service of this protocol

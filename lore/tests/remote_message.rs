@@ -414,6 +414,25 @@ fn a_client_stop_reads_the_service_answer() {
     let error = blocking_request_stop(&mut Vec::new(), &mut [].as_slice(), false)
         .expect_err("an unanswered stop must fail");
     assert!(error.is_service_unavailable(), "{error}");
+
+    // A service of an older protocol closes the connection on the request, which may fail the
+    // write before the client reads that it closed.
+    let error = blocking_request_stop(&mut ClosedPipe, &mut [].as_slice(), false)
+        .expect_err("a stop to a closed connection must fail");
+    assert!(error.is_service_unavailable(), "{error}");
+}
+
+/// A connection whose peer has closed it, as a write sees it.
+struct ClosedPipe;
+
+impl std::io::Write for ClosedPipe {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
 }
 
 #[test]
