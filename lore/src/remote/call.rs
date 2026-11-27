@@ -237,18 +237,16 @@ fn blocking_request_stop<Writer: Write, Reader: Read>(
     // A service that closed the connection fails the write as well, so the answer, or its
     // absence, decides, as it does for a call.
     let sent = write_stop(writer, force);
-    match blocking_read_stop_result(reader)
+    if let Some(answer) = blocking_read_stop_result(reader)
         .forward::<ServiceCallError>("asking the service to stop")?
     {
-        Some(answer) => Ok(answer),
-        None => {
-            let reason = match sent {
-                Ok(()) => UNANSWERED.to_string(),
-                Err(err) => format!("{UNANSWERED}; sending the stop failed: {err}"),
-            };
-            Err(ServiceUnavailable { reason }.into())
-        }
+        return Ok(answer);
     }
+    let reason = match sent {
+        Ok(()) => UNANSWERED.to_string(),
+        Err(err) => format!("{UNANSWERED}; sending the stop failed: {err}"),
+    };
+    Err(ServiceUnavailable { reason }.into())
 }
 
 /// Asks the service on `connection` to stop, with a request that a service of this protocol
