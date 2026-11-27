@@ -121,8 +121,8 @@ Download `lore-platform-server-<version>.tar.gz` (or `.zip`) from the
 
 ```sh
 mkdir -p /opt && cd /opt
-tar -xzf ~/lore-platform-server-0.4.1.tar.gz
-cd lore-platform-server-0.4.1
+tar -xzf ~/lore-platform-server-0.4.2.tar.gz
+cd lore-platform-server-0.4.2
 ```
 
 The bundle contains only scripts and configuration; `setup` pulls the published images
@@ -200,9 +200,9 @@ Linux. The same files are on the [Releases](../../../../releases/latest) page:
   from EPEL).
 
   ```sh
-  sudo dnf install ./lore-client-0.4.1-1.el9.x86_64.rpm                 # Rocky Linux, RHEL 9
-  sudo apt install ./lore-client_0.4.1-1.ubuntu24.04_amd64.deb          # Ubuntu 24.04
-  sudo apt install ./lore-client-dolphin_0.4.1-1.ubuntu24.04_amd64.deb  # with KDE
+  sudo dnf install ./lore-client-0.4.2-1.el9.x86_64.rpm                 # Rocky Linux, RHEL 9
+  sudo apt install ./lore-client_0.4.2-1.ubuntu24.04_amd64.deb          # Ubuntu 24.04
+  sudo apt install ./lore-client-dolphin_0.4.2-1.ubuntu24.04_amd64.deb  # with KDE
   nautilus -q                                                           # GNOME Files loads the menu
   ```
 
@@ -211,7 +211,7 @@ Linux. The same files are on the [Releases](../../../../releases/latest) page:
 - **Other Linux distributions:** `lore-cli-<version>-<arch>.tar.gz` holds the CLI alone:
 
   ```sh
-  tar -xzf lore-cli-0.4.1-x86_64-unknown-linux-gnu.tar.gz
+  tar -xzf lore-cli-0.4.2-x86_64-unknown-linux-gnu.tar.gz
   install -m 0755 lore ~/.local/bin/lore
   ```
 
@@ -267,7 +267,7 @@ sh restore.sh backups/20261113-020000 --yes
 Schedule backups with cron or Task Scheduler, for example nightly at 02:00:
 
 ```cron
-0 2 * * * cd /opt/lore-platform-server-0.4.1 && sh backup.sh /mnt/backup >> /var/log/lore-backup.log 2>&1
+0 2 * * * cd /opt/lore-platform-server-0.4.2 && sh backup.sh /mnt/backup >> /var/log/lore-backup.log 2>&1
 ```
 
 ## 11. Upgrade
