@@ -9,8 +9,12 @@ import sys
 
 import pytest
 from error_types import (
+    INVALID_ARGUMENTS,
     LOCAL_MODIFICATIONS,
+    NO_REMOTE,
+    ImproperArgumentsError,
     LocalChanges,
+    LoreException,
     PathExistChildrenLinkError,
     PathExistLinkError,
 )
@@ -20,12 +24,14 @@ from link_helpers import (
     SAME_SIZE_LINK_FILES,
     assert_mount_exposes,
     assert_scan_matches_linked_files_by_time,
+    link_entry,
     link_field,
     link_pin,
     make_parent_with_link,
     make_parent_with_remount,
     make_repo,
     make_repo_renumbering_folder,
+    with_another_scheme,
 )
 from lore_parsers import parse_jsonl, parse_status_json
 from test_utils import (
@@ -725,10 +731,10 @@ def test_link_with_url(new_lore_repo):
     link_repo = new_lore_repo()
 
     # Generate content in the link repository
-    link_file = "data/content.txt"
-    link_repo.make_dirs(os.path.dirname(link_file))
-    with link_repo.open_file(link_file, "w+") as output_file:
-        output_file.writelines(["Content from linked repository\n"])
+    for link_file in ("data/content.txt", "more/content.txt"):
+        link_repo.make_dirs(os.path.dirname(link_file))
+        with link_repo.open_file(link_file, "w+") as output_file:
+            output_file.writelines(["Content from linked repository\n"])
 
     link_repo.stage(scan=True)
     link_repo.commit("Initial content")
@@ -754,7 +760,7 @@ def test_link_with_url(new_lore_repo):
     # Test 2: Use remote URL with repo ID appended instead of repository name
     url_with_repo_id = f"{base_url}/{link_repo_id}"
     link_path_repo_url = "link_by_repo_id_url"
-    repo.link_add(link_path_repo_url, url_with_repo_id, "data")
+    repo.link_add(link_path_repo_url, url_with_repo_id, "more")
 
     # Verify the link was created and files are accessible
     expected_file_repo_url = os.path.join(link_path_repo_url, "content.txt")
@@ -1418,6 +1424,40 @@ def test_link_add_accepts_a_scoped_bare_name(new_lore_repo, lore_remote_url):
     assert link_repo.get_id() in repo.link_list(), (
         f"link add should have resolved {scoped_name!r} against this repository's remote"
     )
+
+
+@pytest.mark.smoke
+def test_link_add_refuses_a_repository_on_another_server(new_lore_repo):
+    parent = make_repo(new_lore_repo, {"parent.txt": "parent\n"})
+
+    with pytest.raises(ImproperArgumentsError) as refused:
+        parent.link_add("vendor/lib", "lore://other-server.invalid:1/lib", "/")
+
+    assert refused.value.returncode == INVALID_ARGUMENTS
+
+
+@pytest.mark.smoke
+def test_link_add_refuses_a_url_in_a_repository_without_a_remote(
+    new_lore_repo, monkeypatch
+):
+    monkeypatch.delenv("LORE_REMOTE_URL", raising=False)
+    parent: Lore = new_lore_repo(create_repo=False)
+    parent.repository_create(offline=True)
+
+    with pytest.raises(LoreException) as refused:
+        parent.link_add("vendor/lib", "lore://other-server.invalid:1/lib", "/")
+
+    assert refused.value.returncode == NO_REMOTE
+
+
+@pytest.mark.smoke
+def test_link_add_resolves_a_url_under_another_scheme_on_its_own_remote(new_lore_repo):
+    parent = make_repo(new_lore_repo, {"parent.txt": "parent\n"})
+    link_repo = make_repo(new_lore_repo, {"lib.txt": "lib\n"})
+
+    parent.link_add("vendor/lib", with_another_scheme(link_repo.remote_path), "/")
+
+    assert link_entry(parent, "vendor/lib")["link"] == link_repo.get_id()
 
 
 @pytest.mark.smoke

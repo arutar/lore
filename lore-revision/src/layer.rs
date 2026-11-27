@@ -14,13 +14,11 @@ use crate::branch;
 use crate::change;
 use crate::errors::*;
 use crate::event;
-use crate::event::EventError;
 use crate::find;
 use crate::fs::filesystem_provider::FilesystemDiffIntent;
 use crate::fs::filesystem_provider::InstanceOperation;
 use crate::fs::filesystem_provider::InstanceOperationImpl;
 use crate::fs::filesystem_provider::with_operation;
-use crate::interface::LoreError;
 use crate::interface::LoreString;
 use crate::link;
 use crate::lore::BranchId;
@@ -33,7 +31,6 @@ use crate::lore_warn;
 use crate::metadata;
 use crate::node::INVALID_NODE;
 use crate::node::NodeID;
-use crate::node::NodeLink;
 use crate::node::ROOT_NODE;
 use crate::repository;
 use crate::repository::MountKind;
@@ -45,6 +42,7 @@ use crate::revision::sync;
 use crate::revision::sync::SyncOptions;
 use crate::revision::sync::SyncRealizeStats;
 use crate::state;
+use crate::state::FoundNode;
 use crate::state::NodeMapping;
 use crate::state::RecordedModifiedTimes;
 use crate::state::State;
@@ -52,6 +50,7 @@ use crate::util::path::RelativePath;
 
 #[error_set]
 pub enum LayerError {
+    Cancelled,
     LinkPinsDiverge,
     AlreadyLinked,
     LayerNotFound,
@@ -99,19 +98,9 @@ pub enum LayerError {
     MissingIdentity,
 }
 
-impl EventError for LayerError {
-    fn translated(&self) -> LoreError {
-        LoreError::Internal
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
-}
-
 /// Data for the event emitted when a layer is added.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreLayerAddEventData {
     /// Path in the outer repository where the layer is placed.
@@ -128,7 +117,7 @@ pub struct LoreLayerAddEventData {
 
 /// Data for the event describing a single configured layer.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreLayerEntryEventData {
     /// Path in the outer repository where the layer is placed.
@@ -145,7 +134,7 @@ pub struct LoreLayerEntryEventData {
 
 /// Data for the event describing a layer that has staged changes.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreLayerStagedEntryEventData {
     /// Path in the outer repository where the layer is placed.
@@ -158,7 +147,7 @@ pub struct LoreLayerStagedEntryEventData {
 
 /// Data for the event emitted when a layer is removed.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreLayerRemoveEventData {
     /// Path in the outer repository where the layer was placed.
@@ -255,23 +244,16 @@ pub(crate) async fn drawn_subtree_state(
         return state::node_change_state(repository, state, ROOT_NODE, mount_path.clone()).await;
     }
 
-    let node_link = state
-        .find_node_link(repository.clone(), source_path.as_str())
+    let Some(found) = state
+        .locate_node(repository.clone(), source_path.as_str())
         .await
         .ok()
-        .filter(NodeLink::is_valid);
-    let Some(node_link) = node_link else {
+        .filter(FoundNode::is_valid)
+    else {
         return state::node_change_state(repository, state, INVALID_NODE, mount_path.clone()).await;
     };
-
-    match node_link.resolve(repository.clone(), state.clone()).await {
-        Ok((repository, state)) => {
-            state::node_change_state(&repository, &state, node_link.node, mount_path.clone()).await
-        }
-        Err(_) => {
-            state::node_change_state(repository, state, INVALID_NODE, mount_path.clone()).await
-        }
-    }
+    let (node, (repository, state)) = found.held((repository.clone(), state.clone())).into_parts();
+    state::node_change_state(&repository, &state, node, mount_path.clone()).await
 }
 
 impl Layer {
@@ -448,26 +430,26 @@ pub async fn add(
         .forward::<LayerError>("Failed deserializing state")?;
 
     lore_debug!("Find layer revision source node for {source_path}");
-    let layer_node_link = layer_state
-        .find_node_link(layer_repository.clone(), source_path.as_str())
+    let layer_found = layer_state
+        .locate_node(layer_repository.clone(), source_path.as_str())
         .await
         .forward_with::<LayerError, _>(|| format!("Invalid path {source_path}"))?;
 
-    lore_debug!("Layer revision source node is {layer_node_link:?}");
-    if !layer_node_link.is_valid_or_root() {
+    lore_debug!("Layer revision source node is {:?}", layer_found.identity());
+    if !layer_found.is_valid_or_root() {
         return Err(LayerError::internal(format!("Invalid path {source_path}")));
     }
 
     // Target node must be in the given layer repository, not in a linked repository
-    if layer_node_link.repository != layer_repository.id {
+    let Some(layer_node_id) = layer_found.own_node() else {
         return Err(LayerError::internal(
             "Layer path is in a linked repository itself, create the layer using the target repository directly",
         ));
-    }
+    };
 
     // Target node must be a directory
     let layer_node = layer_state
-        .node(layer_repository.clone(), layer_node_link.node)
+        .node(layer_repository.clone(), layer_node_id)
         .await
         .forward::<LayerError>("Failed deserializing state")?;
 
@@ -531,7 +513,7 @@ pub async fn add(
             clone_ctx,
             layer_storage,
             mount_path,
-            layer_node_link.node,
+            layer_node_id,
             mount_states,
         )
         .await
@@ -651,18 +633,16 @@ pub async fn remove(
         .forward_with::<LayerError, _>(|| {
             format!("Invalid layer source path {}", layer.source_path)
         })?;
-    let source_node_link = layer_state
-        .find_node_link(layer_repository.clone(), source_path.as_str())
+    let source_node = layer_state
+        .locate_node(layer_repository.clone(), source_path.as_str())
         .await
+        .and_then(FoundNode::into_own_node)
         .forward::<LayerError>("Failed to locate layer source node")?;
 
-    let staged_file_count = state::count_staged_files(
-        layer_repository.clone(),
-        layer_state.clone(),
-        source_node_link.node,
-    )
-    .await
-    .count;
+    let staged_file_count =
+        state::count_staged_files(layer_repository.clone(), layer_state.clone(), source_node)
+            .await
+            .count;
 
     let mut tracked_files: Vec<RelativePath> = Vec::new();
     let mut tracked_directories: Vec<RelativePath> = Vec::new();
@@ -677,7 +657,7 @@ pub async fn remove(
             &operation,
             layer_repository.clone(),
             layer_state.clone(),
-            source_node_link.node,
+            source_node,
             mount_path.clone(),
             &mut tracked_files,
             &mut tracked_directories,
@@ -848,8 +828,9 @@ pub(crate) async fn mounts(layers: &[(Layer, LayerState)]) -> Arc<Vec<state::Lay
     for (layer, layer_state) in layers {
         let Ok(source) = layer_state
             .state_staged
-            .find_node_link(layer_state.repository.clone(), &layer.source_path)
+            .locate_node(layer_state.repository.clone(), &layer.source_path)
             .await
+            .and_then(FoundNode::into_own_node)
         else {
             lore_debug!(
                 "Skipping layer mount {} — source path {} not found in layer state",
@@ -862,7 +843,7 @@ pub(crate) async fn mounts(layers: &[(Layer, LayerState)]) -> Arc<Vec<state::Lay
             mount_path: layer.target_path.clone(),
             repository: layer_state.repository.clone(),
             state: layer_state.state_staged.clone(),
-            source_node: source.node,
+            source_node: source,
         });
     }
     Arc::new(mounts)
@@ -916,17 +897,15 @@ pub(crate) async fn list_staged(
             .forward::<LayerError>("Failed to deserialize layer staged state")?;
 
         // Walk from the layer's source_path node and count nodes flagged staged.
-        let source_node_link = staged_state
-            .find_node_link(layer_repository.clone(), &layer.source_path)
+        let source_node = staged_state
+            .locate_node(layer_repository.clone(), &layer.source_path)
             .await
+            .and_then(FoundNode::into_own_node)
             .forward::<LayerError>("Failed to locate layer source node")?;
-        let staged_file_count = state::count_staged_files(
-            layer_repository.clone(),
-            staged_state,
-            source_node_link.node,
-        )
-        .await
-        .count;
+        let staged_file_count =
+            state::count_staged_files(layer_repository.clone(), staged_state, source_node)
+                .await
+                .count;
 
         if staged_file_count == 0 {
             continue;
@@ -1014,12 +993,6 @@ pub(crate) async fn sync_in_operation(
     .await;
     let target =
         drawn_subtree_state(&repository_target, &state_target, &source_path, &mount_path).await;
-    let view_change = options.view.is_some().then(|| NodeMapping {
-        repository: target.mapping.repository.clone(),
-        state: target.mapping.state.clone(),
-        path: mount_path.clone(),
-        node: target.mapping.node,
-    });
     let current_tree = NodeMapping {
         repository: current.mapping.repository.clone(),
         state: current.mapping.state.clone(),
@@ -1033,9 +1006,20 @@ pub(crate) async fn sync_in_operation(
             state_current.revision_number(),
             state_target.revision_number()
         );
-        state::diff_collect_subtree(current, target, mount_path.clone(), options.filter_mode)
-            .await
-            .forward::<LayerError>("Failed to calculate state diff when synchronizing")?
+        let flags = if repository_target.filter.view.is_empty() {
+            state::DiffFlags::empty()
+        } else {
+            state::DiffFlags::PlacesDirectories
+        };
+        state::diff_collect_subtree(
+            current,
+            target,
+            mount_path.clone(),
+            flags,
+            options.filter_mode,
+        )
+        .await
+        .forward::<LayerError>("Failed to calculate state diff when synchronizing")?
     } else {
         // Reverse the changes since diff filesystem returns changes from state to filesystem,
         // while we want to do filesystem to state
@@ -1112,7 +1096,7 @@ pub(crate) async fn sync_in_operation(
         None,
         dry_run,
         None, /* Not a merge */
-        None, /* No view change */
+        Some(&crate::fs::realize::EmptiedDirectories::Excluded),
         stats.clone(),
     )
     .await
@@ -1123,7 +1107,11 @@ pub(crate) async fn sync_in_operation(
             &repository_target,
             &changes,
             &mount_path,
-            view_change.as_ref(),
+            if options.view.is_some() || options.reset {
+                &crate::fs::realize::EmptiedDirectories::Target
+            } else {
+                &crate::fs::realize::EmptiedDirectories::Unplaced
+            },
             &stats,
         )
         .await;

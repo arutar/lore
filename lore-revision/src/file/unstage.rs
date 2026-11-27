@@ -7,14 +7,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
-use dashmap::DashMap;
 use lore_base::lore_spawn;
 use lore_error_set::prelude::*;
 use serde::Serialize;
 
 use crate::errors::*;
 use crate::event;
-use crate::event::EventError;
 use crate::file::stage::route_layer_paths;
 use crate::filter::Filter;
 use crate::filter::FilterMode;
@@ -23,12 +21,10 @@ use crate::fs::filesystem_provider::InstanceOperation;
 use crate::fs::filesystem_provider::InstanceOperationImpl;
 use crate::fs::filesystem_provider::with_operation;
 use crate::interface::LoreArray;
-use crate::interface::LoreError;
 use crate::interface::LoreFileAction;
 use crate::interface::LoreString;
 use crate::layer;
 use crate::link;
-use crate::link::LinkContext;
 use crate::link::LinkTracker;
 use crate::lore::Hash;
 use crate::lore::RepositoryId;
@@ -48,6 +44,7 @@ use crate::repository::RepositoryWriteToken;
 use crate::repository::is_reserved_node_name;
 use crate::state;
 use crate::state::Clear;
+use crate::state::FoundNode;
 use crate::state::LinkPin;
 use crate::state::Mark;
 use crate::state::NodeMapping;
@@ -59,7 +56,7 @@ use crate::util::path::RelativePath;
 
 /// Data for the event emitted when an unstage operation begins.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFileUnstageBeginEventData {
     /// Number of paths requested for unstaging.
@@ -68,7 +65,7 @@ pub struct LoreFileUnstageBeginEventData {
 
 /// Running counts of items processed during an unstage operation.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFileUnstageCountData {
     /// Number of directories and links that were unstaged.
@@ -85,7 +82,7 @@ pub struct LoreFileUnstageCountData {
 
 /// Data for the progress event emitted periodically during an unstage operation.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFileUnstageProgressEventData {
     /// Current counts of items processed.
@@ -94,7 +91,7 @@ pub struct LoreFileUnstageProgressEventData {
 
 /// Data for the event emitted when an unstage operation completes.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFileUnstageEndEventData {
     /// Final counts of items processed.
@@ -103,7 +100,7 @@ pub struct LoreFileUnstageEndEventData {
 
 /// Data for the event identifying the repository and revision involved in an unstage operation.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFileUnstageRevisionEventData {
     /// Identifier of the repository.
@@ -114,7 +111,7 @@ pub struct LoreFileUnstageRevisionEventData {
 
 /// Data for the event emitted for each file affected by an unstage operation.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFileUnstageFileEventData {
     /// Path of the file, relative to the root of the working tree.
@@ -125,6 +122,7 @@ pub struct LoreFileUnstageFileEventData {
 
 #[error_set]
 pub enum UnstageError {
+    Cancelled,
     LinkPinsDiverge,
     InvalidArguments,
     InvalidPath,
@@ -170,21 +168,6 @@ pub enum UnstageError {
     SharedStoreNotFound,
     TokenNotFound,
     MissingIdentity,
-}
-
-impl EventError for UnstageError {
-    fn translated(&self) -> LoreError {
-        match self {
-            UnstageError::InvalidArguments(_) | UnstageError::InvalidPath(_) => {
-                LoreError::InvalidArguments
-            }
-            _ => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 #[derive(Default)]
@@ -310,7 +293,7 @@ async fn unstage_parent(
             })?;
     state_staged.hold_current_where_staged_on(&state_current);
 
-    let discard = Arc::new(DashMap::<RepositoryId, Vec<u32>>::new());
+    let discard = Arc::new(Discards::default());
     let link_tracker = LinkTracker::new();
     let is_merge_or_cherry_pick_or_revert = state_staged.is_merge_or_cherry_pick_or_revert();
 
@@ -348,19 +331,12 @@ async fn unstage_parent(
         }
 
         if !clear {
-            discard_nodes(
-                repository.clone(),
-                state_staged.clone(),
-                discard.clone(),
-                link_tracker.clone(),
-            )
-            .await?;
+            discard_nodes(&discard).await?;
         }
 
         process_link_unstage_updates(
             repository.clone(),
             token,
-            state_current.clone(),
             state_staged.clone(),
             link_tracker.clone(),
         )
@@ -442,7 +418,7 @@ async fn unstage_from_layer(
         .await
         .forward::<UnstageError>("Failed to deserialize layer state")?;
 
-    let discard = Arc::new(DashMap::<RepositoryId, Vec<u32>>::new());
+    let discard = Arc::new(Discards::default());
     let link_tracker = LinkTracker::new();
 
     with_operation(repository.file_system(), async |operation| {
@@ -464,18 +440,11 @@ async fn unstage_from_layer(
     })
     .await?;
 
-    discard_nodes(
-        layer_state.repository.clone(),
-        layer_state.state_staged.clone(),
-        discard,
-        link_tracker.clone(),
-    )
-    .await?;
+    discard_nodes(&discard).await?;
 
     process_link_unstage_updates(
         layer_state.repository.clone(),
         token,
-        layer_state.state_current.clone(),
         layer_state.state_staged.clone(),
         link_tracker,
     )
@@ -515,7 +484,7 @@ struct UnstagePaths<'a> {
     state_current: &'a Arc<State>,
     state_staged: &'a Arc<State>,
     paths: &'a [RelativePath],
-    discard: &'a Arc<DashMap<RepositoryId, Vec<u32>>>,
+    discard: &'a Arc<Discards>,
     options: UnstageOptions,
     stats: &'a Arc<UnstageStats>,
     link_tracker: &'a Arc<LinkTracker>,
@@ -592,7 +561,7 @@ async fn unstage_path(
     state_current: Arc<State>,
     state_staged: Arc<State>,
     relative_path: RelativePath,
-    discard: Arc<DashMap<RepositoryId, Vec<u32>>>,
+    discard: Arc<Discards>,
     options: UnstageOptions,
     stats: Arc<UnstageStats>,
     link_tracker: Arc<LinkTracker>,
@@ -811,44 +780,38 @@ async fn resolve_unstage_target(
     node_path: &RelativePath,
     link_tracker: &Arc<LinkTracker>,
 ) -> Result<Option<UnstageTarget>, UnstageError> {
-    let node_link = match state_staged
-        .find_node_link(repository.clone(), node_path.as_str())
+    let found = match state_staged
+        .locate_node(repository.clone(), node_path.as_str())
         .await
     {
-        Ok(node_link) => node_link,
+        Ok(found) => found,
         Err(err) if err.is_node_not_found() => return Ok(None),
         Err(err) => return Err(err).forward::<UnstageError>("Failed to find subnode"),
     };
 
-    if node_link.repository == repository.id {
+    if let Some(node_id) = found.own_node() {
         return Ok(Some(UnstageTarget {
             repository,
             state_current,
             state_staged,
-            node_id: node_link.node,
+            node_id,
         }));
     }
 
     lore_debug!(
-        "Transition into linked repository: from {} to {}, node={}",
+        "Transition into linked repository: from {} to {}",
         repository.id,
-        node_link.repository,
-        node_link.node
+        found.identity().repository,
     );
 
-    // Resolve the chain so every crossed link is tracked and the
-    // mutated node lives in the shared innermost state.
-    let chain = crate::link::resolve_link_chain(
+    let chain = crate::link::resolve_tracked_link_chain(
         NodeMapping::root(repository.clone(), state_staged.clone()),
         state_current,
         node_path.clone(),
-        crate::lore::BranchId::default(),
+        link_tracker,
     )
     .await
     .forward::<UnstageError>("Failed to resolve link chain")?;
-
-    let innermost_state = chain.innermost.state.clone();
-    chain.record_tracker_contexts(link_tracker, &innermost_state);
 
     let repository = chain.innermost.repository.clone();
     let state_staged = chain.innermost.state.clone();
@@ -863,14 +826,14 @@ async fn resolve_unstage_target(
     .forward::<UnstageError>("Failed to deserialize revision state")?;
 
     let node_id = state_staged
-        .find_relative_node_link(
+        .locate_node_below(
             repository.clone(),
             chain.innermost.node,
             chain.remainder_path.as_str(),
         )
         .await
-        .forward::<UnstageError>("Failed to find node in linked repository")?
-        .node;
+        .and_then(FoundNode::into_own_node)
+        .forward::<UnstageError>("Failed to find node in linked repository")?;
 
     Ok(Some(UnstageTarget {
         repository,
@@ -886,7 +849,7 @@ async fn unstage_directory(
     operation: Arc<InstanceOperationImpl>,
     at: NodeMapping,
     state_current: Arc<State>,
-    discard: Arc<DashMap<RepositoryId, Vec<u32>>>,
+    discard: Arc<Discards>,
     options: UnstageOptions,
     stats: Arc<UnstageStats>,
     link_tracker: Arc<LinkTracker>,
@@ -1081,7 +1044,7 @@ async fn unstage_node(
     operation: Arc<InstanceOperationImpl>,
     at: NodeMapping,
     state_current: Arc<State>,
-    discard: Arc<DashMap<RepositoryId, Vec<u32>>>,
+    discard: Arc<Discards>,
     options: UnstageOptions,
     stats: Arc<UnstageStats>,
     link_tracker: Arc<LinkTracker>,
@@ -1387,18 +1350,17 @@ async fn unstage_node(
 
         let linked_repository = repository.to_link_context(link_metadata.repository).await;
 
-        let linked_state = State::deserialize(linked_repository.clone(), link_metadata.revision)
+        let linked_state = link_tracker
+            .track(
+                (&repository, &state_staged),
+                node_id,
+                link_metadata.repository,
+                link_metadata.revision,
+            )
             .await
-            .forward::<UnstageError>("Failed to unstage link nodes")?;
-
-        let link_context = LinkContext {
-            link_repository_id: link_metadata.repository,
-            link_node_id: node_id,
-            parent_repository_id: repository.id,
-            link_state: linked_state.clone(),
-        };
-
-        link_tracker.add_link(link_context);
+            .forward_with::<UnstageError, _>(|| {
+                format!("Failed to fetch the link at {node_path}")
+            })?;
 
         if was_staged_delete
             && !link_committed(
@@ -1410,7 +1372,7 @@ async fn unstage_node(
             .await?
         {
             // A link added and replaced before it was committed has nothing to restore.
-            queue_discard(&discard, repository.id, node_id);
+            queue_discard(&discard, &repository, &state_staged, node_id);
         } else if was_staged_delete {
             link::reset::reset_staged_remove_link(
                 &operation,
@@ -1544,7 +1506,7 @@ async fn unstage_mounts_moved_with(
     (repository, state_staged, node_id): (&Arc<RepositoryContext>, &Arc<State>, NodeID),
     (link_repository, moved_to): (RepositoryId, Hash),
     state_current: &Arc<State>,
-    discard: &Arc<DashMap<RepositoryId, Vec<u32>>>,
+    discard: &Arc<Discards>,
     options: UnstageOptions,
     stats: &Arc<UnstageStats>,
     link_tracker: &Arc<LinkTracker>,
@@ -1602,7 +1564,7 @@ fn unstage_node_recurse<'a>(
     operation: Arc<InstanceOperationImpl>,
     at: NodeMapping,
     state_current: Arc<State>,
-    discard: Arc<DashMap<RepositoryId, Vec<u32>>>,
+    discard: Arc<Discards>,
     options: UnstageOptions,
     stats: Arc<UnstageStats>,
     link_tracker: Arc<LinkTracker>,
@@ -1629,7 +1591,7 @@ async fn unstage_replacement(
     at: NodeMapping,
     replaced: NodeID,
     state_current: Arc<State>,
-    discard: Arc<DashMap<RepositoryId, Vec<u32>>>,
+    discard: Arc<Discards>,
     options: UnstageOptions,
     stats: Arc<UnstageStats>,
     link_tracker: Arc<LinkTracker>,
@@ -1696,20 +1658,12 @@ async fn unstage_replacement(
 async fn process_link_unstage_updates(
     repository: Arc<RepositoryContext>,
     token: &RepositoryWriteToken,
-    state_current: Arc<State>,
     state_staged: Arc<State>,
     link_tracker: Arc<LinkTracker>,
 ) -> Result<(), UnstageError> {
-    link::drain_link_tracker(
-        repository,
-        token,
-        state_current,
-        state_staged,
-        &link_tracker,
-        false,
-    )
-    .await
-    .forward::<UnstageError>("Failed to unstage link nodes")
+    link::drain_link_tracker(repository, token, state_staged, &link_tracker, false)
+        .await
+        .forward::<UnstageError>("Failed to unstage link nodes")
 }
 
 /// Puts the pin and the mounted node of `current`, the current revision's link, back on `node`, the
@@ -1880,7 +1834,7 @@ async fn discard_staged_add(
     at: NodeMapping,
     node: &Node,
     state_current: Arc<State>,
-    discard: &DashMap<RepositoryId, Vec<u32>>,
+    discard: &Discards,
     options: UnstageOptions,
     stats: &UnstageStats,
     link_tracker: Arc<LinkTracker>,
@@ -1922,84 +1876,46 @@ async fn discard_staged_add(
     // staged or dirty.
     at.state.node_clear_own(&block, at.node, OwnFlags::Change);
 
-    queue_discard(discard, at.repository.id, at.node);
+    queue_discard(discard, &at.repository, &at.state, at.node);
 
     unstage_parent_chain(at.repository, at.state, node.parent, link_tracker, false).await?;
     Ok(())
 }
 
+/// The nodes an unstage discards once it ends, by the repository and the state holding them.
+#[derive(Default)]
+struct Discards(parking_lot::Mutex<Vec<(crate::link::LinkedState, Vec<NodeID>)>>);
+
 fn queue_discard(
-    discard: &DashMap<RepositoryId, Vec<u32>>,
-    repository_id: RepositoryId,
+    discard: &Discards,
+    repository: &Arc<RepositoryContext>,
+    state: &Arc<State>,
     node_id: NodeID,
 ) {
-    // The `or_default` guard dies at the `;`, so the shard lock is not held across an await.
-    #[allow(clippy::disallowed_methods)]
-    discard.entry(repository_id).or_default().push(node_id);
+    let mut discards = discard.0.lock();
+    match discards
+        .iter_mut()
+        .find(|((_, holding), _)| Arc::ptr_eq(holding, state))
+    {
+        Some((_, nodes)) => nodes.push(node_id),
+        None => discards.push(((repository.clone(), state.clone()), vec![node_id])),
+    }
 }
 
 // TODO(vri): UCS-12299 - Unify codepaths to discard nodes
-async fn discard_nodes(
-    base_repository: Arc<RepositoryContext>,
-    state_staged: Arc<State>,
-    discard_map: Arc<DashMap<RepositoryId, Vec<u32>>>,
-    link_tracker: Arc<LinkTracker>,
-) -> Result<(), UnstageError> {
-    if discard_map.is_empty() {
-        return Ok(());
-    }
-
-    for entry in discard_map.iter() {
-        let (repository_id, node_ids) = (entry.key(), entry.value());
-
-        if node_ids.is_empty() {
-            continue;
-        }
-
-        if *repository_id == base_repository.id {
-            // Process in base repository context
-            discard_nodes_for_repository(
-                base_repository.clone(),
-                state_staged.clone(),
-                node_ids.clone(),
-            )
-            .await?;
-        } else {
-            // Get linked state from link tracker
-            if let Some(linked_context) = link_tracker.find_link_context(*repository_id) {
-                let linked_repository = base_repository.to_link_context(*repository_id).await;
-
-                discard_nodes_for_repository(
-                    linked_repository,
-                    linked_context.link_state.clone(),
-                    node_ids.clone(),
-                )
-                .await?;
-            }
+async fn discard_nodes(discard: &Discards) -> Result<(), UnstageError> {
+    let discards = std::mem::take(&mut *discard.0.lock());
+    for ((repository, state), nodes) in discards {
+        lore_debug!(
+            "Discarding {} nodes in repository {}",
+            nodes.len(),
+            repository.id
+        );
+        for node_id in nodes {
+            state::node_discard_fused(state.clone(), repository.clone(), node_id)
+                .await
+                .forward::<UnstageError>("Failed to discard node")?;
         }
     }
-
-    Ok(())
-}
-
-async fn discard_nodes_for_repository(
-    repository: Arc<RepositoryContext>,
-    state: Arc<State>,
-    node_ids: Vec<u32>,
-) -> Result<(), UnstageError> {
-    lore_debug!(
-        "Discarding {} nodes in repository {}",
-        node_ids.len(),
-        repository.id
-    );
-
-    for node_id in node_ids.iter() {
-        lore_debug!("Discarding node {}", *node_id);
-
-        state::node_discard_fused(state.clone(), repository.clone(), *node_id)
-            .await
-            .forward::<UnstageError>("Failed to discard node")?;
-    }
-
     Ok(())
 }

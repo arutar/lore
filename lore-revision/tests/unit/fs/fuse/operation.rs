@@ -458,6 +458,33 @@ async fn mode_at(fs: &FuseFilesystem, at: &str) -> u32 {
     fs.getattr(&req(), ino).await.expect("getattr").attr.mode
 }
 
+/// Removing an empty directory answers not found where nothing stands at the path, and another
+/// error where the directory holds an entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_an_empty_directory_answers_not_found_where_nothing_stands() {
+    in_context(async {
+        let w = working(&[("dir/a.txt", b"alpha")]).await;
+        let op = operation_of(&w.fs);
+
+        let missing = op.remove_empty_directory(&path("none")).await;
+        let holding = op.remove_empty_directory(&path("dir")).await;
+
+        assert!(
+            missing
+                .as_ref()
+                .is_err_and(|error| error.is_file_not_found()),
+            "{missing:?}"
+        );
+        assert!(
+            holding
+                .as_ref()
+                .is_err_and(|error| !error.is_file_not_found()),
+            "{holding:?}"
+        );
+    })
+    .await;
+}
+
 /// Each instance write method changes the filesystem State and `write/` as the same request
 /// through the kernel does, and a remount keeps what it wrote.
 #[tokio::test(flavor = "multi_thread")]
@@ -1183,12 +1210,26 @@ fn operation_of(fs: &Arc<FuseFilesystem>) -> Arc<InstanceOperationImpl> {
     ))
 }
 
-/// Staging a name spelled in another case keeps the tree's spelling by renaming on the
-/// filesystem, which a mount refuses as read-only rather than as an internal failure.
+/// Staging a name the mount spells in another case than the tree keeps the tree's spelling by
+/// renaming on the filesystem, which a mount refuses as read-only rather than as an internal
+/// failure.
 #[tokio::test]
 async fn staging_a_case_change_on_a_mount_reports_read_only() {
     in_context(async {
         let m = mounted().await;
+        let served = m.fs.state();
+        let node_at = async |path: &str| {
+            served
+                .find_node_link(m.fixture.repository.clone(), path)
+                .await
+                .expect("a served path")
+                .node
+        };
+        let (dir, file) = (node_at("dir").await, node_at("dir/a.txt").await);
+        served
+            .node_reattach(m.fixture.repository.clone(), file, dir, "A.txt")
+            .await
+            .expect("the mount spells A.txt");
         let repository = Arc::new(
             RepositoryContext::new(
                 fuse_fixture::default_repository_creation_args(
@@ -2005,6 +2046,36 @@ async fn an_add_below_a_directory_the_walk_did_not_list_marks_the_node_holding_i
             held.is_dirty_modify(),
             "the node holding the name is marked modified, flags {:#x}",
             held.flags
+        );
+    })
+    .await;
+}
+
+/// An add the walk reports two directories below one it did not list in `from` lands under the
+/// directory `from` adds for its parent, where the working tree holds it.
+#[tokio::test]
+async fn an_add_deep_below_a_directory_the_walk_did_not_list_lands_under_its_parent() {
+    in_context(async {
+        let w = working(FIXTURE).await;
+        let new = mkdir(&w.fs, ROOT_INO, "new").await;
+        let sub = mkdir(&w.fs, new, "sub").await;
+        write_new(&w.fs, sub, "file.txt", b"file").await;
+        let from = State::deserialize(w.repository.clone(), w.current.revision())
+            .await
+            .expect("the revision loads");
+        let unlisted = NodeMapping {
+            repository: w.repository.clone(),
+            state: from.clone(),
+            path: path("new"),
+            node: lore_revision::node::INVALID_NODE,
+        };
+
+        w.diff_from(unlisted, "new", FilesystemDiffIntent::MarkDirty)
+            .await;
+
+        assert_eq!(
+            children_named(&w.repository, &from, "new/sub", "file.txt").await,
+            1
         );
     })
     .await;
@@ -4392,6 +4463,21 @@ async fn a_remount_keeps_a_link_that_local_changes_name() {
                 "listing {listed}: nothing changed"
             );
         }
+    })
+    .await;
+}
+
+/// The context a provider reads through writes its files through temporary files whatever the
+/// context it is built over writes, as a clone's does: a clone's in-place writes stay with it.
+#[tokio::test]
+async fn a_provider_reads_through_temporary_files_whatever_its_source_writes() {
+    in_context(async {
+        let mounted = mounted().await;
+        mounted.fixture.repository.set_write_in_place(true);
+
+        let provider = mounted.fs.provider_repository(&mounted.fixture.repository);
+
+        assert!(!lore_revision::immutable::read_options_from_repository(&provider).write_in_place);
     })
     .await;
 }

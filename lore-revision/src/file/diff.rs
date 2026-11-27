@@ -12,14 +12,12 @@ use crate::change::NodeChange;
 use crate::diff;
 use crate::errors::*;
 use crate::event;
-use crate::event::EventError;
 use crate::fs::filesystem_provider::InstanceOperation;
 use crate::fs::filesystem_provider::InstanceOperationImpl;
 use crate::fs::filesystem_provider::with_operation;
 use crate::immutable;
 use crate::immutable::read_options_from_repository;
 use crate::infer::infer_is_diffable_by_slice;
-use crate::interface::LoreError;
 use crate::interface::LoreFileAction;
 use crate::interface::LoreString;
 use crate::lore::execution_context;
@@ -43,6 +41,7 @@ pub const DEFAULT_CONTEXT_LINES: u32 = 3;
 
 #[error_set]
 pub enum DiffError {
+    Cancelled,
     LinkPinsDiverge,
     InvalidArguments,
     InvalidPath,
@@ -90,26 +89,11 @@ pub enum DiffError {
     MissingIdentity,
 }
 
-impl EventError for DiffError {
-    fn translated(&self) -> LoreError {
-        match self {
-            DiffError::InvalidArguments(_) | DiffError::InvalidPath(_) => {
-                LoreError::InvalidArguments
-            }
-            DiffError::RevisionNotFound(_) | DiffError::NotFound(_) => LoreError::NotFound,
-            DiffError::FileNotFound(_) => LoreError::FileNotFound,
-            _ => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
-}
-
 /// Data for the event carrying the diff of a single file.
 #[repr(C)]
-#[derive(Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFileDiffEventData {
     /// Path of the file.
@@ -1249,8 +1233,8 @@ async fn diff_read_file(
         }
     };
 
-    let node_link = state
-        .find_node_link(repository.clone(), relative_path.as_str())
+    let (node, (repository, state)) = state
+        .locate_node(repository.clone(), relative_path.as_str())
         .await
         .map_err(|err| {
             forward_refusal_or(err, "finding the file to diff", |_err| {
@@ -1258,19 +1242,11 @@ async fn diff_read_file(
                     resource: relative_path.to_string(),
                 })
             })
-        })?;
+        })?
+        .held((repository, state.clone()))
+        .into_parts();
 
-    let (repository, state) = if node_link.repository != repository.id {
-        let repository = repository.to_link_context(node_link.repository).await;
-        let state = state::State::deserialize(repository.clone(), node_link.revision)
-            .await
-            .forward::<DiffError>("Failed deserializing revision state")?;
-        (repository, state)
-    } else {
-        (repository, state.clone())
-    };
-
-    read_node_content(repository, &state, node_link.node, relative_path).await
+    read_node_content(repository, &state, node, relative_path).await
 }
 
 /// Read and classify the content of one file node in a revision.

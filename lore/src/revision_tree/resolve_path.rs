@@ -10,11 +10,9 @@ use lore_base::types::RepositoryId;
 use lore_error_set::prelude::*;
 use lore_macro::LoreArgs;
 use lore_revision::errors::StateErrors;
-use lore_revision::event::EventError;
 use lore_revision::event::LoreErrorCode;
 use lore_revision::event::LoreEvent;
 use lore_revision::event::revision_tree::LoreRevisionTreeResolvePathCompleteEventData;
-use lore_revision::interface::LoreError;
 use lore_revision::interface::LoreString;
 use lore_revision::node::INVALID_NODE;
 use lore_revision::node::NodeID;
@@ -28,7 +26,16 @@ use crate::revision_tree::handle::LoreRevisionTree;
 
 /// Arguments for `lore_revision_tree_resolve_path`.
 #[repr(C)]
-#[derive(Clone, Debug, Default, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(resolve_path_impl)]
 pub struct LoreRevisionTreeResolvePathArgs {
     /// Per-call correlation id echoed back in events
@@ -42,19 +49,6 @@ pub struct LoreRevisionTreeResolvePathArgs {
 #[error_set]
 enum ResolvePathError {
     InvalidArguments,
-}
-
-impl EventError for ResolvePathError {
-    fn translated(&self) -> LoreError {
-        match self {
-            ResolvePathError::InvalidArguments(_) => LoreError::InvalidArguments,
-            ResolvePathError::Internal(_) => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 fn emit_resolve_complete(
@@ -131,10 +125,11 @@ async fn resolve_path_impl(
             }
 
             match state
-                .find_node_link(internal.repository_context.clone(), path)
+                .locate_node(internal.repository_context.clone(), path)
                 .await
             {
-                Ok(link) => {
+                Ok(found) => {
+                    let link = found.identity();
                     emit_resolve_complete(
                         id,
                         link.node,
@@ -170,11 +165,11 @@ async fn resolve_path_impl(
                             INVALID_NODE,
                             RepositoryId::default(),
                             Hash::default(),
-                            LoreErrorCode::Internal,
+                            LoreErrorCode::from_ffi_code(error.ffi_code()),
                         );
                         Err(ResolvePathError::internal_with_context(
                             error,
-                            "State::find_node_link",
+                            "State::locate_node",
                         ))
                     }
                 }

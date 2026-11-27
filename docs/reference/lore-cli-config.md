@@ -53,7 +53,7 @@ The `[store]` table tunes the repository's local stores — the on-disk immutabl
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `max_capacity` | integer (fragments) | `2000000` | Maximum number of fragments in the local immutable store. Eviction removes the least recently used fragments to hold the store near 70% of it. The periodic eviction pass treats a value below `1048576` as `1048576`. |
-| `eviction_delay` | integer (seconds) | `30` | Interval between background eviction passes. The first pass runs one interval after the store opens. |
+| `eviction_delay` | integer (seconds) | `30` | Interval between background eviction passes. The first pass runs one interval after the store opens. Under `--no-background-flush` a pass evicts in memory and leaves its index writes to the end of the command. |
 | `max_size` | integer (bytes) | `10737418240` (10 GiB) | Maximum total size of the local immutable store's packfiles. Above it, compaction evicts the least recently used content toward 70% of it and rewrites packfiles to reclaim the space. |
 | `compaction_delay` | integer (seconds) | `50` | Interval before a background compaction pass starts from the beginning. A pass that an earlier command stopped after its first step resumes as soon as the store opens. |
 | `verify_write` | Boolean | unset (behaves as `false`) | Verify each write by reading the data back and rehashing it. |
@@ -65,7 +65,13 @@ An instance over a shared store collects to the shared store's limits, not these
 
 Eviction removes only content the remote also holds, which Lore fetches again when it's next read. Content held only locally, such as commits not yet pushed, counts toward both limits but is never evicted. Once it fills about 70% of a limit, eviction removes the remote content cached beside it. The store keeps its packfiles in 256 groups, and compaction rewrites a group's packfiles only once at least 10% of their bytes are no longer referenced.
 
-The **Default** column shows the value `lore repository create` and `lore clone` write into a freshly generated `config.toml`. A new repository's `[store]` table already contains every field but `verify_write` and `cache_payloads` at these values, so editing the file means changing values that are already present rather than adding missing ones.
+The **Default** column shows the value `lore repository create` and `lore clone` write into a freshly generated `config.toml`. `lore clone --max-capacity` and `--max-size` write the given limits in place of the defaults, except over a shared store or with `--no-tracking`, where the clone writes the defaults and warns that the options had no effect. A new repository's `[store]` table already contains every field but `verify_write` and `cache_payloads` at these values, so editing the file means changing values that are already present rather than adding missing ones.
+
+A clone puts about 2.8 fragments per file into the store. A clone that fetches more fragments than `max_capacity` evicts part way through, and each eviction pass writes the index buckets it changes while the clone writes its files. A `--max-capacity` above what the clone fetches keeps the store from evicting during the clone, and the instance keeps the larger store afterwards. In one measured clone of 1,162,160 files, the store kept 3,254,903 fragments, against 1.4 to 1.5 million under the default limit:
+
+- the instance's `.lore` directory took 771 MB, against 585 to 599 MB;
+- `lore repository gc` took 15 s and at most 0.7 GiB of memory and evicted nothing. Over the default instance, a first pass took 51 s to evict 154,575 fragments, and a second pass took 9 s and 0.3 GiB;
+- `lore status` took about 2 s on both.
 
 #### `verify_write`
 
@@ -77,9 +83,18 @@ The `[file]` table controls how the client writes files into the working tree. B
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `direct_write` | Boolean | `false` | Write to target files directly instead of writing a temporary file and moving it into place. Writes may not be atomic, so an error can leave a file in an inconsistent state. |
+| `direct_write` | Boolean | `false` | Write to target files directly instead of writing a temporary file and moving it into place, and on Windows write each file of one fragment past the file cache ([`direct_write` on Windows](#direct_write-on-windows)). Writes may not be atomic, so an error can leave a file in an inconsistent state. `lore clone` writes every file directly whatever this says. |
 | `flush_write` | Boolean | `false` | Flush file data to disk after each write. Parsed from the config but not currently wired to any write path, so setting it has no effect today. |
 
+#### `direct_write` on Windows
+
+On Windows, `direct_write` also writes each file of one fragment, at most 256 KiB, past the file cache: unbuffered, with `FILE_FLAG_NO_BUFFERING`, in one write. The data goes to the device as it is written, and the lazy writer has nothing left to write afterwards. A larger file is written through the file cache. A file that `lore_storage_get_file` writes sparse is written through the file cache. Where the volume refuses unbuffered writes, as a network share or an unusual sector size does, the file is written through the file cache, and the client logs a warning once per command, and again each time commands that run at the same time in one process, such as the Lore service, alternate.
+
+The cost is on the first read: a file written this way isn't in the file cache after the command, so its first read comes from the device. Measured on a Windows cloud VM with NTFS in a VHDX, reading about 22 GB of whole directories with eight readers right after a clone took 8.8 to 11.3 seconds from a clone written this way, against 6.3 to 7.2 seconds from one written through the file cache.
+
+`lore clone --direct-file-write` writes the clone's files of one fragment this way without setting this field. The new instance's `direct_write` stays `false`, and later commands such as `lore sync` follow it.
+
+On Linux and macOS, `direct_write` writes files in place through the file cache.
 ### `[sync]` table
 
 | Field | Type | Default | Description |

@@ -34,7 +34,8 @@ A review must run in a fresh session: a session or subagent that didn't write th
 8. Flag code that departs from an accepted ADR with no new ADR superseding it in the same change, a decision that is hard to reverse, or that establishes a pattern later code should follow, with no ADR recording it in the change or in a follow-up named in its description, and a superseded ADR whose `status` isn't updated.
 9. Check that every change to shipped behaviour, including server, auth, storage and data-structure changes, adds a note to `docs/release-notes/` with the right `type`, rather than an entry in `docs/release-notes.md`.
 10. In async code, check that a restructured loop, `select!`, or match keeps its error precedence, draining, and channel-close semantics.
-11. Report the findings as [Reporting findings](#reporting-findings) describes.
+11. In server-reachable code, check that a loop sized by the repository, its history or client input checks for cancellation, and that no check follows a write later steps depend on. Follow [Cancellation](async-futures.md#9-cancellation).
+12. Report the findings as [Reporting findings](#reporting-findings) describes.
 
 ## Irreversible changes
 
@@ -66,7 +67,9 @@ Flag:
 - A changed limit, budget, buffer or chunk size, flush point, channel capacity, batch size, or concurrency cap. State the new ceiling.
 - A whole-object read that replaces streaming, or has unbounded size.
 - One server call becoming several, or a call moved into a loop.
-- Blocking IO, compression, or hashing in `async` without `lore_spawn_blocking!`.
+- Work in the wrong place, by [Where work runs](tasks.md#where-work-runs): library file IO through `std::fs` or `tokio::fs` rather than `lore-io`, a blocking OS call made directly in `async`, or a network client built on the core runtime.
+- Anything other than a short blocking OS call sent to `lore_spawn_blocking!`, CPU work above all. The pool has a few threads for the whole process, so one long job there stalls every other blocking caller.
+- CPU work whose cost grows with its input and that runs without a cap on that input. A cap on bytes doesn't bound a diff or other super-linear algorithm; check that the cap covers what drives the time. Name the input and the fallback for an oversized one.
 - A lock held across `.await`.
 - Independent IO or server calls run in sequence that could run concurrently.
 - A value recomputed in a hot path, such as a hash, parse, or path join, that could be computed once.

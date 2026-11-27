@@ -33,6 +33,7 @@ use lore_base::version::LORE_LIBRARY_VERSION;
 use lore_revision::cluster::topology::Topology;
 use lore_revision::environment::EnvironmentConfig;
 use lore_revision::lock::LockStore;
+use lore_revision::lock::util::store_lock_batch_size;
 use lore_revision::notification::NotificationSender;
 use lore_revision::runtime::execution_context;
 use lore_revision::store::composite::CompositeStore;
@@ -83,6 +84,8 @@ use crate::grpc::GrpcTimeouts;
 use crate::grpc::forwarded_requests::ForwardedRequests;
 use crate::grpc::forwarded_requests::GrpcForwardedRequests;
 use crate::grpc::notification_service::NotificationService;
+use crate::grpc::revision::v1::branch_list::BranchListReads;
+use crate::grpc::revision::v1::service::RevisionServiceInstrumentProvider;
 use crate::hooks::HookDispatcher;
 use crate::hooks::HookRegistrationContext;
 use crate::hooks::HookRegistry;
@@ -131,6 +134,7 @@ use crate::store::resolve_plugin_config_with_fallback;
 use crate::telemetry::OtelTokioRuntimeMetrics;
 use crate::telemetry::ResourceDetectorProvider;
 use crate::telemetry::TelemetryInitializer;
+use crate::telemetry::register_io_pool_metrics;
 use crate::tls::load_client_tls;
 use crate::topology::configure_topology_with_registry;
 use crate::util::setup_execution;
@@ -464,6 +468,47 @@ pub fn compiled_features() -> Vec<String> {
     features
 }
 
+/// Narrow a configured batch limit to what the store behind it will actually take.
+///
+/// Whatever configuration asked for, a store that applies a request atomically only up to some size
+/// cannot be handed more than that. `0` is what the wire uses for "unset", so it reads as no
+/// configured limit rather than as a limit of nothing.
+fn narrow_to_store_limit(configured: &mut Option<usize>, limit: usize) {
+    let previous = configured.unwrap_or_default();
+
+    *configured = Some(if previous == 0 {
+        limit
+    } else {
+        limit.min(previous)
+    });
+}
+
+/// Narrow the batch limits `environment` advertises to what its stores take.
+///
+/// `query_limit`, when given, narrows the query limit. A lock store narrows the lock limit to
+/// [`store_lock_batch_size`] for it, including when the store names no limit of its own.
+#[lore_macro::test_pub]
+fn narrow_environment_to_stores(
+    environment: &mut EnvironmentConfig,
+    query_limit: Option<usize>,
+    lock_store: Option<&dyn LockStore>,
+) {
+    let lock_limit = lock_store.map(store_lock_batch_size);
+
+    if query_limit.is_none() && lock_limit.is_none() {
+        return;
+    }
+
+    let config = environment.config.get_or_insert_default();
+
+    if let Some(limit) = query_limit {
+        narrow_to_store_limit(&mut config.max_query_batch, limit);
+    }
+    if let Some(limit) = lock_limit {
+        narrow_to_store_limit(&mut config.max_lock_batch, limit);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn launch_grpc_server(
     immutable_store: Arc<dyn ImmutableStore>,
@@ -480,6 +525,7 @@ async fn launch_grpc_server(
     hook_dispatcher: Arc<HookDispatcher>,
     user_agent_filter: Arc<UserAgentFilter>,
     forwarded_requests: Option<Arc<dyn ForwardedRequests>>,
+    branch_list_reads: Arc<BranchListReads>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let grpc_settings = settings
@@ -521,21 +567,15 @@ async fn launch_grpc_server(
     let mut environment = settings.environment.clone().unwrap_or_default();
     let feature = settings.feature.clone().unwrap_or_default();
 
-    // Enforce store limits
-    if let Some(limit) = immutable_store.max_query_batch() {
-        let mut config = environment.config.unwrap_or_default();
-        let previous_limit = config.max_query_batch.unwrap_or_default();
-        config.max_query_batch = Some(if previous_limit == 0 || limit < previous_limit {
-            limit
-        } else {
-            previous_limit
-        });
-        environment.config = Some(config);
-    }
+    narrow_environment_to_stores(
+        &mut environment,
+        immutable_store.max_query_batch(),
+        lock_store.as_deref(),
+    );
 
     GrpcServerBuilder::new()
         .with_environment(environment)
-        .with_feature(feature)
+        .with_feature(feature, branch_list_reads)
         .with_immutable_store(immutable_store, local_store, local_tier)
         .with_mutable_store(mutable_store)
         .with_lock_store(lock_store)
@@ -632,6 +672,7 @@ async fn launch_grpc_internal_server(
     hook_dispatcher: Arc<HookDispatcher>,
     jwt_verifier: Option<JwtVerifier>,
     repository_authorizer: Arc<dyn RepositoryAuthorizer>,
+    branch_list_reads: Arc<BranchListReads>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let grpc_settings = settings
@@ -674,6 +715,7 @@ async fn launch_grpc_internal_server(
                 crate::grpc::revision::v1::branch_list::DEFAULT_BRANCH_LIST_CONCURRENCY,
                 crate::grpc::server::FeatureSettings::branch_list_concurrency,
             ),
+            branch_list_reads,
         )?
         .with_tls_config(cert_path, key_path, cert_chain_path)?
         .with_http2_config(
@@ -2027,6 +2069,9 @@ async fn async_main(settings: (Settings, StringHash), config: ServerConfig) -> R
     report_serving_runtime();
     observe_task_lifecycles();
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    crate::telemetry::observe_file_descriptors(&lore_telemetry::meter("lore.server"));
+
     let up_gauge = lore_telemetry::meter("urc.server")
         .u64_gauge("urc.server.up")
         .build();
@@ -2063,6 +2108,8 @@ async fn async_main(settings: (Settings, StringHash), config: ServerConfig) -> R
             }
         }));
     }
+
+    register_io_pool_metrics(&lore_telemetry::meter("lore.io.pool"));
 
     if let Some(mode) = settings
         .environment
@@ -2326,6 +2373,14 @@ async fn async_main(settings: (Settings, StringHash), config: ServerConfig) -> R
             .expect("Failed to create hooks from configuration");
 
         let hook_dispatcher = Arc::new(HookDispatcher::from_hooks_default(enabled_hooks));
+        // One for the process, so that direct and forwarded calls share reads.
+        let branch_list_reads = BranchListReads::new(
+            settings.feature.as_ref().map_or(
+                crate::grpc::revision::v1::branch_list::DEFAULT_BRANCH_LIST_SHARE_WINDOW,
+                crate::grpc::server::FeatureSettings::branch_list_share_window,
+            ),
+            &RevisionServiceInstrumentProvider,
+        )?;
 
         lore_spawn!(endpoints, {
             let immutable_store = immutable_store.clone();
@@ -2338,6 +2393,7 @@ async fn async_main(settings: (Settings, StringHash), config: ServerConfig) -> R
             let notification = notification.clone();
             let user_agent_filter = user_agent_filter.clone();
             let forwarded_requests = forwarded_requests.clone();
+            let branch_list_reads = branch_list_reads.clone();
             let shutdown_rx = _shutdown_rx.clone();
 
             let local_immutable_store = local_store().unwrap_or_else(|| {
@@ -2360,6 +2416,7 @@ async fn async_main(settings: (Settings, StringHash), config: ServerConfig) -> R
                 hook_dispatcher.clone(),
                 user_agent_filter,
                 forwarded_requests,
+                branch_list_reads,
                 shutdown_rx,
             )
         });
@@ -2389,6 +2446,7 @@ async fn async_main(settings: (Settings, StringHash), config: ServerConfig) -> R
                 let hook_dispatcher = hook_dispatcher.clone();
                 let jwt_verifier = jwt_verifier.clone();
                 let repository_authorizer = repository_authorizer.clone();
+                let branch_list_reads = branch_list_reads.clone();
                 let shutdown_rx = _shutdown_rx.clone();
                 launch_grpc_internal_server(
                     settings,
@@ -2400,6 +2458,7 @@ async fn async_main(settings: (Settings, StringHash), config: ServerConfig) -> R
                     hook_dispatcher,
                     jwt_verifier,
                     repository_authorizer,
+                    branch_list_reads,
                     shutdown_rx,
                 )
             });

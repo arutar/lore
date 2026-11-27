@@ -11,11 +11,9 @@ use std::sync::atomic::fence;
 use lore_base::error::InvalidArguments;
 use lore_error_set::prelude::*;
 use lore_macro::LoreArgs;
-use lore_revision::event::EventError;
 use lore_revision::event::LoreErrorCode;
 use lore_revision::event::LoreEvent;
 use lore_revision::event::revision_tree::LoreRevisionTreeCloseCompleteEventData;
-use lore_revision::interface::LoreError;
 use lore_revision::lore::execution_context;
 use lore_storage::FlushOptions;
 use lore_storage::StorageError;
@@ -33,7 +31,17 @@ use crate::storage::store::StoreInternal;
 
 /// Arguments for `lore_revision_tree_close`.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(close_impl)]
 pub struct LoreRevisionTreeCloseArgs {
     /// Per-call correlation id echoed back in events
@@ -48,19 +56,6 @@ pub struct LoreRevisionTreeCloseArgs {
 #[error_set]
 enum CloseError {
     InvalidArguments,
-}
-
-impl EventError for CloseError {
-    fn translated(&self) -> LoreError {
-        match self {
-            CloseError::InvalidArguments(_) => LoreError::InvalidArguments,
-            CloseError::Internal(_) => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 /// Release a memory-based revision tree handle.
@@ -94,7 +89,7 @@ fn close_impl(
         let closed = close_tree(args.handle, args.skip_flush != 0).await;
         LoreEvent::RevisionTreeCloseComplete(LoreRevisionTreeCloseCompleteEventData {
             id: args.id,
-            error_code: close_error_code(&closed),
+            error_code: LoreErrorCode::of(&closed),
         })
         .send();
         closed
@@ -149,13 +144,4 @@ pub(crate) fn spawn_flush_after_storage_close(
         return None;
     }
     Some(spawn_flush(store, claims_for_flush(store), options()))
-}
-
-/// The code `LORE_EVENT_REVISION_TREE_CLOSE_COMPLETE` reports for a finished close.
-fn close_error_code(closed: &Result<(), CloseError>) -> LoreErrorCode {
-    match closed {
-        Ok(()) => LoreErrorCode::None,
-        Err(CloseError::InvalidArguments(_)) => LoreErrorCode::InvalidArguments,
-        Err(CloseError::Internal(_)) => LoreErrorCode::Internal,
-    }
 }

@@ -2265,6 +2265,10 @@ impl lore_storage::MutableStore for FailingMutableStore {
         lore_storage::MutableStore::hold_for_command(self.inner.clone()).await
     }
 
+    fn stored_typed_key(&self, key: Hash, key_type: lore_storage::KeyType) -> Hash {
+        self.inner.stored_typed_key(key, key_type)
+    }
+
     async fn load(
         self: Arc<Self>,
         partition: lore_storage::Partition,
@@ -2310,8 +2314,12 @@ impl lore_storage::MutableStore for FailingMutableStore {
         self: Arc<Self>,
         partition: lore_storage::Partition,
         key_type: lore_storage::KeyType,
+        consistency: lore_storage::ReadConsistency,
     ) -> Result<lore_storage::KeyValueStream, lore_storage::StoreError> {
-        self.inner.clone().list(partition, key_type).await
+        self.inner
+            .clone()
+            .list(partition, key_type, consistency)
+            .await
     }
 
     async fn flush(self: Arc<Self>, options: FlushOptions) -> Result<(), lore_storage::StoreError> {
@@ -3683,7 +3691,9 @@ mod by_skipped_number {
     /// reads as missing on a server, where no remote is in reach. A walk
     /// that needs it fails the request as internal, and one that does not
     /// answers the page: never `NotFound` or another page.
-    #[tokio::test]
+    ///
+    /// The clock is paused, so the store's back-off between retries passes at once.
+    #[tokio::test(start_paused = true)]
     async fn a_state_the_store_slows_down_for_fails_only_the_walk_that_needs_it() {
         let slowed = |line: &Line, number: u64| -> Arc<dyn lore_storage::ImmutableStore> {
             let slowed = line.line[&number];
@@ -4173,6 +4183,197 @@ mod by_skipped_number {
                 assert_eq!(line.pointer_of(parent, 300).await, None);
             },
         )
+        .await;
+    }
+}
+
+/// A lookup by number with no acceleration data walks down the line from the
+/// branch's latest revision, and a cancelled request stops that walk.
+#[tokio::test]
+async fn cancelled_identifier_lookup_answers_cancelled() {
+    let repository = random::<RepositoryId>();
+    let (immutable_store, mutable_store, execution) =
+        test_store_create().await.expect("Failed to create stores");
+
+    Box::pin(LORE_CONTEXT.scope(execution, async move {
+        let repository_context = Arc::new(RepositoryContext::new_server_context(
+            immutable_store.clone(),
+            mutable_store.clone(),
+            repository,
+            allow_all_repositories(),
+        ));
+        let (branch_id, _) = create_branch_with_history(&repository_context, 3).await;
+
+        let cancellation = lore_revision::runtime::Cancellation::new();
+        cancellation.cancel();
+        let status = lore_server::util::core_hop::with_request_cancellation(
+            cancellation,
+            handler(
+                make_request_identifier(repository, branch_id, 2),
+                immutable_store,
+                mutable_store,
+                DEFAULT_HISTORY_STEP_SIZE,
+                lore_server::grpc::server::RevisionListAcceleration {
+                    step_keys: false,
+                    list_cache: false,
+                },
+                &make_instruments(),
+            ),
+        )
+        .await
+        .expect_err("a cancelled lookup returns no page");
+        assert_eq!(status.code(), tonic::Code::Cancelled, "{status:?}");
+    }))
+    .await;
+}
+
+/// An execution whose request has been cancelled.
+fn cancelled_execution() -> Arc<lore_revision::interface::ExecutionContext> {
+    let cancellation = lore_revision::runtime::Cancellation::new();
+    cancellation.cancel();
+    Arc::new(
+        lore_revision::interface::ExecutionContext::new_server(
+            lore_revision::interface::LoreGlobalArgs::default(),
+            lore_revision::relay::EventDispatcher::no_dispatch(),
+            String::default(),
+        )
+        .with_cancellation(cancellation),
+    )
+}
+
+mod accelerated_start {
+    use lore_server::grpc::revision::v1::branch_lineage::HistoryOwner;
+    use lore_server::grpc::server::RevisionListAcceleration;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_cancelled_descent_from_a_step_pointer_answers_cancelled() {
+        let repository = random::<RepositoryId>();
+        let (immutable_store, mutable_store, execution) =
+            test_store_create().await.expect("Failed to create stores");
+
+        Box::pin(LORE_CONTEXT.scope(execution, async move {
+            let repository_context = Arc::new(RepositoryContext::new_server_context(
+                immutable_store,
+                mutable_store,
+                repository,
+                allow_all_repositories(),
+            ));
+            let (branch_id, _) = create_branch_with_history(&repository_context, 250).await;
+
+            // The pointer at boundary 100 names revision 100, above 50, so the
+            // line is walked down from it.
+            let Err(status) = LORE_CONTEXT
+                .scope(
+                    cancelled_execution(),
+                    accelerated_start(
+                        &repository_context,
+                        &HistoryOwner::requested(branch_id),
+                        50,
+                        DEFAULT_HISTORY_STEP_SIZE,
+                        RevisionListAcceleration {
+                            step_keys: true,
+                            list_cache: false,
+                        },
+                    ),
+                )
+                .await
+            else {
+                panic!("a cancelled descent is not a miss");
+            };
+            assert_eq!(status.code(), tonic::Code::Cancelled, "{status:?}");
+        }))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_request_skips_the_backfill_and_answers_cancelled() {
+        let repository = random::<RepositoryId>();
+        let (immutable_store, mutable_store, execution) =
+            test_store_create().await.expect("Failed to create stores");
+
+        Box::pin(LORE_CONTEXT.scope(execution, async move {
+            let repository_context = Arc::new(RepositoryContext::new_server_context(
+                immutable_store,
+                mutable_store.clone(),
+                repository,
+                allow_all_repositories(),
+            ));
+            let (branch_id, _) = create_branch_with_history(&repository_context, 250).await;
+
+            // Storing zero deletes the cached segment, leaving a backfill to rebuild it.
+            let (key, key_type) = branch::revision_list_step_key(
+                lore_revision::repository::SALT_LORE,
+                repository,
+                branch_id,
+                100,
+                DEFAULT_HISTORY_STEP_SIZE,
+            );
+            mutable_store
+                .clone()
+                .store(repository, key, Hash::default(), key_type)
+                .await
+                .expect("evict cache entry");
+
+            let Err(status) = LORE_CONTEXT
+                .scope(
+                    cancelled_execution(),
+                    accelerated_start(
+                        &repository_context,
+                        &HistoryOwner::requested(branch_id),
+                        50,
+                        DEFAULT_HISTORY_STEP_SIZE,
+                        RevisionListAcceleration {
+                            step_keys: false,
+                            list_cache: true,
+                        },
+                    ),
+                )
+                .await
+            else {
+                panic!("a cancelled backfill is not a miss");
+            };
+            assert_eq!(status.code(), tonic::Code::Cancelled, "{status:?}");
+        }))
+        .await;
+    }
+}
+
+mod forward_descent {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_cancelled_descent_answers_cancelled() {
+        let repository = random::<RepositoryId>();
+        let (immutable_store, mutable_store, execution) =
+            test_store_create().await.expect("Failed to create stores");
+
+        Box::pin(LORE_CONTEXT.scope(execution, async move {
+            let repository_context = Arc::new(RepositoryContext::new_server_context(
+                immutable_store,
+                mutable_store,
+                repository,
+                allow_all_repositories(),
+            ));
+            let (branch_id, signatures) = create_branch_with_history(&repository_context, 3).await;
+
+            let status = LORE_CONTEXT
+                .scope(
+                    cancelled_execution(),
+                    forward_descent(
+                        &repository_context,
+                        branch_id,
+                        signatures[0],
+                        1,
+                        DEFAULT_HISTORY_STEP_SIZE,
+                        false,
+                    ),
+                )
+                .await
+                .expect_err("a cancelled descent finds no successor");
+            assert_eq!(status.code(), tonic::Code::Cancelled, "{status:?}");
+        }))
         .await;
     }
 }

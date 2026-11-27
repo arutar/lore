@@ -12,6 +12,8 @@ pub mod dump;
 pub mod info;
 pub mod list;
 pub mod prefetch;
+pub mod reference;
+pub mod rename;
 pub mod status;
 pub mod store;
 pub mod verify;
@@ -49,7 +51,6 @@ use crate::branch;
 use crate::branch::BranchLatestStatus;
 use crate::errors::*;
 use crate::event;
-use crate::event::EventError;
 use crate::filter;
 use crate::filter::Filter;
 use crate::find;
@@ -64,7 +65,6 @@ use crate::global::external_dir::resolve::resolve;
 use crate::hash;
 use crate::instance::InstanceId;
 use crate::interface::LoreBranchLocation;
-use crate::interface::LoreError;
 use crate::interface::LoreGlobalArgs;
 use crate::interface::LoreString;
 use crate::layer;
@@ -90,6 +90,7 @@ use crate::state::allow_all_repositories;
 use crate::store::ImmutableStore;
 use crate::store::KeyType;
 use crate::store::MutableStore;
+use crate::store::ReadConsistency;
 use crate::store::immutable::ImmutableStoreCreateOptions;
 use crate::store::immutable::ImmutableStoreSettings;
 use crate::util;
@@ -99,7 +100,7 @@ use crate::util::path::make_absolute;
 
 /// Details of the branch involved in a branch switch.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchSwitchData {
     /// Branch identifier.
@@ -138,7 +139,7 @@ impl LoreBranchSwitchData {
 
 /// Data for the event emitted when a branch switch starts.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchSwitchBeginEventData {
     /// Details of the branch being switched to.
@@ -147,7 +148,7 @@ pub struct LoreBranchSwitchBeginEventData {
 
 /// Data for the event emitted when a branch switch finishes.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchSwitchEndEventData {
     /// Details of the branch that was switched to.
@@ -156,7 +157,7 @@ pub struct LoreBranchSwitchEndEventData {
 
 /// Data for the event emitted when a repository dump starts.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRepositoryDumpBeginEventData {
     /// Repository identifier.
@@ -167,7 +168,9 @@ pub struct LoreRepositoryDumpBeginEventData {
 
 /// Data for the event emitted when a repository dump finishes.
 #[repr(C)]
-#[derive(Clone, Default, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, Default, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRepositoryDumpEndEventData {
     /// Placeholder field. The event carries no data.
@@ -176,7 +179,7 @@ pub struct LoreRepositoryDumpEndEventData {
 
 /// Data for the event emitted when a repository configuration value is read.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRepositoryConfigGetEventData {
     /// Configuration key.
@@ -260,6 +263,17 @@ impl StoreConfig {
             verify_write: None,
             cache_payloads: None,
         }
+    }
+
+    /// [`Self::client_default`], with `max_capacity` fragments and `max_size` bytes in place of the
+    /// default limits where they are not 0.
+    pub fn client_default_with_limits(max_capacity: u64, max_size: u64) -> Self {
+        StoreConfig {
+            max_capacity: (max_capacity != 0).then_some(max_capacity as usize),
+            max_size: (max_size != 0).then_some(max_size as usize),
+            ..StoreConfig::default()
+        }
+        .with_default_limits()
     }
 
     /// This config, with the limits and delays it leaves out taken from [`Self::client_default`].
@@ -393,7 +407,17 @@ pub struct SharedStoreToUseConfig {
 /// `use_shared_store_automatically` setting, as callers have always relied on. `Disabled` exists
 /// because that inherited setting is otherwise unconditional: without it, a caller on a machine
 /// that opts in automatically has no way to ask for a repository backed by its own store.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Debug,
+    Default,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 pub enum LoreSharedStoreMode {
     /// Follow the machine's `use_shared_store_automatically` global setting.
     #[default]
@@ -460,6 +484,8 @@ pub struct RepositoryRuntimeSettings {
     pub disable_cache: AtomicBool,
     /// Write directly to target file instead of write to temporary file + move
     pub direct_file_write: AtomicBool,
+    /// Write every file at its own path, with no temporary file, whatever `direct_file_write` says
+    pub write_in_place: AtomicBool,
     /// Prefetch a sync target's tree in bulk, from `[sync] prefetch_tree`
     pub prefetch_tree: AtomicBool,
 }
@@ -470,6 +496,7 @@ impl Default for RepositoryRuntimeSettings {
             disable_upload: AtomicBool::new(true),
             disable_cache: AtomicBool::new(true),
             direct_file_write: AtomicBool::new(false),
+            write_in_place: AtomicBool::new(false),
             prefetch_tree: AtomicBool::new(false),
         }
     }
@@ -481,6 +508,7 @@ impl Clone for RepositoryRuntimeSettings {
             disable_upload: AtomicBool::new(self.disable_upload.load(Ordering::Relaxed)),
             disable_cache: AtomicBool::new(self.disable_cache.load(Ordering::Relaxed)),
             direct_file_write: AtomicBool::new(self.direct_file_write.load(Ordering::Relaxed)),
+            write_in_place: AtomicBool::new(self.write_in_place.load(Ordering::Relaxed)),
             prefetch_tree: AtomicBool::new(self.prefetch_tree.load(Ordering::Relaxed)),
         }
     }
@@ -496,6 +524,10 @@ impl Clone for RepositoryRuntimeSettings {
         );
         self.direct_file_write.store(
             source.direct_file_write.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.write_in_place.store(
+            source.write_in_place.load(Ordering::Relaxed),
             Ordering::Relaxed,
         );
         self.prefetch_tree.store(
@@ -762,6 +794,11 @@ pub struct RepositoryContext {
     /// using. Shared, as the holder is, with the contexts derived from this one and with
     /// the flush this context spawns when its command ends.
     own_stores: Option<Arc<lore_storage::local::store_lock::StoreHold>>,
+    /// The hold on the immutable store's background index writes, for a command that leaves them
+    /// until it ends ([`crate::interface::LoreGlobalArgs::no_background_flush`]). Shared, as
+    /// [`Self::own_stores`] is, with the contexts derived from this one and with the flush this
+    /// context spawns when its command ends, which drops it once the stores are flushed.
+    background_flush: Option<Arc<lore_storage::local::immutable_store::BackgroundFlushHold>>,
     /// The storage session pool this repository's reads and writes take sessions from,
     /// resolved on first use, and resolved again for a call under another correlation id or
     /// once the pool is stale, as after a reconnect rotated the server's session map.
@@ -920,6 +957,7 @@ impl RepositoryContext {
             repo_lock: None,
             memory_records: None,
             own_stores: None,
+            background_flush: None,
             session_pool: Default::default(),
             holds_its_sessions: false,
             endpoint: None,
@@ -956,6 +994,7 @@ impl RepositoryContext {
             repo_lock: self.repo_lock.clone(),
             memory_records: self.memory_records.clone(),
             own_stores: self.own_stores.clone(),
+            background_flush: self.background_flush.clone(),
             session_pool: Default::default(),
             holds_its_sessions: self.holds_its_sessions,
             endpoint: self.endpoint.clone(),
@@ -1115,6 +1154,21 @@ impl RepositoryContext {
         stores: lore_storage::local::store_lock::StoreHold,
     ) -> Self {
         self.own_stores = (!stores.is_empty()).then(|| Arc::new(stores));
+        self
+    }
+
+    /// This context holding back its immutable store's background index writes where `hold` is
+    /// set, see [`Self::background_flush`].
+    #[must_use]
+    #[lore_macro::test_pub]
+    pub(crate) fn holding_background_flush(mut self, hold: bool) -> Self {
+        if hold {
+            self.background_flush = self
+                .immutable_store
+                .clone()
+                .hold_background_flush()
+                .map(Arc::new);
+        }
         self
     }
 
@@ -1340,6 +1394,7 @@ impl RepositoryContext {
             .then(|| self.write_token.as_ref().map(RepositoryWriteToken::share))
             .flatten();
         let own_stores = self.own_stores.clone();
+        let background_flush = self.background_flush.clone();
         lore_base::runtime::LORE_CONTEXT.sync_scope(
             Arc::new(crate::interface::ExecutionContext::default())
                 as Arc<dyn std::any::Any + Send + Sync>,
@@ -1365,6 +1420,7 @@ impl RepositoryContext {
                     // The repository flock first, then the store claims it was taken inside.
                     drop(repo_lock);
                     drop(own_stores);
+                    drop(background_flush);
                 });
             },
         );
@@ -1474,6 +1530,7 @@ impl RepositoryContext {
             repo_lock: None,
             memory_records: None,
             own_stores: None,
+            background_flush: None,
             session_pool: Default::default(),
             holds_its_sessions: false,
             endpoint: None,
@@ -1494,6 +1551,7 @@ impl RepositoryContext {
             write_token: Some(RepositoryWriteToken::server(&INTERNAL_SERVER_CONTEXT)),
             repo_lock: None,
             own_stores: None,
+            background_flush: None,
             ..self.inherited()
         }
     }
@@ -1521,6 +1579,7 @@ impl RepositoryContext {
             write_token: None,
             repo_lock: None,
             own_stores: None,
+            background_flush: None,
             file_system: crate::fs::invalid_filesystem_provider::InvalidFilesystemProvider::new(),
             ..self.inherited()
         }
@@ -1650,6 +1709,18 @@ impl RepositoryContext {
             .store(direct, Ordering::Relaxed);
     }
 
+    /// See [`RepositoryRuntimeSettings::write_in_place`].
+    pub fn write_in_place(&self) -> bool {
+        self.settings.write_in_place.load(Ordering::Relaxed)
+    }
+
+    /// See [`RepositoryRuntimeSettings::write_in_place`].
+    pub fn set_write_in_place(&self, in_place: bool) {
+        self.settings
+            .write_in_place
+            .store(in_place, Ordering::Relaxed);
+    }
+
     pub fn prefetch_tree(&self) -> bool {
         self.settings.prefetch_tree.load(Ordering::Relaxed)
     }
@@ -1679,6 +1750,34 @@ impl RepositoryContext {
                 .await;
         }
         Ok(())
+    }
+
+    /// Flushes as [`Self::flush`] does where this context holds back its stores' background index
+    /// writes ([`Self::background_flush`]), for a command that writes them before it reports its
+    /// result, and does nothing otherwise.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError`] from the flush.
+    pub async fn flush_held_back(
+        &self,
+        options: lore_storage::FlushOptions,
+    ) -> Result<(), RepositoryError> {
+        if self.background_flush.is_none() {
+            return Ok(());
+        }
+        self.flush(options).await
+    }
+
+    /// Flushes as [`Self::flush_held_back`] does for a command that failed, whose error is its
+    /// outcome, and logs a failure of the flush as a warning.
+    pub async fn flush_held_back_after_failure(&self, options: lore_storage::FlushOptions) {
+        if let Err(err) = self.flush_held_back(options).await {
+            lore_warn!(
+                "Failed to flush repository {} after a failed command: {err}",
+                self.id
+            );
+        }
     }
 
     /// Returns the remote connection, awaiting the pending connect task on first call.
@@ -1844,6 +1943,7 @@ impl RepositoryContext {
 
 #[error_set]
 pub enum RepositoryError {
+    Cancelled,
     LinkPinsDiverge,
     RepositoryAlreadyExists,
     RepositoryNotFound,
@@ -1889,36 +1989,6 @@ pub enum RepositoryError {
     MaxHistorySearchDepth,
     NotConnected,
     MissingIdentity,
-}
-
-impl EventError for RepositoryError {
-    fn translated(&self) -> LoreError {
-        match self {
-            RepositoryError::Disconnected(_) => LoreError::Connection,
-            RepositoryError::SlowDown(_) => LoreError::SlowDown,
-            RepositoryError::Oversized(_) => LoreError::Oversized,
-            RepositoryError::FileNotFound(_) => LoreError::FileNotFound,
-            RepositoryError::NotFound(_)
-            | RepositoryError::RepositoryNotFound(_)
-            | RepositoryError::BranchNotFound(_)
-            | RepositoryError::RevisionNotFound(_)
-            | RepositoryError::LayerNotFound(_)
-            | RepositoryError::LinkNotFound(_)
-            | RepositoryError::NodeNotFound(_) => LoreError::NotFound,
-            RepositoryError::AddressNotFound(_) => LoreError::AddressNotFound,
-            RepositoryError::PayloadNotFound(_) => LoreError::PayloadNotFound,
-            RepositoryError::InvalidPath(_) | RepositoryError::InvalidArguments(_) => {
-                LoreError::InvalidArguments
-            }
-            RepositoryError::RepositoryAlreadyExists(_)
-            | RepositoryError::BranchAlreadyExists(_) => LoreError::AlreadyExists,
-            _ => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2150,21 +2220,14 @@ fn dot_lore_path(
 /// that require a reachable remote — clone, delete, info, link — pass `false` so a
 /// missing host is an error rather than a silently local repository.
 pub fn parse_url(url: &str, allow_no_remote: bool) -> Result<(String, String), RepositoryError> {
-    let url = if url.contains("://") {
-        url::Url::parse(url).internal("Invalid URL")?
-    } else {
-        // No scheme means no host to find, so the whole argument is the name. That
-        // includes a slash-separated one such as `org/project`, which `is_valid_name`
-        // supports: reading the first segment as a host would both truncate the name and
-        // record a remote the caller never configured. Naming a remote takes a scheme.
-        if allow_no_remote {
-            return Ok((String::default(), url.to_string()));
-        }
-        let mut protocol_url = lore_transport::DEFAULT_PROTOCOL.to_string();
-        protocol_url.push_str("://");
-        protocol_url.push_str(url);
-        url::Url::parse(protocol_url.as_str()).internal("Invalid URL")?
-    };
+    // No scheme means no host to find, so the whole argument is the name. That
+    // includes a slash-separated one such as `org/project`, which `is_valid_name`
+    // supports: reading the first segment as a host would both truncate the name and
+    // record a remote the caller never configured. Naming a remote takes a scheme.
+    if allow_no_remote && !url.contains("://") {
+        return Ok((String::default(), url.to_string()));
+    }
+    let url = lore_transport::parse_remote_url(url).internal("Invalid URL")?;
     let protocol = url.scheme();
     let host = url
         .host_str()
@@ -3801,7 +3864,9 @@ async fn open_repository(
         Some((lock, stores)) => repository.with_repository_lock(lock, stores),
         None => repository,
     };
-    let repository = repository.with_memory_records(memory_records);
+    let repository = repository
+        .with_memory_records(memory_records)
+        .holding_background_flush(global.no_background_flush());
     let repository = match write_token {
         Some(token) => repository.with_write_token(token),
         None => repository,
@@ -5226,7 +5291,11 @@ pub async fn list_local(
 ) -> Result<impl tokio_stream::Stream<Item = Context>, RepositoryError> {
     let stream = repository
         .read_mutable_store()
-        .list(RepositoryId::default(), KeyType::RepositoryId)
+        .list(
+            RepositoryId::default(),
+            KeyType::RepositoryId,
+            ReadConsistency::Strong,
+        )
         .await
         .forward::<RepositoryError>("Failed to store repository metadata")?;
 
@@ -5367,6 +5436,128 @@ pub async fn delete_name_to_id(
         .store(RepositoryId::default(), key, Hash::default(), key_type)
         .await
         .forward::<RepositoryError>("Failed to store repository metadata")
+}
+
+/// The outcome of [`bind_name_to_id`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameBind {
+    /// The name was unbound, and the call bound it to the ID.
+    Bound,
+    /// The name already mapped to the ID, and is left as it is.
+    AlreadyBound,
+    /// The name maps to this other ID, and is left as it is.
+    HeldByOther(RepositoryId),
+}
+
+/// Binds `name` to `id` with a compare-and-swap of the name's mapping, only when the name is
+/// unbound or already bound to `id`. A zero `id` fails with [`InvalidArguments`].
+pub async fn bind_name_to_id(
+    repository: Arc<RepositoryContext>,
+    name: impl AsRef<str>,
+    id: RepositoryId,
+) -> Result<NameBind, RepositoryError> {
+    if id.is_zero() {
+        return Err(RepositoryError::from(InvalidArguments {
+            reason: format!(
+                "the repository id binding the name {} is zero",
+                name.as_ref()
+            ),
+        }));
+    }
+    let value = Hash::from_context(id.into());
+    let held = swap_name_to_id(repository, name.as_ref(), Hash::default(), value).await?;
+    Ok(if held.is_zero() {
+        NameBind::Bound
+    } else if held == value {
+        NameBind::AlreadyBound
+    } else {
+        NameBind::HeldByOther(RepositoryId::from(held.to_context()))
+    })
+}
+
+/// Clears the mapping of `name` with a compare-and-swap, only when it still maps to `id`. A
+/// mapping to another ID, or none, is left as it is.
+pub async fn unbind_name_to_id(
+    repository: Arc<RepositoryContext>,
+    name: impl AsRef<str>,
+    id: RepositoryId,
+) -> Result<(), RepositoryError> {
+    let expected = Hash::from_context(id.into());
+    swap_name_to_id(repository, name.as_ref(), expected, Hash::default()).await?;
+    Ok(())
+}
+
+/// Swaps the mapping of `name` from `expected` to `value`, answering the value the mapping held.
+/// An unbound name holds zero.
+async fn swap_name_to_id(
+    repository: Arc<RepositoryContext>,
+    name: &str,
+    expected: Hash,
+    value: Hash,
+) -> Result<Hash, RepositoryError> {
+    let (key, key_type) = mutable_name_key(repository.salt(), ID, name);
+    let handle = repository
+        .try_write_mutable_store()
+        .ok_or_else(|| RepositoryError::from(WriteRequired))?;
+    handle
+        .compare_and_swap(RepositoryId::default(), key, expected, value, key_type)
+        .await
+        .forward_with::<RepositoryError, _>(|| format!("swapping the id of repository name {name}"))
+}
+
+/// The outcome of [`metadata_set_name`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetadataSwap {
+    /// The repository's metadata pointer refers to this blob, the copy with the new name.
+    Updated(Hash),
+    /// The metadata pointer held `current`, neither the expected hash nor the copy, and is left as
+    /// it is. A zero `current` means the repository has no metadata. Another key, or the name, may
+    /// have changed: the name in the blob `current` names tells which.
+    Lost { current: Hash },
+}
+
+/// Writes a copy of the metadata blob `expected` with `name` as its name and every other key
+/// kept, and swaps the repository's metadata pointer from `expected` to the copy. A pointer that
+/// already refers to the copy counts as updated. A zero `expected` fails with
+/// [`RepositoryNotFound`], and a copy larger than the metadata size limit with [`Oversized`].
+pub async fn metadata_set_name(
+    repository: Arc<RepositoryContext>,
+    expected: Hash,
+    name: impl AsRef<str>,
+) -> Result<MetadataSwap, RepositoryError> {
+    if expected.is_zero() {
+        return Err(RepositoryError::from(RepositoryNotFound {
+            repository: repository.id.to_string(),
+        }));
+    }
+    let handle = repository
+        .try_write_mutable_store()
+        .ok_or_else(|| RepositoryError::from(WriteRequired))?;
+    let updated = {
+        let mut metadata =
+            Metadata::deserialize(repository.clone(), expected)
+                .await
+                .forward::<RepositoryError>("reading the repository metadata to rename")?;
+        metadata
+            .set_string(NAME, name.as_ref())
+            .forward::<RepositoryError>("setting the repository name")?;
+        let options = crate::immutable::write_options_from_repository(repository.clone())
+            .with_local_cache_priority();
+        metadata
+            .serialize_borrowed(repository.clone(), options)
+            .await
+            .forward::<RepositoryError>("writing the renamed repository metadata")?
+    };
+    let (key, key_type) = mutable_key(repository.salt(), METADATA, repository.id);
+    let current = handle
+        .compare_and_swap(repository.id, key, expected, updated, key_type)
+        .await
+        .forward::<RepositoryError>("swapping the repository metadata pointer")?;
+    if current == expected || current == updated {
+        Ok(MetadataSwap::Updated(updated))
+    } else {
+        Ok(MetadataSwap::Lost { current })
+    }
 }
 
 pub async fn id_from_name(

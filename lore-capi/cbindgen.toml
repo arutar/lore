@@ -23,9 +23,10 @@ header = '''// LORE C API
 //
 // Return values
 //
-// An operation function returns 0 on success and a non-zero value on error.
-// For a function that takes a callback, the error event passed to the callback
-// gives more information.
+// An operation function returns 0 on success and the error's code, a
+// lore_error_code_t value, on failure. For a function that takes a callback, the
+// Complete event carries the same code in status, and the error's message and
+// trace in error.
 //
 // Strings
 //
@@ -79,10 +80,12 @@ documentation_style = "c99"
 # filter verdict down as it descends, and so the filter tests can build one.
 # `FileInfo` is public so the walk and the stage path can pass what a path
 # measured. `FlushOptions` is how a store's flush is asked to write, which a C
-# caller sets through the `sync_data` and `fast_flush` globals. All four are
-# Rust-side only -- no C entry point takes or returns them -- so cbindgen would
-# otherwise emit opaque typedefs no caller can use.
-exclude = ["FileInfo", "FilterState", "FilterStates", "FlushOptions"]
+# caller sets through the `sync_data` and `fast_flush` globals. `Schemas` is
+# what a client and the service compare before a call, which cbindgen sees
+# though it is crate-visible. All five are Rust-side only -- no C entry point
+# takes or returns them -- so cbindgen would otherwise emit opaque typedefs no
+# caller can use.
+exclude = ["FileInfo", "FilterState", "FilterStates", "FlushOptions", "Schemas"]
 # `LoreStore` and `LoreRevisionTree` are reachable via `lore_*_args_t::handle`
 # but cbindgen misses transitive types behind a typedef field; emit them
 # explicitly. The `lore_revision_tree_*_args_t` and
@@ -276,7 +279,6 @@ include = [
 "LoreEndEventData" = "lore_end_event_data_t"
 "LoreErrorCode" = "lore_error_code_t"
 "LoreErrorDetail" = "lore_error_detail_t"
-"LoreErrorEventData" = "lore_error_event_data_t"
 "LoreEvent" = "lore_event_t"
 "LoreEventCallbackConfig" = "lore_event_callback_config_t"
 "LoreEvent_Tag" = "lore_event_tag_t"
@@ -426,6 +428,7 @@ include = [
 "LoreRepositoryCreateArgs" = "lore_repository_create_args_t"
 "LoreRepositoryCreateEventData" = "lore_repository_create_event_data_t"
 "LoreRepositoryDeleteArgs" = "lore_repository_delete_args_t"
+"LoreRepositoryRenameArgs" = "lore_repository_rename_args_t"
 "LoreRepositoryFlushArgs" = "lore_repository_flush_args_t"
 "LoreRepositoryGcArgs" = "lore_repository_gc_args_t"
 "LoreRepositoryReleaseArgs" = "lore_repository_release_args_t"

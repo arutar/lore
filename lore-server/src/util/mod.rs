@@ -3,6 +3,7 @@
 pub mod cert_metrics;
 pub mod core_hop;
 pub mod local_store_monitor;
+pub mod shared_read;
 
 use lore_revision::interface::LoreGlobalArgs;
 
@@ -10,6 +11,10 @@ use crate::auth::jwt::AuthorizationToken;
 
 pub const REPLICATION_USER_ID: &str = "<replication-user>";
 
+/// A context for the call the current task serves.
+///
+/// The context carries the cancellation of the request being served, or, when called from a
+/// task that already runs under a request's context, the cancellation of that context.
 pub fn setup_execution(
     context_label: &'static str,
     correlation_id: String,
@@ -23,6 +28,9 @@ pub fn setup_execution(
         lore_revision::relay::EventDispatcher::no_dispatch(),
         user_id,
     );
+    if let Some(cancellation) = core_hop::request_cancellation() {
+        ctx = ctx.with_cancellation(cancellation);
+    }
     ctx.set_caller_state(std::sync::Arc::new(
         crate::execution_state::ServerExecutionState {
             span: tracing::Span::current(),

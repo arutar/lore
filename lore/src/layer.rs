@@ -21,7 +21,9 @@ mod list;
 mod remove;
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(layer_add_local)]
 /// Arguments for adding a layer from a source repository into the current repository.
 pub struct LoreLayerAddArgs {
@@ -46,7 +48,6 @@ pub struct LoreLayerAddArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -100,7 +101,9 @@ async fn layer_add_impl(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(layer_remove_local)]
 /// Arguments for removing a layer from the repository at the specified path.
 pub struct LoreLayerRemoveArgs {
@@ -130,7 +133,6 @@ pub struct LoreLayerRemoveArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -181,7 +183,9 @@ async fn layer_remove_impl(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(layer_list_local)]
 /// Arguments for listing all layers configured in the repository (no parameters).
 pub struct LoreLayerListArgs {}
@@ -197,7 +201,6 @@ pub struct LoreLayerListArgs {}
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -229,7 +232,9 @@ fn layer_list_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(layer_list_staged_local)]
 /// Arguments for listing configured layers that have staged changes (no parameters).
 pub struct LoreLayerListStagedArgs {}
@@ -248,7 +253,6 @@ pub struct LoreLayerListStagedArgs {}
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` |
 ///

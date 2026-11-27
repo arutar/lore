@@ -20,10 +20,12 @@ use crate::interface::LoreString;
 
 /// Arguments for adding a new link to a linked repository at the given path.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(add_local)]
 pub struct LoreLinkAddArgs {
-    /// Link repository URL
+    /// Name, ID or URL of a repository on this repository's remote
     pub link: LoreString,
     /// Path within this repository where the link is added
     pub link_path: LoreString,
@@ -46,7 +48,6 @@ pub struct LoreLinkAddArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -112,7 +113,9 @@ async fn add_impl(
 
 /// Arguments for removing a link from the repository at the given path.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(remove_local)]
 pub struct LoreLinkRemoveArgs {
     /// Path within this repository where the link is removed
@@ -130,7 +133,6 @@ pub struct LoreLinkRemoveArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -175,7 +177,9 @@ async fn remove_impl(
 
 /// Arguments for listing all linked repositories in the current repository.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(list_local)]
 pub struct LoreLinkListArgs {}
 
@@ -190,7 +194,6 @@ pub struct LoreLinkListArgs {}
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -219,7 +222,9 @@ fn list_local(
 
 /// Arguments for reading detailed information about a single link.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(info_local)]
 pub struct LoreLinkInfoArgs {
     /// Path within this repository of the link to describe
@@ -237,7 +242,6 @@ pub struct LoreLinkInfoArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -278,7 +282,9 @@ fn info_local(
 
 /// Arguments for listing the links whose linked repositories hold staged changes.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(list_staged_local)]
 pub struct LoreLinkListStagedArgs {}
 
@@ -293,7 +299,6 @@ pub struct LoreLinkListStagedArgs {}
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -326,7 +331,9 @@ fn list_staged_local(
 
 /// Arguments for updating the pin or properties of an existing link.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(update_local)]
 pub struct LoreLinkUpdateArgs {
     /// Path within this repository of the link to update
@@ -346,7 +353,6 @@ pub struct LoreLinkUpdateArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///

@@ -15,7 +15,9 @@ use crate::interface::LoreString;
 
 /// Arguments for acquiring file locks on the given paths for a branch.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(file_acquire_local)]
 pub struct LoreLockFileAcquireArgs {
     /// Paths to acquire locks on
@@ -35,7 +37,6 @@ pub struct LoreLockFileAcquireArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -101,7 +102,9 @@ pub async fn file_acquire_as_owner(
 
 /// Arguments for returning the lock status of the given files on a branch.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(file_status_local)]
 pub struct LoreLockFileStatusArgs {
     /// Paths to get the lock status of
@@ -121,7 +124,6 @@ pub struct LoreLockFileStatusArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -162,7 +164,9 @@ fn file_status_local(
 
 /// Arguments for querying file locks on a branch, optionally filtered by owner and path.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(file_query_local)]
 pub struct LoreLockFileQueryArgs {
     /// Branch to query locks on; empty queries every branch, or the current branch where `path`
@@ -186,7 +190,6 @@ pub struct LoreLockFileQueryArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -228,7 +231,9 @@ fn file_query_local(
 
 /// Arguments for releasing file locks on the given paths for a branch and owner.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(file_release_local)]
 pub struct LoreLockFileReleaseArgs {
     /// Paths to release locks on
@@ -252,7 +257,6 @@ pub struct LoreLockFileReleaseArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///

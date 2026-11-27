@@ -53,7 +53,16 @@ use crate::storage::store::StoreInternal;
 
 /// Remote endpoint configuration for a storage handle.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, ValidateText, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    ValidateText,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 pub struct LoreStorageRemoteConfig {
     /// gRPC endpoint of the peer storage service; authenticated with the open call's `globals.identity`
     pub remote_url: LoreString,
@@ -61,7 +70,16 @@ pub struct LoreStorageRemoteConfig {
 
 /// Arguments for `lore_storage_open`.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(open_local)]
 pub struct LoreStorageOpenArgs {
     /// Path to an existing lore repository; must be empty when `in_memory` is set
@@ -158,8 +176,8 @@ fn build_create_options(
 ///
 /// On success the caller receives `LORE_EVENT_STORAGE_OPENED` carrying
 /// `{handle}` before `Complete` with `status` `0`. On failure, no
-/// `STORAGE_OPENED` and no `LORE_EVENT_ERROR` fire; `Complete` carries the
-/// error code in `status` and the full detail in its `error` field.
+/// `STORAGE_OPENED` fires; `Complete` carries the error code in `status` and
+/// the full detail in its `error` field.
 pub fn open(
     globals: LoreGlobalArgs,
     args: LoreStorageOpenArgs,
@@ -301,15 +319,18 @@ fn open_local(
             None
         };
 
-        let store = Arc::new(StoreInternal::new(
-            identity,
-            immutable,
-            mutable,
-            remote,
-            bound_flags,
-            args.skip_verify != 0 || execution_context().globals().trust_remote(),
-            stores,
-        ));
+        let store = Arc::new(
+            StoreInternal::new(
+                identity,
+                immutable,
+                mutable,
+                remote,
+                bound_flags,
+                args.skip_verify != 0 || execution_context().globals().trust_remote(),
+                stores,
+            )
+            .holding_background_flush(execution_context().globals().no_background_flush()),
+        );
         let handle = handle::register(store);
         LoreEvent::StorageOpened(LoreStorageOpenedEventData {
             handle_id: handle.handle_id,

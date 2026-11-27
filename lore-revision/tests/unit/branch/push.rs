@@ -5,13 +5,13 @@ use std::sync::Arc;
 use bytes::Bytes;
 use lore_base::error::AddressNotFound;
 use lore_base::error::Disconnected;
+use lore_base::error::LoreErrorCode;
 use lore_base::types::Address;
 use lore_base::types::Fragment;
 use lore_base::types::Hash;
+use lore_error_set::FfiError;
 use lore_error_set::ForwardStrict;
 use lore_revision::branch::push::*;
-use lore_revision::event::EventError;
-use lore_revision::interface::LoreError;
 use lore_revision::repository::RepositoryContext;
 use lore_revision::state::allow_all_repositories;
 use lore_transport::BranchPushError;
@@ -79,7 +79,6 @@ fn a_fragment_the_peer_is_missing_keeps_its_address_on_the_way_out() {
         .expect_err("an error was forwarded");
 
     assert!(error.is_address_not_found(), "{error:?}");
-    assert!(error.translated() == LoreError::AddressNotFound);
 }
 
 /// An offer the peer refuses onto a branch holding revisions the local history does not is a
@@ -609,14 +608,14 @@ mod offer {
                 vec![missing(), missing()],
                 0,
                 1,
-                Some(LoreError::AddressNotFound),
+                Some(LoreErrorCode::AddressNotFound),
             ),
             (
                 "deleted, deleted",
                 vec![deleted(), deleted()],
                 1,
                 0,
-                Some(LoreError::NotFound),
+                Some(LoreErrorCode::NotFound),
             ),
         ];
         for (name, answers, created, recovered, error) in cases {
@@ -646,7 +645,10 @@ mod offer {
             .await;
 
             assert!(
-                result.err().map(|error| error.translated()) == error,
+                result
+                    .err()
+                    .map(|error| LoreErrorCode::from_ffi_code(error.ffi_code()))
+                    == error,
                 "{name}: the result"
             );
             assert_eq!(
@@ -677,6 +679,226 @@ mod offer {
             refused.is_internal() && lost.is_disconnected(),
             "{refused:?}; {lost:?}"
         );
+    }
+}
+
+mod query_batches {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use std::time::Instant;
+
+    use lore_base::error::SlowDown;
+    use lore_base::retry::Retry;
+    use lore_base::retry::retry_with_jitter;
+    use tokio::sync::Semaphore;
+
+    use super::*;
+
+    const BACK_OFF: Duration = Duration::from_millis(50);
+
+    /// Back-off of exactly [`BACK_OFF`] every time, exhausted after `limit` waits.
+    fn back_off(limit: usize) -> Retry {
+        retry_with_jitter(
+            BACK_OFF.as_millis() as u64,
+            BACK_OFF.as_millis() as u64,
+            limit,
+            0.0,
+        )
+    }
+
+    /// A peer that throttles a batch if any address in it has been refused fewer times than that
+    /// address's refusal count. Otherwise, it answers `NotFound` for every address.
+    struct Peer {
+        refusals: HashMap<Address, usize>,
+        /// When each address with a refusal count was asked, throttled or answered.
+        asks: Mutex<HashMap<Address, Vec<Instant>>>,
+        /// Every batch asked, in the order asked.
+        batches: Mutex<Vec<Vec<Address>>>,
+    }
+
+    impl Peer {
+        fn new(refusals: &[(Address, usize)]) -> Arc<Self> {
+            Arc::new(Self {
+                refusals: refusals.iter().copied().collect(),
+                asks: Mutex::new(HashMap::new()),
+                batches: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn answer(&self, batch: &[Address]) -> Result<Bytes, ProtocolError> {
+            self.batches.lock().expect("batches").push(batch.to_vec());
+            let mut asks = self.asks.lock().expect("asks");
+            let mut throttle = false;
+            for address in batch {
+                if let Some(&refusals) = self.refusals.get(address) {
+                    let asked = asks.entry(*address).or_default();
+                    asked.push(Instant::now());
+                    throttle |= asked.len() <= refusals;
+                }
+            }
+            if throttle {
+                return Err(ProtocolError::from(SlowDown));
+            }
+            Ok(Bytes::from(vec![QueryStatus::NotFound as u8; batch.len()]))
+        }
+
+        fn asks(&self, address: Address) -> Vec<Instant> {
+            self.asks
+                .lock()
+                .expect("asks")
+                .get(&address)
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        fn batch_count(&self) -> usize {
+            self.batches.lock().expect("batches").len()
+        }
+    }
+
+    fn slots() -> Arc<Semaphore> {
+        Arc::new(Semaphore::new(Semaphore::MAX_PERMITS))
+    }
+
+    async fn run(
+        peer: &Arc<Peer>,
+        addresses: Vec<Address>,
+        batch_size: usize,
+        retry: Retry,
+    ) -> Result<PushQueryResult, PushError> {
+        let peer = peer.clone();
+        query_batches(addresses, Some(batch_size), slots(), retry, move |batch| {
+            let peer = peer.clone();
+            async move {
+                let result = peer.answer(&batch);
+                (batch, result)
+            }
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn every_address_is_answered_once_across_batches() {
+        let addresses: Vec<Address> = (0..25).map(address).collect();
+        let peer = Peer::new(&[]);
+
+        let queried = run(&peer, addresses.clone(), 10, back_off(0))
+            .await
+            .expect("an unthrottled query needs no back-off");
+
+        assert_eq!(queried.absent, addresses);
+        assert_eq!(peer.batch_count(), 3);
+    }
+
+    /// A throttled batch is asked again only after a full back-off, and the batches the peer
+    /// answered are not asked again with it.
+    #[tokio::test]
+    async fn a_throttled_batch_waits_for_the_back_off_before_it_is_asked_again() {
+        let addresses: Vec<Address> = (0..30).map(address).collect();
+        let peer = Peer::new(&[(address(5), 1)]);
+
+        let queried = run(&peer, addresses.clone(), 10, back_off(1))
+            .await
+            .expect("one back-off is enough for a batch throttled once");
+
+        assert_eq!(queried.absent, addresses);
+        let asks = peer.asks(address(5));
+        assert_eq!(asks.len(), 2, "the throttled batch is asked twice");
+        assert!(
+            asks[1] - asks[0] >= BACK_OFF,
+            "asked again after {:?}",
+            asks[1] - asks[0]
+        );
+        assert_eq!(
+            peer.batch_count(),
+            4,
+            "only the throttled batch is asked again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_keeps_throttling_fails_the_query_with_slow_down() {
+        let peer = Peer::new(&[(address(0), usize::MAX)]);
+
+        let error = run(&peer, vec![address(0)], 10, back_off(3))
+            .await
+            .expect_err("the back-off is spent");
+
+        assert!(error.is_slow_down(), "{error:?}");
+        assert_eq!(
+            peer.asks(address(0)).len(),
+            4,
+            "the first ask and one per back-off"
+        );
+    }
+
+    /// The back-off limit counts consecutive rounds with no answers. Waiting continues as long as
+    /// the peer answers some of the held batches in each round.
+    #[tokio::test]
+    async fn a_round_that_answers_any_batch_restarts_the_back_off() {
+        let addresses: Vec<Address> = (0..4).map(address).collect();
+        let refusals: Vec<(Address, usize)> =
+            (1..4).map(|seed| (address(seed), seed as usize)).collect();
+        let peer = Peer::new(&refusals);
+
+        let queried = run(&peer, addresses.clone(), 1, back_off(1))
+            .await
+            .expect("every round answers a batch, so one back-off per round is enough");
+
+        assert_eq!(queried.absent, addresses);
+        assert_eq!(
+            peer.asks(address(3)).len(),
+            4,
+            "the last address held for three rounds"
+        );
+    }
+
+    /// Rounds that each answer something still end the query once there have been more of them
+    /// than the cap allows.
+    #[tokio::test]
+    async fn throttled_rounds_are_capped_even_while_each_answers_something() {
+        let last = MAX_THROTTLED_ROUNDS as u8 + 1;
+        let addresses: Vec<Address> = (0..=last).map(address).collect();
+        let refusals: Vec<(Address, usize)> = (1..=last)
+            .map(|seed| (address(seed), seed as usize))
+            .collect();
+        let peer = Peer::new(&refusals);
+        let brief_back_off = retry_with_jitter(1, 1, 1, 0.0);
+
+        let error = run(&peer, addresses, 1, brief_back_off)
+            .await
+            .expect_err("the last address outlasts the cap");
+
+        assert!(error.is_slow_down(), "{error:?}");
+        assert_eq!(
+            peer.asks(address(last)).len(),
+            MAX_THROTTLED_ROUNDS + 1,
+            "the first round and one per throttled round the cap allows"
+        );
+    }
+
+    /// Any failure other than throttling ends the query immediately, without waiting for the
+    /// back-off.
+    #[tokio::test]
+    async fn a_failure_other_than_throttling_is_not_retried() {
+        let asks = Arc::new(AtomicUsize::new(0));
+        let counted = asks.clone();
+
+        let error = query_batches(vec![address(0)], None, slots(), back_off(3), move |batch| {
+            counted.fetch_add(1, Ordering::Relaxed);
+            async move {
+                let result = Err(ProtocolError::from(AddressNotFound { address: [7u8; 48] }));
+                (batch, result)
+            }
+        })
+        .await
+        .expect_err("the peer failed the query");
+
+        assert!(error.is_address_not_found(), "{error:?}");
+        assert_eq!(asks.load(Ordering::Relaxed), 1, "the peer is asked once");
     }
 }
 
@@ -942,6 +1164,7 @@ mod place {
                 .collect(),
             pushed: local.iter().copied().collect(),
             peer_latest: vec![(branch(), Hash::default())],
+            held_links: HashSet::new(),
         };
         PushTarget {
             repository,
@@ -963,8 +1186,28 @@ mod place {
         revision_number: u64,
         name: &str,
     ) -> Hash {
+        write_on(
+            repository,
+            branch(),
+            parent_self,
+            parent_other,
+            revision_number,
+            name,
+        )
+        .await
+    }
+
+    /// Write a revision of `on`, named `name` so that revisions on the same parent differ.
+    async fn write_on(
+        repository: &Arc<RepositoryContext>,
+        on: BranchId,
+        parent_self: Hash,
+        parent_other: Hash,
+        revision_number: u64,
+        name: &str,
+    ) -> Hash {
         let mut metadata = Metadata::new();
-        metadata.set_branch(branch()).expect("recording the branch");
+        metadata.set_branch(on).expect("recording the branch");
         metadata
             .set_string("name", name)
             .expect("naming the revision");
@@ -1221,6 +1464,369 @@ mod place {
                 })
                 .collect();
             assert_eq!(links, vec![vec![(linked_repository, linked_revision)]]);
+        }))
+        .await;
+    }
+
+    /// Write a revision of `branch()` on `parent` that holds a link alone: to `pinned` in the
+    /// repository `linked`.
+    async fn write_linking(
+        repository: &Arc<RepositoryContext>,
+        parent: Hash,
+        revision_number: u64,
+        linked: lore_base::types::RepositoryId,
+        pinned: Hash,
+    ) -> Hash {
+        let metadata = State::deserialize(repository.clone(), parent)
+            .await
+            .expect("reading the parent")
+            .metadata_hash();
+        let linking = State::new();
+        linking.set_parent_self(parent);
+        linking.set_revision_number(revision_number);
+        linking.set_metadata_hash(metadata);
+        linking
+            .link_add(
+                repository.clone(),
+                linked,
+                branch(),
+                pinned,
+                2,
+                lore_revision::link::LinkFlags::NoFlags,
+            )
+            .await
+            .expect("linking another repository's revision");
+        let token = repository
+            .try_write_token()
+            .expect("a client context carries a write token");
+        linking
+            .serialize(repository.clone(), token)
+            .await
+            .expect("writing the linking revision")
+    }
+
+    fn linked() -> lore_base::types::RepositoryId {
+        lore_base::types::RepositoryId::from([0x5A; 16])
+    }
+
+    /// The revision of `linked()` the remote's latest revision links.
+    fn held() -> Hash {
+        Hash::from([0x5B; 32])
+    }
+
+    /// A revision of `linked()` other than `held()`.
+    fn changed() -> Hash {
+        Hash::from([0x5C; 32])
+    }
+
+    /// The target of a push of a revision linking `pinned`, planned against a remote whose latest
+    /// revision links `held()`.
+    async fn linking_target(stores: &ClientStores, pinned: Hash) -> PushTarget {
+        let writer = &stores.writer;
+        store_repository_metadata(writer).await;
+        let base = write_on_branch(writer, Hash::default(), Hash::default(), 1, "base").await;
+        let remote_latest = write_linking(writer, base, 2, linked(), held()).await;
+        let latest = write_linking(writer, remote_latest, 3, linked(), pinned).await;
+        let client = client_on(
+            stores,
+            Arc::new(PagedRemote::new(branch(), remote_latest).metadata(Hash::from([1; 32]))),
+        );
+        let plan = plan_target(&client, branch(), latest, false)
+            .await
+            .expect("planning the push");
+        let mut target = target(client, latest, &[], vec![]).await;
+        target.plan = plan;
+        target
+    }
+
+    /// The revisions of linked repositories that scanning `target` requests targets at.
+    async fn requested_after_scan(target: PushTarget) -> Vec<Hash> {
+        let mut collection = TargetCollection {
+            targets: vec![target],
+            requests: vec![],
+            index: Default::default(),
+        };
+        scan_target(&mut collection, 0).await;
+        collection
+            .requests
+            .iter()
+            .map(|request| request.latest)
+            .collect()
+    }
+
+    /// A revision whose link pins what the remote latest's link pins reaches no linked repository.
+    #[tokio::test]
+    async fn a_link_pinned_as_the_remote_latest_pins_it_requests_no_target() {
+        Box::pin(with_execution(async {
+            let target = linking_target(&client_stores().await, held()).await;
+
+            assert_eq!(requested_after_scan(target).await, Vec::<Hash>::new());
+        }))
+        .await;
+    }
+
+    /// A revision whose link pins another revision than the remote latest's link requests the
+    /// linked repository's branch at it.
+    #[tokio::test]
+    async fn a_link_pinned_elsewhere_than_the_remote_latest_requests_a_target_at_its_pin() {
+        Box::pin(with_execution(async {
+            let target = linking_target(&client_stores().await, changed()).await;
+
+            assert_eq!(requested_after_scan(target).await, vec![changed()]);
+        }))
+        .await;
+    }
+
+    /// A forced push onto a remote that moved past the revision the local history starts from
+    /// reaches no linked repository for a link pinned as that revision pins it.
+    #[tokio::test]
+    async fn a_link_pinned_as_where_a_diverged_remote_was_left_requests_no_target() {
+        Box::pin(with_execution(async {
+            let stores = client_stores().await;
+            let writer = &stores.writer;
+            store_repository_metadata(writer).await;
+            let base = write_on_branch(writer, Hash::default(), Hash::default(), 1, "base").await;
+            let left = write_linking(writer, base, 2, linked(), held()).await;
+            let remote_latest = write_linking(writer, left, 3, linked(), changed()).await;
+            let latest = write_linking(writer, left, 3, linked(), held()).await;
+            let client = client_on(
+                &stores,
+                Arc::new(PagedRemote::new(branch(), remote_latest).metadata(Hash::from([1; 32]))),
+            );
+            let plan = plan_target(&client, branch(), latest, true)
+                .await
+                .expect("planning the push");
+            let mut target = target(client, latest, &[], vec![]).await;
+            target.plan = plan;
+
+            assert_eq!(requested_after_scan(target).await, Vec::<Hash>::new());
+        }))
+        .await;
+    }
+
+    /// The push creating a branch reaches no linked repository for a link pinned as the branch
+    /// point pins it.
+    #[tokio::test]
+    async fn a_link_pinned_as_the_branch_point_pins_it_requests_no_target() {
+        Box::pin(with_execution(async {
+            let stores = client_stores().await;
+            let writer = &stores.writer;
+            store_repository_metadata(writer).await;
+            let root = write_on_branch(writer, Hash::default(), Hash::default(), 1, "root").await;
+            let base = write_linking(writer, root, 2, linked(), held()).await;
+            let child = BranchId::from([8; 16]);
+            let latest = write_linking(writer, base, 3, linked(), held()).await;
+            lore_revision::branch::store_latest(
+                writer.clone(),
+                branch(),
+                Hash::default(),
+                base,
+                BranchLatestStatus::Convergent,
+            )
+            .await
+            .expect("storing the parent's local latest");
+            lore_revision::branch::create_record(
+                writer.clone(),
+                child,
+                "child",
+                lore_revision::branch::default_category(),
+                "",
+                0,
+                vec![lore_base::types::BranchPoint {
+                    branch: branch(),
+                    revision: base,
+                }],
+                latest,
+                BranchLatestStatus::Divergent,
+                lore_base::types::Context::default(),
+            )
+            .await
+            .expect("creating the child branch");
+            let client = client_on(&stores, Arc::new(PagedRemote::new(child, Hash::default())));
+            let plan = plan_target(&client, child, latest, false)
+                .await
+                .expect("planning the push");
+            let mut target = target(client, latest, &[], vec![]).await;
+            target.branch = child;
+            target.plan = plan;
+
+            assert_eq!(requested_after_scan(target).await, Vec::<Hash>::new());
+        }))
+        .await;
+    }
+
+    /// The pins of the fork and of the peer's latest revision of a merged branch are held, and
+    /// those of a revision the plan pushes are not.
+    #[tokio::test]
+    async fn the_revisions_the_peer_holds_hold_their_pins_unless_the_plan_pushes_them() {
+        Box::pin(with_execution(async {
+            let stores = client_stores().await;
+            let writer = &stores.writer;
+            let base = write_on_branch(writer, Hash::default(), Hash::default(), 1, "base").await;
+            let linking = write_linking(writer, base, 2, linked(), held()).await;
+            let client = client_on(
+                &stores,
+                Arc::new(PagedRemote::new(branch(), Hash::default())),
+            );
+            let merged = BranchId::from([9; 16]);
+            let mut held_links = vec![];
+            for (pushed, peer_latest, fork) in [
+                (vec![], Hash::default(), linking),
+                (vec![], linking, Hash::default()),
+                (vec![linking], linking, linking),
+            ] {
+                let mut target = target(client.clone(), linking, &pushed, vec![]).await;
+                target.plan.peer_latest.push((merged, peer_latest));
+                hold_remote_links(&client, &mut target.plan, 0, fork).await;
+                held_links.push(target.plan.held_links);
+            }
+
+            let pinned = HashSet::from([(linked(), held())]);
+            assert_eq!(held_links, vec![pinned.clone(), pinned, HashSet::new()]);
+        }))
+        .await;
+    }
+
+    /// A target of `branch()` pushing a revision on `base`, with a remote whose latest revision of
+    /// another branch, `merged`, links `held()`, and that revision.
+    async fn target_beside_a_merged_line(stores: &ClientStores) -> (PushTarget, Hash) {
+        let writer = &stores.writer;
+        let merged = BranchId::from([9; 16]);
+        let base = write_on_branch(writer, Hash::default(), Hash::default(), 1, "base").await;
+        let latest = write_on_branch(writer, base, Hash::default(), 2, "latest").await;
+        let merged_root = write_on(writer, merged, base, Hash::default(), 2, "merged").await;
+        let merged_latest = write_linking(writer, merged_root, 3, linked(), held()).await;
+        let client = client_on(stores, Arc::new(PagedRemote::new(merged, merged_latest)));
+        (
+            target(client, latest, &[latest], vec![]).await,
+            merged_latest,
+        )
+    }
+
+    /// A plan extended to a merge of a line whose remote latest links `held()` holds that pin, so
+    /// a revision on the extension linking it reaches no linked repository, and one linking
+    /// another revision requests the linked repository's branch at it.
+    #[tokio::test]
+    async fn a_plan_extended_through_a_merged_line_holds_the_pin_of_its_remote_latest() {
+        Box::pin(with_execution(async {
+            for (pinned, requested) in [(held(), vec![]), (changed(), vec![changed()])] {
+                let stores = client_stores().await;
+                let (mut target, merged_latest) = target_beside_a_merged_line(&stores).await;
+                let writer = &stores.writer;
+                let merge = write_on_branch(writer, target.latest, merged_latest, 3, "merge").await;
+                let newer = write_linking(writer, merge, 4, linked(), pinned).await;
+                target.pending = vec![newer];
+
+                place_pending(&mut target, false)
+                    .await
+                    .expect("placing the linked revision");
+
+                assert_eq!(target.latest, newer);
+                assert_eq!(requested_after_scan(target).await, requested);
+            }
+        }))
+        .await;
+    }
+
+    /// A line of another branch uploaded back to its remote latest, which links `held()`, holds
+    /// that pin, so a revision on the line linking it reaches no linked repository, and one
+    /// linking another revision requests the linked repository's branch at it.
+    #[tokio::test]
+    async fn an_uploaded_line_holds_the_pin_of_its_branchs_remote_latest() {
+        Box::pin(with_execution(async {
+            for (pinned, requested) in [(held(), vec![]), (changed(), vec![changed()])] {
+                let stores = client_stores().await;
+                let (mut target, merged_latest) = target_beside_a_merged_line(&stores).await;
+                let other = write_linking(&stores.writer, merged_latest, 4, linked(), pinned).await;
+                target.pending = vec![other];
+
+                place_pending(&mut target, false)
+                    .await
+                    .expect("placing the linked revision");
+
+                assert_eq!(pushed(&target), vec![(target.latest, true), (other, false)]);
+                assert_eq!(requested_after_scan(target).await, requested);
+            }
+        }))
+        .await;
+    }
+
+    /// A push of a branch the remote holds at its latest revision reaches no linked repository
+    /// whose branch is locally at the pin that revision holds.
+    #[tokio::test]
+    async fn a_pushed_branch_with_its_linked_branch_at_the_pin_it_holds_is_not_pushed() {
+        Box::pin(with_execution(async {
+            let stores = client_stores().await;
+            let writer = &stores.writer;
+            store_repository_metadata(writer).await;
+            let base = write_on_branch(writer, Hash::default(), Hash::default(), 1, "base").await;
+            let latest = write_linking(writer, base, 2, linked(), held()).await;
+            lore_revision::branch::store_latest(
+                writer.to_link_context(linked()).await,
+                branch(),
+                Hash::default(),
+                held(),
+                BranchLatestStatus::Convergent,
+            )
+            .await
+            .expect("storing the linked branch's local latest");
+            let client = client_on(
+                &stores,
+                Arc::new(PagedRemote::new(branch(), latest).metadata(Hash::from([1; 32]))),
+            );
+
+            let (targets, _orders) =
+                collect_targets(client, branch(), latest, &PushRun::default(), None)
+                    .await
+                    .expect("planning the push");
+
+            assert_eq!(targets.len(), 1);
+        }))
+        .await;
+    }
+
+    /// A push whose linked branch is locally at the revision the remote latest's link pins
+    /// reaches no linked repository.
+    #[tokio::test]
+    async fn a_linked_branch_at_a_pin_the_remote_latest_holds_is_not_pushed() {
+        Box::pin(with_execution(async {
+            let stores = client_stores().await;
+            let root = linking_target(&stores, held()).await;
+            lore_revision::branch::store_latest(
+                stores.writer.to_link_context(linked()).await,
+                branch(),
+                Hash::default(),
+                held(),
+                BranchLatestStatus::Convergent,
+            )
+            .await
+            .expect("storing the linked branch's local latest");
+
+            let (targets, _orders) = collect_targets(
+                root.repository,
+                branch(),
+                root.latest,
+                &PushRun::default(),
+                None,
+            )
+            .await
+            .expect("planning the push");
+
+            assert_eq!(targets.len(), 1);
+        }))
+        .await;
+    }
+
+    /// The check that the remote holds each revision a push links asks nothing of a linked
+    /// repository whose pin the remote latest holds.
+    #[tokio::test]
+    async fn a_link_pinned_as_the_remote_latest_pins_it_is_not_checked_on_the_remote() {
+        Box::pin(with_execution(async {
+            let target = linking_target(&client_stores().await, held()).await;
+
+            check_links_on_remote(&target)
+                .await
+                .expect("checking the links on the remote");
         }))
         .await;
     }

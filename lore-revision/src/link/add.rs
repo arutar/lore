@@ -24,6 +24,7 @@ use crate::link::LoreLinkChangeEventData;
 use crate::lore::Address;
 use crate::lore::BranchId;
 use crate::lore::Hash;
+use crate::lore::RepositoryId;
 use crate::lore::execution_context;
 use crate::lore_debug;
 use crate::node::Node;
@@ -41,12 +42,14 @@ use crate::repository::clone::LoreRepositoryCloneEndEventData;
 use crate::stage;
 use crate::stage::KnownChild;
 use crate::stage::StageOptions;
+use crate::state::FoundNode;
 use crate::state::LinkReference;
 use crate::state::NodeMapping;
 use crate::state::State;
 use crate::state::StateNodeChildrenIterator;
 use crate::util::path::RelativePath;
 use crate::util::path::RelativePathBuf;
+use crate::util::url::same_server;
 
 pub async fn add(
     repository: Arc<RepositoryContext>,
@@ -77,36 +80,7 @@ pub async fn add(
             .into());
     }
 
-    // The identifier is a full URL or a bare name or ID, and only a scheme tells them apart:
-    // `is_valid_name` permits scoped names like `org/project`, so a slash says nothing about
-    // which form this is. A schemeless identifier names a repository on the same remote as
-    // this one, so resolve it against this repository's own configured remote rather than
-    // reading its first segment as a host. Taking the remote from the config also keeps the
-    // link and the repository pointing at the same server, which the environment variable
-    // this replaces could not guarantee.
-    let (remote_url, name) = if link_identifier.contains("://") {
-        repository::parse_url(&link_identifier, false).forward_with::<LinkError, _>(|| {
-            format!("Invalid repository URL or ID: {link_identifier}")
-        })?
-    } else {
-        let remote_url = repository
-            .require_path()
-            .ok()
-            .and_then(|path| repository::repository_remote(path.to_string_lossy()).ok())
-            .unwrap_or_default();
-        if remote_url.is_empty() {
-            return Err(LinkError::from(crate::errors::NoRemote));
-        }
-        (remote_url, link_identifier.clone())
-    };
-
-    let context = execution_context();
-    let identity = context.globals().identity().unwrap_or_default();
-    let repository_data = repository::resolve_by_name(&remote_url, &name, identity)
-        .await
-        .forward_with::<LinkError, _>(|| format!("Repository not found: {link_identifier}"))?;
-
-    let link = repository_data.id;
+    let link = resolve_identifier(&repository, link_identifier).await?;
 
     if link == repository.id {
         return Err(LinkError::internal(
@@ -268,8 +242,8 @@ pub async fn add(
         .forward_with::<LinkError, _>(|| link::unreachable(link.id))?;
 
     lore_debug!("Find link target node for {source_path}");
-    let link_node_link = link_state
-        .find_node_link(link.clone(), source_path.as_str())
+    let link_found = link_state
+        .locate_node(link.clone(), source_path.as_str())
         .await
         .forward_with::<LinkError, _>(|| {
             format!(
@@ -278,8 +252,8 @@ pub async fn add(
             )
         })?;
 
-    lore_debug!("Link target node is {link_node_link:?}");
-    if !link_node_link.is_valid_or_root() {
+    lore_debug!("Link target node is {:?}", link_found.identity());
+    if !link_found.is_valid_or_root() {
         return Err(InvalidPath {
             path: source_path.to_string(),
         }
@@ -287,15 +261,15 @@ pub async fn add(
     }
 
     // Target node must be in the given link repository, not a link itself
-    if link_node_link.repository != link.id {
+    let Some(link_target) = link_found.own_node() else {
         return Err(LinkError::internal(
             "Link path is a link itself, link to the target repository directly",
         ));
-    }
+    };
 
     // Target node must be a directory
     let link_node = link_state
-        .node(link.clone(), link_node_link.node)
+        .node(link.clone(), link_target)
         .await
         .forward_with::<LinkError, _>(|| link::unreachable(link.id))?;
 
@@ -308,10 +282,9 @@ pub async fn add(
     let clone_path = link_path.clone();
 
     // The stored path rather than the argument, which resolved case-insensitively.
-    let resolved_source_path =
-        link::link_source_path(link.clone(), &link_state, link_node_link.node)
-            .await
-            .forward_with::<LinkError, _>(|| link::unreachable(link.id))?;
+    let resolved_source_path = link::link_source_path(link.clone(), &link_state, link_target)
+        .await
+        .forward_with::<LinkError, _>(|| link::unreachable(link.id))?;
 
     let (link_flags, stored_branch) = if let Some(row) = mounted {
         (LinkFlags::from_bits_retain(row.flags()), row.branch())
@@ -328,26 +301,20 @@ pub async fn add(
         link.clone(),
         resolved_source_path,
         crate::node::INVALID_NODE,
-        Some((
-            LinkReference {
-                branch: stored_branch,
-                flags: link_flags.into(),
-                ..Default::default()
-            },
-            current_branch,
-        )),
+        link::SameFolder::Refuse,
     )
     .await
     .forward::<LinkError>("Failed checking link source paths")?;
 
-    if let Ok(node_link) = inner_state
-        .find_relative_node_link(
+    if let Ok(node_id) = inner_state
+        .locate_node_below(
             inner_repository.clone(),
             chain.innermost.node,
             remainder_path.as_str(),
         )
         .await
-        && let Ok(node) = inner_state.node(inner_repository.clone(), node_link.node).await
+        .and_then(FoundNode::into_own_node)
+        && let Ok(node) = inner_state.node(inner_repository.clone(), node_id).await
         // Allow re-adding a link to a path that is staged for delete
         && !node.is_staged_delete()
     {
@@ -358,13 +325,10 @@ pub async fn add(
             )));
         }
 
-        let mut children = StateNodeChildrenIterator::new(
-            inner_state.clone(),
-            inner_repository.clone(),
-            node_link.node,
-        )
-        .await
-        .forward::<LinkError>("Failed deserializing state node block")?;
+        let mut children =
+            StateNodeChildrenIterator::new(inner_state.clone(), inner_repository.clone(), node_id)
+                .await
+                .forward::<LinkError>("Failed deserializing state node block")?;
 
         // Prevent the directory having children
         if let Ok(child) = children.next().await
@@ -396,7 +360,7 @@ pub async fn add(
         lore_debug!("Staging link node");
         let node = Node {
             flags: NodeFlags::Link.bits(),
-            child: link_node_link.node,
+            child: link_target,
             address: Address {
                 hash: link_revision,
                 context: link.id.into(),
@@ -457,15 +421,11 @@ pub async fn add(
             stats: stats.clone(),
             modified_times: operation.modified_times(),
         };
-        clone::clone_node(
-            clone_ctx,
-            storage,
-            clone_path,
-            link_node_link.node,
-            clone_states,
-        )
-        .await
-        .forward_with::<LinkError, _>(|| format!("Failed cloning linked repository {}", link.id))?;
+        clone::clone_node(clone_ctx, storage, clone_path, link_target, clone_states)
+            .await
+            .forward_with::<LinkError, _>(|| {
+                format!("Failed cloning linked repository {}", link.id)
+            })?;
 
         event::LoreEvent::RepositoryCloneEnd(LoreRepositoryCloneEndEventData {
             branch: branch_name.into(),
@@ -503,6 +463,51 @@ pub async fn add(
     .send();
 
     Ok(())
+}
+
+/// The ID of the repository `link_identifier` names: a URL, or a bare name or ID.
+///
+/// Only a scheme tells a URL from a bare name or ID, since `is_valid_name` permits scoped names
+/// like `org/project`. Every link is fetched through this repository's remote, so the identifier
+/// is resolved there, and a URL naming another server is refused. Takes the identifier by value so
+/// that it is not held across the rest of [`add`].
+async fn resolve_identifier(
+    repository: &RepositoryContext,
+    link_identifier: String,
+) -> Result<RepositoryId, LinkError> {
+    let parent_remote = repository::load_repository_config_from_dot_dir(repository.dot_dir_path()?)
+        .forward::<LinkError>("reading the repository remote")?
+        .remote_url
+        .unwrap_or_default();
+    if parent_remote.is_empty() {
+        return Err(LinkError::from(crate::errors::NoRemote));
+    }
+    let url_name;
+    let name = if link_identifier.contains("://") {
+        let (remote_url, name) = repository::parse_url(&link_identifier, false)
+            .forward_with::<LinkError, _>(|| {
+                format!("Invalid repository URL or ID: {link_identifier}")
+            })?;
+        if !same_server(&remote_url, &parent_remote) {
+            return Err(InvalidArguments {
+                reason: format!(
+                    "{link_identifier} is not on this repository's remote ({parent_remote}); a link must be on the same remote"
+                ),
+            }
+            .into());
+        }
+        url_name = name;
+        &url_name
+    } else {
+        &link_identifier
+    };
+
+    let context = execution_context();
+    let identity = context.globals().identity().unwrap_or_default();
+    Ok(repository::resolve_by_name(&parent_remote, name, identity)
+        .await
+        .forward_with::<LinkError, _>(|| format!("Repository not found: {link_identifier}"))?
+        .id)
 }
 
 /// Creates the directory the link mounts at and the one holding it, and stages the intermediate

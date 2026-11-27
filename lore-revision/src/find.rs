@@ -16,13 +16,13 @@ use tokio_util::task::AbortOnDropHandle;
 use zerocopy::FromBytes;
 
 use crate::branch;
+use crate::errors::Cancelled;
 use crate::errors::SlowDown;
 use crate::errors::absent_unless;
 use crate::event;
 use crate::immutable;
 use crate::immutable::ImmutableError;
 use crate::immutable::ReadFromImmutable;
-use crate::interface::LoreError;
 use crate::interface::LoreString;
 use crate::lore::Address;
 use crate::lore::BranchId;
@@ -33,6 +33,7 @@ use crate::lore_debug;
 use crate::lore_trace;
 use crate::metadata::Metadata;
 use crate::repository::RepositoryContext;
+use crate::runtime::CancellationCheck;
 use crate::state::State;
 use crate::state::StateData;
 
@@ -40,16 +41,8 @@ pub const DEFAULT_SEARCH_LIMIT: usize = 1000;
 
 #[error_set]
 pub enum FindError {
+    Cancelled,
     SlowDown,
-}
-
-impl event::EventError for FindError {
-    fn translated(&self) -> LoreError {
-        match self {
-            FindError::SlowDown(_) => LoreError::SlowDown,
-            FindError::Internal(_) => LoreError::Internal,
-        }
-    }
 }
 
 pub enum FindMatchResult {
@@ -98,7 +91,9 @@ where
     }
     lore_debug!("Find start revision {}", revision);
     let mut search_count = 0;
+    let cancellation = CancellationCheck::current();
     while !revision.is_zero() {
+        cancellation.check()?;
         search_count += 1;
         if let Some(search_limit) = search_limit
             && search_count > search_limit
@@ -1243,7 +1238,7 @@ impl std::fmt::Display for LineFault {
 
 /// Data for the event reporting a revision found by a search.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRevisionFindEventData {
     /// Signature of the revision that was found.

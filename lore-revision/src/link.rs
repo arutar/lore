@@ -19,12 +19,11 @@ use crate::branch;
 use crate::change::NodeChange;
 use crate::errors::*;
 use crate::event;
-use crate::event::EventError;
 use crate::filter::FilterMode;
 use crate::fs::filesystem_provider::InstanceOperation;
 use crate::fs::filesystem_provider::InstanceOperationImpl;
 use crate::fs::filesystem_provider::with_operation;
-use crate::interface::LoreError;
+use crate::fs::realize::VerifiedChanges;
 use crate::interface::LoreFileAction;
 use crate::interface::LoreNodeType;
 use crate::interface::LoreString;
@@ -56,6 +55,7 @@ use crate::stage;
 use crate::state;
 use crate::state::Clear;
 use crate::state::Ext;
+use crate::state::FoundNode;
 use crate::state::LinkPin;
 use crate::state::LinkPinAgreement;
 use crate::state::LinkReference;
@@ -76,6 +76,7 @@ pub mod update;
 
 #[error_set]
 pub enum LinkError {
+    Cancelled,
     NodeNotFound,
     LinkNotFound,
     LinkPinsDiverge,
@@ -123,33 +124,6 @@ pub enum LinkError {
     MissingIdentity,
 }
 
-impl EventError for LinkError {
-    fn translated(&self) -> LoreError {
-        match self {
-            LinkError::Disconnected(_) => LoreError::Connection,
-            LinkError::SlowDown(_) => LoreError::SlowDown,
-            LinkError::Oversized(_) => LoreError::Oversized,
-            LinkError::FileNotFound(_) => LoreError::FileNotFound,
-            LinkError::NotFound(_)
-            | LinkError::LayerNotFound(_)
-            | LinkError::RevisionNotFound(_)
-            | LinkError::BranchNotFound(_)
-            | LinkError::LinkNotFound(_)
-            | LinkError::LinkPathNotFound(_) => LoreError::NotFound,
-            LinkError::AddressNotFound(_) => LoreError::AddressNotFound,
-            LinkError::PayloadNotFound(_) => LoreError::PayloadNotFound,
-            LinkError::InvalidPath(_) | LinkError::InvalidArguments(_) => {
-                LoreError::InvalidArguments
-            }
-            _ => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
-}
-
 /// Context information for discovered links during tree traversal
 ///
 /// A link is named by the repository holding it, the node it sits at there, and the
@@ -190,6 +164,57 @@ impl std::hash::Hash for LinkContext {
 #[derive(Debug, Default)]
 pub struct LinkTracker {
     links: DashMap<LinkContext, bool>,
+    /// The state the mounts of a repository stage into, by parent and repository.
+    states: SharedByPin<(RepositoryId, RepositoryId), Arc<State>>,
+}
+
+/// What the mounts of one linked repository share, opened once: one for every mount, and one for
+/// each mount pinning a revision that one is not staged on, as mounts written before every mount
+/// shared one pin can.
+#[derive(Debug)]
+pub(crate) struct SharedByPin<K, V>(parking_lot::Mutex<OpenedOnce<K, V>>);
+
+type OpenedOnce<K, V> = HashMap<(K, Option<Hash>), Arc<tokio::sync::OnceCell<V>>>;
+
+impl<K, V> Default for SharedByPin<K, V> {
+    fn default() -> Self {
+        Self(parking_lot::Mutex::default())
+    }
+}
+
+impl<K: Copy + Eq + std::hash::Hash, V: Clone> SharedByPin<K, V> {
+    fn cell(&self, key: K, own: Option<Hash>) -> Arc<tokio::sync::OnceCell<V>> {
+        self.0.lock().entry((key, own)).or_default().clone()
+    }
+
+    /// The value of `key` for a mount pinning `pin`: the shared one, opened by `open_shared`, where
+    /// `pin` is its revision or the one it is staged on (`staged_on`), else the mount's own, opened
+    /// by `open_own`.
+    pub(crate) async fn get_or_open<E, Shared, Own>(
+        &self,
+        (key, pin): (K, Hash),
+        staged_on: impl Fn(&V) -> [Hash; 2],
+        open_shared: impl FnOnce() -> Shared,
+        open_own: impl FnOnce() -> Own,
+    ) -> Result<V, E>
+    where
+        Shared: Future<Output = Result<V, E>>,
+        Own: Future<Output = Result<V, E>>,
+    {
+        let shared = self
+            .cell(key, None)
+            .get_or_try_init(open_shared)
+            .await?
+            .clone();
+        if staged_on(&shared).contains(&pin) {
+            return Ok(shared);
+        }
+        Ok(self
+            .cell(key, Some(pin))
+            .get_or_try_init(open_own)
+            .await?
+            .clone())
+    }
 }
 
 impl LinkTracker {
@@ -197,8 +222,43 @@ impl LinkTracker {
         Arc::new(Self::default())
     }
 
-    pub fn add_link(&self, link_context: LinkContext) {
-        self.links.insert(link_context, false);
+    #[lore_macro::test_pub]
+    fn add_link(&self, link_context: LinkContext) {
+        // The guard dies at the `;`, so the shard lock is not held across an await. A link a task
+        // tracks again keeps the modification another task marked on it.
+        #[allow(clippy::disallowed_methods)]
+        self.links.entry(link_context).or_insert(false);
+    }
+
+    /// Tracks the link at `link_node` of `parent`, pinning `pin` of `link_repository_id`, and
+    /// answers the state it stages into, which every mount of it in `parent` shares
+    /// ([`open_shared_linked_state`]), so the tasks of one walk stage into one revision.
+    pub async fn track(
+        &self,
+        (parent_repository, parent_state): (&Arc<RepositoryContext>, &Arc<State>),
+        link_node: NodeID,
+        link_repository_id: RepositoryId,
+        pin: Hash,
+    ) -> Result<Arc<State>, StateError> {
+        // Boxed, as only a walk crossing a link reaches it, and inline it would grow the future of
+        // every directory the walk stages.
+        let link_state = Box::pin(self.states.get_or_open(
+            ((parent_repository.id, link_repository_id), pin),
+            |state| [state.revision(), state.committed_revision()],
+            || open_shared_linked_state(parent_repository, parent_state, link_repository_id, pin),
+            || async {
+                let link_context = parent_repository.to_link_context(link_repository_id).await;
+                State::deserialize(link_context, pin).await
+            },
+        ))
+        .await?;
+        self.add_link(LinkContext {
+            link_repository_id,
+            link_node_id: link_node,
+            parent_repository_id: parent_repository.id,
+            link_state: link_state.clone(),
+        });
+        Ok(link_state)
     }
 
     /// Stops tracking the link to `link_repository_id` at `link_node_id` in
@@ -250,13 +310,6 @@ impl LinkTracker {
         self.links.iter().any(|entry| *entry.value())
     }
 
-    pub fn find_link_context(&self, repository_id: RepositoryId) -> Option<LinkContext> {
-        self.links
-            .iter()
-            .find(|entry| entry.key().link_repository_id == repository_id)
-            .map(|entry| entry.key().clone())
-    }
-
     /// All tracked link contexts, regardless of whether they were marked as
     /// modified. Used to resolve parent states when folding a nested change up
     /// through intermediate links that were crossed but not directly modified.
@@ -265,9 +318,42 @@ impl LinkTracker {
     }
 }
 
+/// The state of `link_repository_id` that the mounts of it in `parent_state` share, opened for a
+/// mount pinning `pin`: the first uncommitted revision a mount pins, as a stage leaves the mounts it
+/// changed at an uncommitted revision and the others at the committed pin, else `pin`.
+pub(crate) async fn open_shared_linked_state(
+    parent_repository: &Arc<RepositoryContext>,
+    parent_state: &State,
+    link_repository_id: RepositoryId,
+    pin: Hash,
+) -> Result<Arc<State>, StateError> {
+    let link_context = parent_repository.to_link_context(link_repository_id).await;
+    let mut pins: Vec<Hash> = parent_state
+        .link_list(parent_repository.clone())
+        .await?
+        .iter()
+        .filter(|row| row.repository == link_repository_id)
+        .map(|row| row.signature)
+        .chain([pin])
+        .collect();
+    pins.sort_unstable();
+    pins.dedup();
+    let mut opened = futures::future::try_join_all(
+        pins.iter()
+            .map(|&pinned| State::deserialize(link_context.clone(), pinned)),
+    )
+    .await?;
+    let shared = opened
+        .iter()
+        .position(|state| state.revision_number() == 0)
+        .or_else(|| pins.iter().position(|&pinned| pinned == pin))
+        .unwrap_or_default();
+    Ok(opened.swap_remove(shared))
+}
+
 /// Data for an event reporting a change to a link.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreLinkChangeEventData {
     /// Path of the link within the parent repository.
@@ -314,7 +400,7 @@ impl LoreLinkChangeEventData {
 /// repository. A repository can be linked at more than one mount path, so a
 /// consumer must key on `link_path` together with `link_repository`.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreLinkBranchCreateEventData {
     /// Path of the link within the parent repository.
@@ -360,6 +446,39 @@ pub struct LinkBranchOutcome {
 /// The context of a failure to read the linked repository `id`.
 pub(crate) fn unreachable(id: RepositoryId) -> String {
     format!("Failed to reach linked repository {id}")
+}
+
+/// Whether the linked repository `id` refused the caller earlier in this call.
+pub(crate) fn denied(id: RepositoryId) -> bool {
+    crate::runtime::try_execution_context().is_some_and(|context| context.repository_denied(id))
+}
+
+/// `read` of the repository `id` linked at `path`, or `None` where the repository refuses the
+/// caller, which the rest of the call then skips without reading it again. Any other failure names
+/// the link.
+pub(crate) async fn skip_denied<T, E: ErrorSet + FfiError>(
+    (id, path): (RepositoryId, &str),
+    read: impl Future<Output = Result<T, E>>,
+) -> Result<Option<T>, E> {
+    if denied(id) {
+        return Ok(None);
+    }
+    match read.await {
+        Ok(value) => Ok(Some(value)),
+        Err(err) if is_refusal(&err) => {
+            lore_debug!(
+                "Skipping the link at {}, as linked repository {id} refuses access: {err}",
+                display_path(path)
+            );
+            if let Some(context) = crate::runtime::try_execution_context() {
+                context.deny_repository(id);
+            }
+            Ok(None)
+        }
+        Err(err) => Err(err).forward_any_with(|| {
+            format!("reading linked repository {id} at {}", display_path(path))
+        }),
+    }
 }
 
 pub async fn create_branch(
@@ -596,48 +715,78 @@ pub(crate) async fn repositories_the_merge_keeps(
     Ok(kept.into_iter().flatten().collect())
 }
 
-/// Gives each repository in `incoming`, which holds no branch for the links a merge brought in to
-/// land on, that branch.
+/// The repositories a merge brings in to `holder`, on `branch`, that hold no branch for their links
+/// to land on.
+pub(crate) struct MergedLinks<'a> {
+    pub holder: &'a Arc<RepositoryContext>,
+    pub incoming: &'a [(RepositoryId, Vec<IncomingLink>)],
+    pub branch: BranchId,
+}
+
+/// Gives each repository of each of `merged` the branch its links land on, and so each repository
+/// its revision links at every depth, as `branch create` does, reusing one a repository holds
+/// already.
 ///
 /// `link add` and `branch create` make that branch when a link starts following a parent branch,
 /// and a merged-in link skips both, so without this its revision has no branch to be pushed to. It
-/// branches from where the link followed on the merged side, at the revision the link pins.
+/// branches from where the link followed on `merged_branch`, at the revision the link pins.
 pub(crate) async fn create_branches_for_merged_links(
-    repository: Arc<RepositoryContext>,
-    incoming: &[(RepositoryId, Vec<IncomingLink>)],
-    current_branch: BranchId,
+    merged: &[MergedLinks<'_>],
     merged_branch: BranchId,
 ) -> Result<(), LinkError> {
-    if incoming.is_empty() {
-        return Ok(());
-    }
-
-    let branch_metadata = branch::metadata(repository.clone(), current_branch)
-        .await
-        .forward::<LinkError>("Failed getting branch metadata")?;
-    let branch_name =
-        branch::name(&branch_metadata).forward::<LinkError>("Failed getting branch metadata")?;
-    let branch_category = branch::category(&branch_metadata).unwrap_or_default();
+    let holders = try_join_links(
+        merged
+            .iter()
+            .filter(|merged| !merged.incoming.is_empty())
+            .map(async |merged| {
+                let metadata = branch::metadata(merged.holder.clone(), merged.branch)
+                    .await
+                    .forward::<LinkError>("Failed getting branch metadata")?;
+                let name = branch::name(&metadata)
+                    .forward::<LinkError>("Failed getting branch metadata")?
+                    .to_owned();
+                let category = branch::category(&metadata).unwrap_or_default().to_owned();
+                let first_level = merged
+                    .incoming
+                    .iter()
+                    .flat_map(|(link_id, mounts)| {
+                        mounts.iter().map(|mount| LinkReach {
+                            repository: *link_id,
+                            pin: mount.link_reference.signature,
+                            branch: mount.link_reference.resolve_branch(merged_branch),
+                            mount_path: mount.link_path.clone(),
+                            depth: 1,
+                            leads: true,
+                        })
+                    })
+                    .collect();
+                let reached = Box::pin(collect_with_context(merged.holder, first_level)).await?;
+                Ok::<_, LinkError>((merged.branch, name, category, reached))
+            })
+            .collect(),
+    )
+    .await?;
 
     // Every creation runs to completion, so a failure knows each branch the others made.
     let results = try_join_links(
-        incoming
+        holders
             .iter()
-            .map(|(link_id, mounts)| {
-                let link = repository.to_link_context(*link_id);
-                let leader = mounts[0].link_reference;
-                async move {
-                    let created = create_merged_link_branch(
-                        link.await,
-                        current_branch,
-                        branch_name,
-                        branch_category,
-                        leader.resolve_branch(merged_branch),
-                        leader.signature,
-                    )
-                    .await;
-                    Ok::<_, LinkError>((*link_id, mounts, created))
-                }
+            .flat_map(|(branch, name, category, reached)| {
+                reached.iter().map(move |linked| {
+                    let start = &linked.reaches[0];
+                    async move {
+                        let created = create_merged_link_branch(
+                            linked.context.clone(),
+                            *branch,
+                            name,
+                            category,
+                            start.branch,
+                            start.pin,
+                        )
+                        .await;
+                        Ok::<_, LinkError>((linked, *branch, created))
+                    }
+                })
             })
             .collect(),
     )
@@ -645,9 +794,9 @@ pub(crate) async fn create_branches_for_merged_links(
 
     let mut failure = None;
     let mut created = Vec::with_capacity(results.len());
-    for (link_id, mounts, result) in results {
+    for (linked, branch, result) in results {
         match result {
-            Ok((link_remote, outcome)) => created.push((link_id, mounts, link_remote, outcome)),
+            Ok((link_remote, outcome)) => created.push((linked, branch, link_remote, outcome)),
             Err(err) => {
                 failure.get_or_insert(err);
             }
@@ -656,15 +805,14 @@ pub(crate) async fn create_branches_for_merged_links(
     if let Some(err) = failure {
         // A branch this merge made would outlive the merge, so it is taken back. A retry
         // recreates it.
-        for (link_id, _, link_remote, outcome) in created {
+        for (linked, branch, link_remote, outcome) in created {
             if outcome.reused {
                 continue;
             }
-            if let Err(delete_err) =
-                branch::delete_remote(link_remote, link_id, current_branch).await
-            {
+            let link_id = linked.repository;
+            if let Err(delete_err) = branch::delete_remote(link_remote, link_id, branch).await {
                 crate::lore_warn!(
-                    "Failed to remove branch {current_branch} from linked repository {link_id}: \
+                    "Failed to remove branch {branch} from linked repository {link_id}: \
                      {delete_err}"
                 );
             }
@@ -672,12 +820,12 @@ pub(crate) async fn create_branches_for_merged_links(
         return Err(err);
     }
 
-    for (link_id, mounts, _, outcome) in created {
-        for mount in mounts {
+    for (linked, branch, _, outcome) in created {
+        for reach in &linked.reaches {
             report_branch_outcome(
-                &mount.link_path,
-                link_id,
-                current_branch,
+                &reach.mount_path,
+                linked.repository,
+                branch,
                 outcome.revision,
                 outcome.reused,
             );
@@ -785,7 +933,8 @@ pub fn group_by<T, K: PartialEq>(
 /// links nested inside them.
 ///
 /// A repository reached through several links is listed once, at the mount
-/// path of the outermost link reaching it.
+/// path of the outermost link reaching it. One that refuses the caller is left
+/// out.
 pub async fn list_with_context(
     repository: Arc<RepositoryContext>,
 ) -> Result<Vec<LinkTarget>, LinkError> {
@@ -884,7 +1033,8 @@ pub(crate) async fn reach_links<'a>(
 /// and the pins of one level are read [`MAX_CONCURRENT_LINK_TASKS`] at a time.
 ///
 /// Bounded by `MAX_LINK_DEPTH` and the pins already read, so a link cycle terminates. The root of
-/// the walk is never listed.
+/// the walk is never listed. A repository that refuses the caller is left out, with the
+/// repositories reached only through it.
 #[lore_macro::test_pub]
 pub(crate) async fn collect_with_context(
     root: &Arc<RepositoryContext>,
@@ -899,6 +1049,10 @@ pub(crate) async fn collect_with_context(
     let mut level = walk.add(root, first_level).await;
     loop {
         if level.is_empty() {
+            let reachable = reachable_around(&walk.reached, denied);
+
+            walk.reached
+                .retain(|linked| reachable.contains(&linked.repository));
             return Ok(walk.reached);
         }
         let reads = level
@@ -908,9 +1062,15 @@ pub(crate) async fn collect_with_context(
                 let reach = &linked.reaches[reach];
                 let context = &linked.context;
                 async move {
-                    let state = State::deserialize(context.clone(), reach.pin)
-                        .await
-                        .forward_with::<LinkError, _>(|| unreachable(reach.repository))?;
+                    let Some(state) = skip_denied(
+                        (reach.repository, &reach.mount_path),
+                        State::deserialize(context.clone(), reach.pin),
+                    )
+                    .await
+                    .forward::<LinkError>("Failed deserializing state")?
+                    else {
+                        return Ok(None);
+                    };
                     let nested = if reach.depth < crate::state::MAX_LINK_DEPTH {
                         let links = state
                             .link_list(context.clone())
@@ -925,7 +1085,7 @@ pub(crate) async fn collect_with_context(
                     } else {
                         Vec::new()
                     };
-                    Ok::<_, LinkError>((state.revision_number(), nested))
+                    Ok::<_, LinkError>(Some((state.revision_number(), nested)))
                 }
             })
             .collect();
@@ -933,7 +1093,10 @@ pub(crate) async fn collect_with_context(
         let read = Box::pin(try_join_links(reads)).await?;
 
         let mut next = Vec::new();
-        for (&(position, reach), (number, nested)) in level.iter().zip(read) {
+        for (&(position, reach), read) in level.iter().zip(read) {
+            let Some((number, nested)) = read else {
+                continue;
+            };
             let mut linked: Vec<RepositoryId> = nested
                 .iter()
                 .map(|link| link.repository)
@@ -952,6 +1115,34 @@ pub(crate) async fn collect_with_context(
         }
         level = next;
     }
+}
+
+/// The repositories of `reached` that links reach from the root of the walk without passing through
+/// a repository that is `skipped`.
+pub(crate) fn reachable_around<'a>(
+    reached: impl IntoIterator<Item = &'a ReachedRepository>,
+    skipped: impl Fn(RepositoryId) -> bool,
+) -> HashSet<RepositoryId> {
+    let by_id: HashMap<RepositoryId, &ReachedRepository> = reached
+        .into_iter()
+        .map(|linked| (linked.repository, linked))
+        .collect();
+    let mut pending: Vec<RepositoryId> = by_id
+        .values()
+        .filter(|linked| {
+            !skipped(linked.repository) && linked.reaches.iter().any(|reach| reach.depth == 1)
+        })
+        .map(|linked| linked.repository)
+        .collect();
+    let mut reachable: HashSet<RepositoryId> = pending.iter().copied().collect();
+    while let Some(holder) = pending.pop() {
+        for &below in by_id[&holder].pins.iter().flat_map(|pin| &pin.linked) {
+            if by_id.contains_key(&below) && !skipped(below) && reachable.insert(below) {
+                pending.push(below);
+            }
+        }
+    }
+    reachable
 }
 
 /// The repositories a walk over nested links reached, and the pins it read.
@@ -1246,7 +1437,13 @@ pub(crate) async fn repin_repository(
     branch: BranchId,
 ) -> Result<Vec<RepinnedMount>, StateError> {
     let rows = state
-        .link_repin(repository.clone(), link_repository_id, branch, signature)
+        .link_repin(
+            repository.clone(),
+            link_repository_id,
+            branch,
+            signature,
+            |_| true,
+        )
         .await?;
     state
         .check_link_rows_agree(
@@ -1291,6 +1488,74 @@ pub(crate) async fn repin_repository(
         });
     }
     Ok(repinned)
+}
+
+/// Pins at `signature` the mounts of `link_repository_id` in `state` that `only` selects, and
+/// answers their link nodes. `signature` is staged on the revisions they pin, so it keeps the node
+/// ids of each, and every mount keeps the node it exposes.
+#[lore_macro::test_pub]
+pub(crate) async fn repin_staged_mounts(
+    state: &Arc<State>,
+    repository: &Arc<RepositoryContext>,
+    link_repository_id: RepositoryId,
+    branch: BranchId,
+    signature: Hash,
+    only: impl Fn(&LinkReference) -> bool,
+) -> Result<Vec<NodeID>, StateError> {
+    let rows = state
+        .link_repin(
+            repository.clone(),
+            link_repository_id,
+            branch,
+            signature,
+            only,
+        )
+        .await?;
+    let mut mounts = Vec::with_capacity(rows.len());
+    for row in rows {
+        state
+            .node_set_link_target(repository, row.local_node(), LinkPin::Revision(signature))
+            .await?;
+        mounts.push(row.local_node());
+    }
+    Ok(mounts)
+}
+
+/// Selects the mounts a change to `linked`, the state its mounts share, moves: those of `holding`,
+/// and those pinning the revision it was opened at where that is uncommitted. The others keep the
+/// committed pin until a commit moves them.
+#[lore_macro::test_pub]
+pub(crate) fn sharing_mounts<'a>(
+    linked: &State,
+    holding: &'a [NodeID],
+) -> impl Fn(&LinkReference) -> bool + 'a {
+    let uncommitted = (linked.revision_number() == 0).then(|| linked.revision());
+    move |row| holding.contains(&row.local_node()) || uncommitted == Some(row.signature())
+}
+
+/// The mounts of `walked`, link nodes of `parent_state` mounting `linked`, below which `linked`
+/// holds a staged or dirty node: a walk through a mount below which the shared state holds no
+/// change keeps its pin.
+pub(crate) async fn mounts_holding_changes(
+    (parent_repository, parent_state): (&Arc<RepositoryContext>, &State),
+    (linked_repository, linked): (&Arc<RepositoryContext>, &State),
+    walked: &[NodeID],
+) -> Result<Vec<NodeID>, StateError> {
+    let held = futures::future::try_join_all(walked.iter().map(async |&link_node| {
+        let mounted = parent_state
+            .node(parent_repository.clone(), link_node)
+            .await?
+            .child;
+        linked
+            .node_has_staged_or_dirty_children(linked_repository.clone(), mounted)
+            .await
+    }))
+    .await?;
+    Ok(walked
+        .iter()
+        .zip(held)
+        .filter_map(|(&link_node, held)| held.then_some(link_node))
+        .collect())
 }
 
 /// The mount of `link_repository_id` among `rows` of `state` that [`repin_repository`] couldn't
@@ -1338,7 +1603,8 @@ async fn revision_state(
 
 /// The node of `target` at the path `node` has in `source`. A revision numbers its nodes as it
 /// pleases, so a mount is carried across revisions by path; fails with [`InvalidPath`] where
-/// `target` holds nothing there to mount.
+/// `target` holds nothing there to mount, and with [`NodeNotFound`] where `source` holds no folder
+/// at `node`.
 async fn carry_mount(
     link_context: &Arc<RepositoryContext>,
     source: &State,
@@ -1348,12 +1614,20 @@ async fn carry_mount(
     if node == ROOT_NODE {
         return Ok(ROOT_NODE);
     }
+    // `link_source_path` spells a node `source` does not hold as the root, which would mount the
+    // whole linked repository.
+    if !source
+        .holds_node(link_context, node, LoreNodeType::Directory)
+        .await?
+    {
+        return Err(NodeNotFound.into());
+    }
     let path = link_source_path(link_context.clone(), source, node).await?;
     let invalid = || InvalidPath {
         path: path.to_string(),
     };
     let found = match target
-        .find_node_link(link_context.clone(), path.as_str())
+        .locate_node(link_context.clone(), path.as_str())
         .await
     {
         Err(err) if err.is_node_not_found() => {
@@ -1363,10 +1637,7 @@ async fn carry_mount(
         }
         found => found?,
     };
-    if !found.is_valid_or_root() {
-        return Err(invalid().into());
-    }
-    Ok(found.node)
+    found.own_node().ok_or_else(|| invalid().into())
 }
 
 /// A linked repository's state, with the context reaching it.
@@ -1406,20 +1677,22 @@ impl LinkedStagedContent {
     }
 }
 
-/// Pin the link at `link_node` in `state` by what `linked` holds.
+/// Pin the mounts of `linked` in `state` that `only` selects by what `linked` holds, and answer
+/// their link nodes.
 ///
 /// A state holding anything is serialized on the committed revision it derives from, so a commit
-/// can restore that revision from the pin alone, and the link keeps its dirty flag only while a
-/// marker remains. An empty state has nothing to pin, so the link goes back to that revision.
+/// can restore that revision from the pin alone, and a link keeps its dirty flag only while a
+/// marker remains below it. An empty state has nothing to pin, so the links go back to that
+/// revision.
 pub async fn settle_linked_staged_state(
     state: &Arc<State>,
     repository: Arc<RepositoryContext>,
-    link_node: NodeID,
+    only: impl Fn(&LinkReference) -> bool,
     branch: BranchId,
     (linked_repository, linked_state): &LinkedState,
     content: LinkedStagedContent,
     token: &RepositoryWriteToken,
-) -> Result<(), StateError> {
+) -> Result<Vec<NodeID>, StateError> {
     let committed = linked_state.committed_revision();
     let signature = if content == LinkedStagedContent::Empty {
         committed
@@ -1430,69 +1703,36 @@ pub async fn settle_linked_staged_state(
             .await?
     };
 
-    if content == LinkedStagedContent::Dirty {
-        return repin_link_node(
-            state,
-            repository,
-            linked_repository.id,
-            branch,
-            signature,
-            link_node,
-            NodeFlags::Dirty,
-        )
-        .await;
-    }
-    update_link_pin_by_node(
+    let mounts = repin_staged_mounts(
         state,
-        repository.clone(),
+        &repository,
         linked_repository.id,
         branch,
         signature,
-        link_node,
+        only,
     )
     .await?;
-    state.node_clear(&repository, link_node, Clear::Dirty).await
-}
-
-/// Reserializes a tracked link's state and updates the parent repository's
-/// block tree and link registry.
-///
-/// This is the shared workflow between `process_link_updates` (stage) and
-/// `process_link_unstage_updates` (unstage):
-/// 1. Get linked repository context via `to_link_context`
-/// 2. Reparent the linked state onto `parent_signature` ([`State::reparent_onto`])
-/// 3. Serialize the linked state
-/// 4. Update the block tree hash and link registry via `update_link_pin_by_node`
-///
-/// Returns the new signature so callers can use it for additional work.
-pub async fn reserialize_tracked_link(
-    state: &Arc<State>,
-    repository: Arc<RepositoryContext>,
-    token: &RepositoryWriteToken,
-    link_context: &LinkContext,
-    parent_signature: Hash,
-    branch: BranchId,
-) -> Result<Hash, StateError> {
-    let linked_repository = repository
-        .to_link_context(link_context.link_repository_id)
-        .await;
-
-    let linked_state = link_context.link_state.clone();
-    linked_state.reparent_onto(parent_signature);
-
-    let new_signature = linked_state.serialize(linked_repository, token).await?;
-
-    update_link_pin_by_node(
-        state,
-        repository,
-        link_context.link_repository_id,
-        branch,
-        new_signature,
-        link_context.link_node_id,
-    )
-    .await?;
-
-    Ok(new_signature)
+    for &mount in &mounts {
+        if content == LinkedStagedContent::Dirty
+            && linked_state
+                .node_has_dirty_children(
+                    linked_repository.clone(),
+                    state.node(repository.clone(), mount).await?.child,
+                )
+                .await?
+        {
+            state
+                .node_mark(
+                    &repository,
+                    mount,
+                    Mark::dirty(NodeFlags::Dirty, Ext::Set(NodeExtFlags::NoFlags), true),
+                )
+                .await?;
+        } else {
+            state.node_clear(&repository, mount, Clear::Dirty).await?;
+        }
+    }
+    Ok(mounts)
 }
 
 /// One level of a resolved link chain: a parent repository and the link node
@@ -1534,7 +1774,7 @@ pub struct ResolvedLinkChain {
 
 /// Resolve `remainder_path`, which names a path below `base`, down through any
 /// link boundaries into the crossed links, the innermost mapping and what is left
-/// unconsumed there. Like `find_relative_node_link` but records each crossed link.
+/// unconsumed there. Like `State::locate_node_below` but records each crossed link.
 /// Bounded by `MAX_LINK_DEPTH` and a visited-repository set.
 ///
 /// Both ends take the same shape: a mapping plus the remainder below it is the path in the
@@ -1543,8 +1783,37 @@ pub struct ResolvedLinkChain {
 pub async fn resolve_link_chain(
     base: NodeMapping,
     state_current: Arc<State>,
+    remainder_path: RelativePath,
+    parent_branch: BranchId,
+) -> Result<ResolvedLinkChain, LinkError> {
+    resolve_link_chain_in(base, state_current, remainder_path, parent_branch, None).await
+}
+
+/// [`resolve_link_chain`] for a walk that stages through `tracker`: every link crossed is tracked,
+/// and each level reaches the state the tracker shares for its repository
+/// ([`LinkTracker::track`]), so the walk folds the change up through every intermediate link.
+pub async fn resolve_tracked_link_chain(
+    base: NodeMapping,
+    state_current: Arc<State>,
+    remainder_path: RelativePath,
+    tracker: &LinkTracker,
+) -> Result<ResolvedLinkChain, LinkError> {
+    resolve_link_chain_in(
+        base,
+        state_current,
+        remainder_path,
+        BranchId::default(),
+        Some(tracker),
+    )
+    .await
+}
+
+async fn resolve_link_chain_in(
+    base: NodeMapping,
+    state_current: Arc<State>,
     mut remainder_path: RelativePath,
     parent_branch: BranchId,
+    tracker: Option<&LinkTracker>,
 ) -> Result<ResolvedLinkChain, LinkError> {
     let mut levels: Vec<LinkChainLevel> = Vec::new();
     let mut seen: std::collections::HashSet<RepositoryId> = std::collections::HashSet::new();
@@ -1623,9 +1892,19 @@ pub async fn resolve_link_chain(
             };
 
             let child_repository = cur_repository.to_link_context(child_repository_id).await;
-            let child_state = State::deserialize(child_repository.clone(), link.revision)
-                .await
-                .forward::<LinkError>("Failed deserializing state")?;
+            let child_state = if let Some(tracker) = tracker {
+                tracker
+                    .track(
+                        (&cur_repository, &cur_state),
+                        cur_node,
+                        child_repository_id,
+                        link.revision,
+                    )
+                    .await
+            } else {
+                State::deserialize(child_repository.clone(), link.revision).await
+            }
+            .forward::<LinkError>("Failed deserializing state")?;
             let child_current_state = State::deserialize(child_repository.clone(), old_signature)
                 .await
                 .forward::<LinkError>("Failed deserializing state")?;
@@ -1703,22 +1982,23 @@ impl ResolvedLinkChain {
         let NodeMapping {
             repository, state, ..
         } = &self.innermost;
-        let node_link = state
-            .find_relative_node_link(
+        let node_id = state
+            .locate_node_below(
                 repository.clone(),
                 self.innermost.node,
                 self.remainder_path.as_str(),
             )
             .await
+            .and_then(FoundNode::into_own_node)
             .forward::<LinkError>("Invalid path")?;
-        if !node_link.is_valid() {
+        if !node_id.is_valid_node_id() {
             return Err(InvalidPath {
                 path: link_path.to_string(),
             }
             .into());
         }
         let link_node = state
-            .node(repository.clone(), node_link.node)
+            .node(repository.clone(), node_id)
             .await
             .forward::<LinkError>("Failed deserializing state")?;
         if !link_node.is_link() {
@@ -1727,7 +2007,7 @@ impl ResolvedLinkChain {
             }
             .into());
         }
-        Ok((node_link.node, link_node))
+        Ok((node_id, link_node))
     }
 
     /// The child (state, repository) mounted by level `index`: the next level's
@@ -1744,30 +2024,6 @@ impl ResolvedLinkChain {
                 self.innermost.state.clone(),
                 self.innermost.repository.clone(),
             )
-        }
-    }
-
-    /// Register a `LinkContext` in `tracker` for every link crossed by this
-    /// chain, so a filesystem-walk operation (stage / unstage) folds a nested
-    /// change up through all intermediate links. Each level's child state is
-    /// the next level's parent state, or `innermost_state` for the last level.
-    ///
-    /// `innermost_state` must be the exact state instance the caller mutates
-    /// (the one the deep change is staged into), so the tracker reserializes
-    /// the changes rather than a fresh deserialization of the same revision.
-    pub fn record_tracker_contexts(&self, tracker: &LinkTracker, innermost_state: &Arc<State>) {
-        for (index, level) in self.levels.iter().enumerate() {
-            let child_state = if index + 1 < self.levels.len() {
-                self.levels[index + 1].state.clone()
-            } else {
-                innermost_state.clone()
-            };
-            tracker.add_link(LinkContext {
-                link_repository_id: level.child_repository_id,
-                link_node_id: level.link_node_id,
-                parent_repository_id: level.repository.id,
-                link_state: child_state,
-            });
         }
     }
 }
@@ -1895,12 +2151,12 @@ async fn drain_promoted_moves(
 /// Reserialize every link modified during a `stage`/`unstage` walk, folding
 /// each linked repository's new revision into its parent's pin. Processes
 /// innermost-first and closes over ancestors (if C changed, B must reserialize
-/// so A's pin updates). `mark_staged` re-marks link nodes on stage; unstage
-/// manages its own staged flags.
+/// so A's pin updates). The mounts of a repository in one parent share its state, which is
+/// reserialized once and pinned at each mount [`sharing_mounts`] selects. `mark_staged` re-marks
+/// the walked link nodes on stage; unstage manages its own staged flags.
 pub async fn drain_link_tracker(
     repository: Arc<RepositoryContext>,
     token: &RepositoryWriteToken,
-    state_current: Arc<State>,
     state: Arc<State>,
     link_tracker: &LinkTracker,
     mark_staged: bool,
@@ -1911,18 +2167,21 @@ pub async fn drain_link_tracker(
 
     let all_contexts = link_tracker.all_links();
 
-    // Modified links plus their transitive ancestors.
+    // Modified links plus their transitive ancestors, each with every mount of it, which share
+    // its state.
     let mut selected: Vec<LinkContext> = link_tracker.get_links_needing_rehash();
     let mut i = 0;
     while i < selected.len() {
         let parent_repo_id = selected[i].parent_repository_id;
-        if parent_repo_id != repository.id
-            && let Some(parent_ctx) = all_contexts
+        if parent_repo_id != repository.id {
+            for parent_ctx in all_contexts
                 .iter()
-                .find(|other| other.link_repository_id == parent_repo_id)
-            && !selected.iter().any(|s| s == parent_ctx)
-        {
-            selected.push(parent_ctx.clone());
+                .filter(|other| other.link_repository_id == parent_repo_id)
+            {
+                if !selected.contains(parent_ctx) {
+                    selected.push(parent_ctx.clone());
+                }
+            }
         }
         i += 1;
     }
@@ -1951,7 +2210,14 @@ pub async fn drain_link_tracker(
     // Descending depth: deepest-nested links reserialize before their parents.
     contexts.sort_by_key(|ctx| std::cmp::Reverse(depth_of(ctx)));
 
-    for link_context in &contexts {
+    for (_, mounts) in group_by(&contexts, |ctx| {
+        (
+            ctx.parent_repository_id,
+            ctx.link_repository_id,
+            Arc::as_ptr(&ctx.link_state) as usize,
+        )
+    }) {
+        let link_context = mounts[0];
         // The parent state holding this link's pin: the top-level state, or the
         // tracked child state of the context mounting this one's parent.
         let (parent_state, parent_repository) =
@@ -1977,47 +2243,52 @@ pub async fn drain_link_tracker(
             )
             .await?;
 
-        // Parent-self is the committed pin for the top level, else the staged pin.
-        let parent_signature = if link_context.parent_repository_id == repository.id {
-            state_current
-                .link_find(
-                    repository.clone(),
-                    link_context.link_repository_id,
-                    link_context.link_node_id,
-                )
-                .await
-                .map_or(staged_ref.signature, |reference| reference.signature)
-        } else {
-            staged_ref.signature
-        };
-
+        let linked_state = &link_context.link_state;
+        let parent_signature = linked_state.committed_revision();
         lore_debug!("Setting link parent to {}", parent_signature);
 
-        let new_signature = reserialize_tracked_link(
+        let linked_repository = parent_repository
+            .to_link_context(link_context.link_repository_id)
+            .await;
+        let holding = mounts_holding_changes(
+            (&parent_repository, &parent_state),
+            (&linked_repository, linked_state),
+            &mounts
+                .iter()
+                .map(|ctx| ctx.link_node_id)
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+        let only = sharing_mounts(linked_state, &holding);
+        linked_state.reparent_onto(parent_signature);
+        let new_signature = linked_state.serialize(linked_repository, token).await?;
+        let moved = repin_staged_mounts(
             &parent_state,
-            parent_repository.clone(),
-            token,
-            link_context,
-            parent_signature,
+            &parent_repository,
+            link_context.link_repository_id,
             staged_ref.branch,
+            new_signature,
+            only,
         )
         .await?;
 
         lore_debug!(
-            "Updating link node hash: node={}, old_hash={}, new_hash={}",
-            link_context.link_node_id,
+            "Updating link nodes {moved:?} of repository {}: old_hash={}, new_hash={}",
+            link_context.link_repository_id,
             staged_ref.signature,
             new_signature
         );
 
         if mark_staged {
-            parent_state
-                .node_mark(
-                    &parent_repository,
-                    link_context.link_node_id,
-                    Mark::staged(NodeFlags::Staged, true),
-                )
-                .await?;
+            for link_node in holding {
+                parent_state
+                    .node_mark(
+                        &parent_repository,
+                        link_node,
+                        Mark::staged(NodeFlags::Staged, true),
+                    )
+                    .await?;
+            }
         }
     }
 
@@ -2061,18 +2332,19 @@ pub async fn restore_link_paths_from_state(
                 continue;
             }
 
-            let node_link = link_state
-                .find_relative_node_link(link_context.clone(), mounted, link_relative.as_str())
+            let Some(node_id) = link_state
+                .locate_node_below(link_context.clone(), mounted, link_relative.as_str())
                 .await
-                .forward::<LinkError>("Failed resolving link node")?;
-            if !node_link.is_valid_or_root() {
+                .forward::<LinkError>("Failed resolving link node")?
+                .own_node()
+            else {
                 continue;
-            }
+            };
             let block = link_state
-                .block(link_context.clone(), NodeBlock::index(node_link.node))
+                .block(link_context.clone(), NodeBlock::index(node_id))
                 .await
                 .forward::<LinkError>("Failed deserializing state node block")?;
-            let node = block.node(Node::index(node_link.node));
+            let node = block.node(Node::index(node_id));
             if !node.is_file() {
                 continue;
             }
@@ -2326,9 +2598,16 @@ pub async fn is_staged_link_update(
 
     let link = staged_node.linked_node();
     let linked_repository = parent_repository.to_link_context(link.repository).await;
-    let linked_state = State::deserialize(linked_repository.clone(), link.revision)
-        .await
-        .forward::<LinkError>("Failed deserializing linked state")?;
+    // A pin the caller cannot read was staged from elsewhere, never by a stage in the link.
+    let Some(linked_state) = skip_denied(
+        (link.repository, ""),
+        State::deserialize(linked_repository.clone(), link.revision),
+    )
+    .await
+    .forward::<LinkError>("Failed deserializing linked state")?
+    else {
+        return Ok(true);
+    };
     let has_staged_children = linked_state
         .node_has_staged_children(linked_repository, link.node)
         .await
@@ -2349,8 +2628,8 @@ struct LinkPinDiff {
 /// Deserializes the old and new link states, computes a 2-way diff scoped to
 /// the linked node and spelled from the mount, verifies filesystem consistency,
 /// and realizes the changes on disk. A provider holding its state is written
-/// nothing, and neither revision is read for it, as it serves the link from its node
-/// ([`holds_state`](crate::fs::filesystem_provider::FilesystemProvider::holds_state)).
+/// nothing of the link's content: it serves the link from its node, which moves to the new pin
+/// ([`serve_link_pin`]).
 ///
 /// Opens the filesystem operation the realize takes, so a caller already holding one calls
 /// [`realize_link_pin_change_in_operation`] instead.
@@ -2360,7 +2639,10 @@ pub async fn realize_link_pin_change(
     pin_change: LinkPinRealizeTarget,
 ) -> Result<(), LinkError> {
     if repository.file_system().holds_state() {
-        return Ok(());
+        return with_operation(repository.file_system(), async |operation| {
+            serve_link_pin(&operation, &link_context, pin_change).await
+        })
+        .await;
     }
     let pin = ResolvedLinkPin::resolve(&link_context, pin_change).await?;
     realize_resolved_link_pin(repository, link_context, &pin).await
@@ -2373,7 +2655,10 @@ pub(crate) async fn realize_resolved_link_pin(
     pin: &ResolvedLinkPin,
 ) -> Result<(), LinkError> {
     if repository.file_system().holds_state() {
-        return Ok(());
+        return with_operation(repository.file_system(), async |operation| {
+            serve_resolved_link_pin(&operation, pin).await
+        })
+        .await;
     }
     let diff = link_pin_diff(&link_context, pin).await?;
     with_operation(repository.file_system(), async |operation| {
@@ -2406,7 +2691,7 @@ pub(crate) async fn realize_link_pin_change_in_operation(
     overwrite_local: bool,
 ) -> Result<(), LinkError> {
     if operation.holds_state() {
-        return Ok(());
+        return serve_link_pin(operation, &link_context, pin_change).await;
     }
     let pin = ResolvedLinkPin::resolve(&link_context, pin_change).await?;
     realize_resolved_link_pin_in_operation(
@@ -2428,7 +2713,7 @@ pub(crate) async fn realize_resolved_link_pin_in_operation(
     overwrite_local: bool,
 ) -> Result<(), LinkError> {
     if operation.holds_state() {
-        return Ok(());
+        return serve_resolved_link_pin(operation, pin).await;
     }
     let diff = link_pin_diff(&link_context, pin).await?;
     realize_link_pin_diff(
@@ -2440,6 +2725,78 @@ pub(crate) async fn realize_resolved_link_pin_in_operation(
         overwrite_local,
     )
     .await
+}
+
+/// Serves the link at `target`'s mount at its new pin through `operation`, whose provider holds
+/// its state and serves a link from its node (ADR-00036): the link moves to the pin, mounting the
+/// subtree `target` names, and a link whose new pin is none is taken away. The linked revisions
+/// are read only to find a subtree mounted by its path.
+async fn serve_link_pin(
+    operation: &InstanceOperationImpl,
+    link_context: &Arc<RepositoryContext>,
+    target: LinkPinRealizeTarget,
+) -> Result<(), LinkError> {
+    if target.new_signature == Hash::default() {
+        return operation
+            .place_link(&target.link_path, None, false)
+            .await
+            .forward::<LinkError>("Failed taking away the link");
+    }
+    let source = match target.mount_source {
+        LinkMountSource::Node(node) => node,
+        LinkMountSource::SamePath if target.current_node == ROOT_NODE => ROOT_NODE,
+        LinkMountSource::SamePath => {
+            return serve_resolved_link_pin(
+                operation,
+                &ResolvedLinkPin::resolve(link_context, target).await?,
+            )
+            .await;
+        }
+    };
+    operation
+        .repin_link(&target.link_path, target.new_signature, source)
+        .await
+        .forward::<LinkError>("Failed serving the link at its new pin")
+}
+
+/// Serves through `operation` the outermost link `chain` crosses, as the staged state holds it
+/// once a change below it is folded up into its pin ([`propagate_link_chain`]), where the provider
+/// holds its state: such a provider serves a nested link through the outermost link's pin
+/// (ADR-00036). Nothing where `chain` crosses no link.
+pub(crate) async fn serve_outermost_link(
+    operation: &InstanceOperationImpl,
+    chain: &ResolvedLinkChain,
+) -> Result<(), LinkError> {
+    let Some(outermost) = chain.levels.first() else {
+        return Ok(());
+    };
+    if !operation.holds_state() {
+        return Ok(());
+    }
+    let node = outermost
+        .state
+        .node(outermost.repository.clone(), outermost.link_node_id)
+        .await
+        .forward::<LinkError>("Failed reading the outermost link")?;
+    operation
+        .place_link(
+            &outermost.mount,
+            Some(&node),
+            execution_context().globals().force(),
+        )
+        .await
+        .forward::<LinkError>("Failed serving the outermost link")
+}
+
+/// [`serve_link_pin`] of a pin already read against both revisions.
+async fn serve_resolved_link_pin(
+    operation: &InstanceOperationImpl,
+    pin: &ResolvedLinkPin,
+) -> Result<(), LinkError> {
+    operation
+        .repin_link(&pin.link_path, pin.new_signature, pin.node_target)
+        .await
+        .forward::<LinkError>("Failed serving the link at its new pin")
 }
 
 /// [`realize_link_pin_change_in_operation`] for a cold path, boxed so it doesn't grow the future of
@@ -2492,6 +2849,7 @@ async fn link_pin_diff(
         )
         .await,
         link_path.clone(),
+        state::DiffFlags::empty(),
         FilterMode::View,
     )
     .await
@@ -2516,10 +2874,10 @@ async fn verify_link_pin_diff(
     new_sig: Hash,
     diff: LinkPinDiff,
     carries_modes: bool,
-) -> Result<crate::fs::realize::VerifiedChanges, LinkError> {
+) -> Result<VerifiedChanges, LinkError> {
     let LinkPinDiff { changes, current } = diff;
     if changes.is_empty() {
-        return Ok(crate::fs::realize::VerifiedChanges {
+        return Ok(VerifiedChanges {
             changes,
             kept: Vec::new(),
         });
@@ -2558,15 +2916,59 @@ async fn realize_link_pin_diff(
     diff: LinkPinDiff,
     overwrite_local: bool,
 ) -> Result<(), LinkError> {
-    let crate::fs::realize::VerifiedChanges { changes, kept } = if overwrite_local {
-        crate::fs::realize::VerifiedChanges {
+    let verified = if overwrite_local {
+        VerifiedChanges {
             changes: diff.changes,
             kept: Vec::new(),
         }
     } else {
         verify_link_pin_diff(operation, link_context, new_sig, diff, true).await?
     };
+    apply_link_pin_changes(operation, repository, verified).await
+}
 
+/// Realizes each of `pins`, a pin move of the linked repository its context names, verifying the
+/// working tree at every mount before it writes to any, so a local modification at one leaves
+/// every mount as it was. Where the provider holds its state, serves each link at its new pin
+/// instead ([`serve_resolved_link_pin`]).
+pub(crate) async fn realize_resolved_link_pins_in_operation(
+    operation: &Arc<InstanceOperationImpl>,
+    repository: Arc<RepositoryContext>,
+    pins: &[(Arc<RepositoryContext>, ResolvedLinkPin)],
+) -> Result<(), LinkError> {
+    if operation.holds_state() {
+        for (_, pin) in pins {
+            serve_resolved_link_pin(operation, pin).await?;
+        }
+        return Ok(());
+    }
+    let verified = futures::future::try_join_all(pins.iter().map(async |(link_context, pin)| {
+        let diff = link_pin_diff(link_context, pin).await?;
+        verify_link_pin_diff(
+            operation,
+            link_context.clone(),
+            pin.new_signature,
+            diff,
+            true,
+        )
+        .await
+    }))
+    .await?;
+    futures::future::try_join_all(
+        verified
+            .into_iter()
+            .map(|changes| apply_link_pin_changes(operation, repository.clone(), changes)),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Realizes the verified changes of a pin move in the working tree.
+async fn apply_link_pin_changes(
+    operation: &Arc<InstanceOperationImpl>,
+    repository: Arc<RepositoryContext>,
+    VerifiedChanges { changes, kept }: VerifiedChanges,
+) -> Result<(), LinkError> {
     // The realize deletes before it moves, so a directory whose files move out is still occupied
     // when its own delete runs. A path the realize writes again is left to what it wrote.
     let written: HashSet<&str> = changes
@@ -2598,7 +3000,7 @@ async fn realize_link_pin_diff(
         None,
         false, /* Not dry run */
         None,  /* Not a merge */
-        None,  /* No view change */
+        Some(&crate::fs::realize::EmptiedDirectories::Excluded),
         stats,
     )
     .await
@@ -2642,6 +3044,7 @@ pub struct DescribedLink {
 }
 
 /// Where the working tree materializes the subtree at `source` of a repository.
+#[derive(Clone)]
 pub(crate) struct Mount {
     pub path: RelativePath,
     pub source: RelativePath,
@@ -2674,6 +3077,12 @@ impl Mount {
     /// subtree.
     pub(crate) fn spell(&self, path: &RelativePath) -> Option<RelativePath> {
         path.below(&self.source).map(|below| self.path.join(below))
+    }
+
+    /// [`Self::spell`] of `path`, a path of the repository as stored.
+    pub(crate) fn spell_str(&self, path: &str) -> Option<RelativePath> {
+        let Ok(path) = RelativePath::from_str(path);
+        self.spell(&path)
     }
 }
 
@@ -2752,14 +3161,9 @@ pub async fn describe_link(
     })
 }
 
-/// Two mounts of one repository whose source subtrees strictly nest place the
-/// same content at both mount paths under separate pins, so an edit through one
-/// is invisible to the other and whichever mount the stage walk reaches last
-/// decides the content. Identical subtrees resolve to one shared linked state
-/// and advance together, so they are left alone.
-///
-/// Rejects an incoming mount whose source subtree nests with one `state_target`
-/// already holds, or with another mount arriving in the same set of changes.
+/// Rejects an incoming mount whose source subtree nests with one `state_target` already holds, or
+/// with another mount arriving in the same set of changes. A mount of the same folder is left to
+/// the merge: one moving a link holds the mount it removes beside the one it adds.
 ///
 /// Runs before realization: the realize loop clones a mount's content and stages
 /// its node before the registry write that would reject it, so rejecting there
@@ -2786,7 +3190,14 @@ pub async fn check_incoming_mount_overlaps(
 
         let link_id: RepositoryId = node.address.context.into();
         let link_context = repository.to_link_context(link_id).await;
-        let source_path = pinned_source_path(link_context.clone(), &node).await?;
+        let Some(source_path) = skip_denied(
+            (link_id, change.path().as_str()),
+            pinned_source_path(link_context.clone(), &node),
+        )
+        .await?
+        else {
+            continue;
+        };
 
         check_source_path_overlap(
             state_target,
@@ -2794,12 +3205,12 @@ pub async fn check_incoming_mount_overlaps(
             link_context,
             source_path.clone(),
             change.from.mapping.node,
-            None,
+            SameFolder::Allow,
         )
         .await?;
 
         if let Some((_, other)) = incoming.iter().find(|(other_id, other_path)| {
-            *other_id == link_id && source_paths_nest(&source_path, other_path)
+            *other_id == link_id && SameFolder::Allow.overlap(&source_path, other_path)
         }) {
             return Err(InvalidArguments {
                 reason: format!(
@@ -2818,28 +3229,39 @@ pub async fn check_incoming_mount_overlaps(
     Ok(())
 }
 
-/// Whether two source subtrees overlap without being the same subtree.
-///
-/// Compared case-insensitively: the two paths are read from the revisions their
-/// own mounts pin, so a case-only rename between those revisions leaves one
-/// spelling of a subtree both still address.
-pub fn source_paths_nest(left: &RelativePath, right: &RelativePath) -> bool {
-    left.as_lowercase_str() != right.as_lowercase_str() && left.overlaps_ignore_case(right)
+/// Whether [`check_source_path_overlap`] refuses a mount of the same folder as another.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SameFolder {
+    Refuse,
+    Allow,
 }
 
+impl SameFolder {
+    /// Whether two source subtrees overlap as this refuses. Compared case-insensitively: the two
+    /// paths are read from the revisions their own mounts pin, so a case-only rename between
+    /// those revisions leaves one spelling of a subtree both still address.
+    fn overlap(self, left: &RelativePath, right: &RelativePath) -> bool {
+        left.overlaps_ignore_case(right)
+            && (self == Self::Refuse || left.as_lowercase_str() != right.as_lowercase_str())
+    }
+}
+
+/// Refuses `source_path` of the repository of `link_context` where another mount of it in `state`
+/// exposes a folder inside or above it, or, unless `same_folder` allows it, the same folder: the
+/// working tree would hold the nodes they share twice, and a commit can read each of them from
+/// only one place.
+///
 /// `source_path` must be the path as stored in the linked repository, so that it
 /// compares directly against what the existing mounts resolve to.
 /// `exclude_node` is the mount being written, which must not be compared against
-/// itself. With `row`, the row the mount is to hold under a parent on the given
-/// branch, a mount of the same folder also has to resolve to the same branch with
-/// the same flags, since both expose one subtree.
+/// itself.
 pub async fn check_source_path_overlap(
     state: &State,
     repository: Arc<RepositoryContext>,
     link_context: Arc<RepositoryContext>,
     source_path: RelativePath,
     exclude_node: NodeID,
-    row: Option<(LinkReference, BranchId)>,
+    same_folder: SameFolder,
 ) -> Result<(), StateError> {
     let link_list = state
         .link_list(repository.clone())
@@ -2862,13 +3284,7 @@ pub async fn check_source_path_overlap(
 
         let mounted_source = pinned_source_path(link_context.clone(), &link_node).await?;
 
-        let disagrees = source_path.as_lowercase_str() == mounted_source.as_lowercase_str()
-            && row.is_some_and(|(row, parent_branch)| {
-                row.flags != link_reference.flags
-                    || row.resolve_branch(parent_branch)
-                        != link_reference.resolve_branch(parent_branch)
-            });
-        if !disagrees && !source_paths_nest(&source_path, &mounted_source) {
+        if !same_folder.overlap(&source_path, &mounted_source) {
             continue;
         }
 
@@ -2876,18 +3292,6 @@ pub async fn check_source_path_overlap(
             .node_path(repository.clone(), link_reference.local_node)
             .await
             .forward::<StateError>("Failed resolving link node")?;
-
-        if disagrees {
-            return Err(InvalidArguments {
-                reason: format!(
-                    "source path {} is already mounted at {} on another branch or with other \
-                     flags; mounts of the same folder have to agree on both",
-                    display_path(source_path.as_str()),
-                    display_path(&link_path),
-                ),
-            }
-            .into());
-        }
 
         return Err(InvalidArguments {
             reason: format!(
@@ -2958,32 +3362,25 @@ async fn resolve_link_node_at_path(
     repository: Arc<RepositoryContext>,
     link_path: &str,
 ) -> Result<LinkNodeAtPath, LinkError> {
-    let node_link = state
-        .find_node_link(repository.clone(), link_path)
+    let found = state
+        .locate_node(repository.clone(), link_path)
         .await
         .forward::<LinkError>("Invalid path")?;
 
-    if !node_link.is_valid() {
+    if !found.is_valid() {
         return Err(InvalidPath {
             path: link_path.to_string(),
         }
         .into());
     }
 
-    // `find_node_link` may have crossed parent links; resolve the owning repo
-    // and its state so the node/reference lookups target the right registry.
-    let (parent_repository, parent_state) = if node_link.repository == repository.id {
-        (repository.clone(), state.clone())
-    } else {
-        let owning = repository.to_link_context(node_link.repository).await;
-        let owning_state = State::deserialize(owning.clone(), node_link.revision)
-            .await
-            .forward::<LinkError>("Failed deserializing state")?;
-        (owning, owning_state)
-    };
+    // The path may cross parent links, so the node and reference lookups target the registry of
+    // the repository holding the link node.
+    let (local_node, (parent_repository, parent_state)) =
+        found.held((repository, state.clone())).into_parts();
 
     let link_node = parent_state
-        .node(parent_repository.clone(), node_link.node)
+        .node(parent_repository.clone(), local_node)
         .await
         .forward::<LinkError>("Failed deserializing state")?;
 
@@ -3001,7 +3398,7 @@ async fn resolve_link_node_at_path(
     Ok(LinkNodeAtPath {
         parent_repository,
         parent_state,
-        local_node: node_link.node,
+        local_node,
         link_node,
         link_context,
     })
@@ -3031,7 +3428,7 @@ pub async fn link_context_at_path(
 
 /// Resolves a link by path to its full context.
 ///
-/// Finds the node via `find_node_link` (which descends through any parent
+/// Finds the node via `State::locate_node` (which descends through any parent
 /// links), then looks up the node and its `LinkReference` in the OWNING
 /// repository — the innermost containing repo for a nested link, not the
 /// top-level one. `parent_repository`/`parent_state`/`local_node` identify
@@ -3362,21 +3759,21 @@ async fn link_node_at_path(
     repository: Arc<RepositoryContext>,
     link_path: &str,
 ) -> Result<Option<(NodeID, Node)>, LinkError> {
-    let node_link = match state.find_node_link(repository.clone(), link_path).await {
-        Ok(node_link) => node_link,
+    let found = match state.locate_node(repository.clone(), link_path).await {
+        Ok(found) => found,
         Err(err) if err.is_node_not_found() => return Ok(None),
         Err(err) => return Err(err).forward::<LinkError>("Failed resolving link path"),
     };
-    if !node_link.is_valid() || node_link.repository != repository.id {
+    let Some(node_id) = found.own_node().filter(NodeIDExt::is_valid_node_id) else {
         return Ok(None);
-    }
+    };
 
     let node = state
-        .node(repository, node_link.node)
+        .node(repository, node_id)
         .await
         .forward::<LinkError>("Failed deserializing state")?;
 
-    Ok(node.is_link().then_some((node_link.node, node)))
+    Ok(node.is_link().then_some((node_id, node)))
 }
 
 /// Whether `changes`, a merge's diff sorted by path, delete the link to `link_repository` at
@@ -3967,9 +4364,9 @@ async fn classify_link_pin(
         && let Some((state_incoming_pin, current_mount)) = &kept_mount
     {
         conflicted = !state_incoming_pin
-            .find_node_link(link_context.clone(), current_mount.as_str())
+            .locate_node(link_context.clone(), current_mount.as_str())
             .await
-            .is_ok_and(|node_link| node_link.is_valid_or_root());
+            .is_ok_and(|found| found.is_valid_or_root());
     }
 
     let carried = incoming_row.carried(sides.incoming_branch, sides.staged_branch);
@@ -4000,13 +4397,13 @@ async fn classify_link_pin(
         Some((state_target_pin, _, _, incoming_mount)) => {
             // A remount the pin does not travel with lands at the pin this branch keeps, and one
             // that pin does not hold leaves the two sides' rows for the user to choose between.
-            let node_link = state_target_pin
-                .find_node_link(link_context, incoming_mount.as_str())
+            let node_id = state_target_pin
+                .locate_node(link_context, incoming_mount.as_str())
                 .await
                 .ok()
-                .filter(|node_link| node_link.is_valid_or_root());
-            match node_link {
-                Some(node_link) => Some((incoming_mount, node_link.node)),
+                .and_then(|found| found.own_node());
+            match node_id {
+                Some(node_id) => Some((incoming_mount, node_id)),
                 None => return conflict(carried, incoming_node.child),
             }
         }

@@ -4,19 +4,18 @@ use std::sync::Arc;
 
 use lore_credential::get_domain_or_empty;
 use lore_credential::insecure_decode_token;
+use lore_credential::is_expired;
+use lore_credential::is_token_expired;
 use lore_credential::token_store::vulnerable_all_tokens;
 use lore_credential::verify_jwt_usage_for_remote;
 use lore_error_set::prelude::*;
 use lore_transport::Connection;
 use lore_transport::UserService;
-use lore_transport::auth::exchange::is_expired;
 use serde::Serialize;
 
 use crate::errors::*;
-use crate::event::EventError;
 use crate::event::LoreEvent;
 use crate::interface::LoreArray;
-use crate::interface::LoreError;
 use crate::interface::LoreString;
 use crate::lore::RepositoryId;
 use crate::lore::execution_context;
@@ -38,19 +37,11 @@ pub enum UserInfoError {
     SlowDown,
 }
 
-impl EventError for UserInfoError {
-    fn translated(&self) -> LoreError {
-        LoreError::Internal
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
-}
-
 /// Event data resolving a user identity to a display name.
 #[repr(C)]
-#[derive(Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreAuthUserInfoEventData {
     /// User identity
@@ -61,7 +52,9 @@ pub struct LoreAuthUserInfoEventData {
 
 /// Event data describing a stored authentication identity.
 #[repr(C)]
-#[derive(Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreAuthIdentityEventData {
     /// Auth service URL
@@ -343,7 +336,7 @@ fn access_token_event(
     let (authorized_domains, expires) = match lore_credential::insecure_decode_token(&token) {
         Ok(decoded) => (
             decoded.claims.acceptable_root_domains().join(", "),
-            decoded.claims.expires * 1000,
+            decoded.claims.expires.saturating_mul(1000),
         ),
         Err(_) => (String::new(), 0),
     };
@@ -388,7 +381,9 @@ fn strip_current_user(ids: Vec<String>, current_user_id: &str) -> (bool, Vec<Str
 
 /// Event data carrying a user token along with the identity it belongs to.
 #[repr(C)]
-#[derive(Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreAuthUserTokenEventData {
     /// User identity
@@ -442,15 +437,20 @@ impl ResolvedIdentity {
     pub fn session_valid(&self) -> bool {
         self.local_user_info
             .as_ref()
-            .is_some_and(|info| session_valid(info.expires, self.refresh_expires))
+            .is_some_and(|info| token_session_valid(info, self.refresh_expires))
     }
 }
 
-/// Whether a login is still usable: its token, expiring at `expires`, has not expired, or a
-/// refresh token can still renew it. `refresh_expires` is `None` without a refresh token, and
-/// `Some(0)` for one with no deadline.
-pub fn session_valid(expires: u64, refresh_expires: Option<u64>) -> bool {
-    if !is_expired(expires) {
+/// Whether a login described by `info` is still usable: its token has not expired (measured
+/// against `lifetime_ms` or `iat` and `received_at` when available), or a refresh token can still
+/// renew it.
+pub fn token_session_valid(info: &lore_credential::UserInfo, refresh_expires: Option<u64>) -> bool {
+    if !is_token_expired(
+        info.issued_at,
+        info.expires,
+        info.received_at,
+        info.lifetime_ms,
+    ) {
         return true;
     }
     match refresh_expires {

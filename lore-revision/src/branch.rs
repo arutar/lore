@@ -46,7 +46,6 @@ use crate::change::NodeChange;
 use crate::commit;
 use crate::errors::*;
 use crate::event;
-use crate::event::EventError;
 use crate::find;
 use crate::hash;
 use crate::history;
@@ -57,7 +56,6 @@ use crate::immutable::read_options_from_repository;
 use crate::interface::LoreArray;
 use crate::interface::LoreBranchLocation;
 use crate::interface::LoreBranchPoint;
-use crate::interface::LoreError;
 use crate::interface::LoreFileAction;
 use crate::interface::LoreString;
 use crate::link;
@@ -81,19 +79,22 @@ use crate::revision;
 use crate::revision::Diff3Summary;
 use crate::revision::DiffItem;
 use crate::revision::DiffResult;
+use crate::runtime::CancellationCheck;
+use crate::runtime::check_cancelled;
 use crate::state;
 use crate::state::State;
 use crate::state::StateData;
 use crate::state::StateError;
 use crate::store::KeyType;
 use crate::store::MatchedStoreError;
+use crate::store::ReadConsistency;
 use crate::util;
 use crate::util::path::RelativePath;
 use crate::util::serde::u8_as_bool;
 
 /// Event data reported when a branch is created.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchCreateEventData {
     /// Name of the created branch.
@@ -107,7 +108,7 @@ pub struct LoreBranchCreateEventData {
 
 /// Event data reported when a branch is archived.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchArchiveEventData {
     /// Name of the archived branch.
@@ -116,7 +117,7 @@ pub struct LoreBranchArchiveEventData {
 
 /// Event data reported at the start of a branch listing.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchListBeginEventData {
     /// Location the listed branches come from.
@@ -125,7 +126,7 @@ pub struct LoreBranchListBeginEventData {
 
 /// Event data reported for each branch in a branch listing.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchListEntryEventData {
     /// Location this branch comes from.
@@ -154,7 +155,7 @@ pub struct LoreBranchListEntryEventData {
 
 /// Event data reported at the end of a branch listing.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchListEndEventData {
     /// Location the listed branches came from.
@@ -165,7 +166,7 @@ pub struct LoreBranchListEndEventData {
 
 /// Event data reported at the start of a branch diff.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchDiffBeginEventData {
     /// Identifier of the source branch of the diff.
@@ -186,7 +187,7 @@ pub struct LoreBranchDiffBeginEventData {
 
 /// Event data describing a single changed node in a branch diff.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchDiffNodeData {
     /// File action applied to the node.
@@ -228,7 +229,7 @@ impl LoreBranchDiffNodeData {
 
 /// Event data reported at the start of the change section of a branch diff.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchDiffChangeBeginEventData {
     /// Number of changes that follow.
@@ -237,7 +238,7 @@ pub struct LoreBranchDiffChangeBeginEventData {
 
 /// Event data reporting a single change in a branch diff.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchDiffChangeEventData {
     /// The changed node.
@@ -246,7 +247,9 @@ pub struct LoreBranchDiffChangeEventData {
 
 /// Event data reported at the end of the change section of a branch diff.
 #[repr(C)]
-#[derive(Clone, Default, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, Default, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchDiffChangeEndEventData {
     /// Unused placeholder field.
@@ -255,7 +258,7 @@ pub struct LoreBranchDiffChangeEndEventData {
 
 /// Event data reported at the start of the conflict section of a branch diff.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchDiffConflictBeginEventData {
     /// Number of conflicts that follow.
@@ -264,7 +267,7 @@ pub struct LoreBranchDiffConflictBeginEventData {
 
 /// Event data reporting a single conflict in a branch diff.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchDiffConflictEventData {
     /// The change on the source side of the conflict.
@@ -275,7 +278,9 @@ pub struct LoreBranchDiffConflictEventData {
 
 /// Event data reported at the end of the conflict section of a branch diff.
 #[repr(C)]
-#[derive(Clone, Default, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, Default, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchDiffConflictEndEventData {
     /// Unused placeholder field.
@@ -284,7 +289,9 @@ pub struct LoreBranchDiffConflictEndEventData {
 
 /// Event data reported at the end of a branch diff.
 #[repr(C)]
-#[derive(Clone, Default, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, Default, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchDiffEndEventData {
     /// Unused placeholder field.
@@ -293,7 +300,7 @@ pub struct LoreBranchDiffEndEventData {
 
 /// Event data reported when a branch is protected.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchProtectEventData {
     /// Name of the protected branch.
@@ -302,7 +309,7 @@ pub struct LoreBranchProtectEventData {
 
 /// Event data reported when a branch is unprotected.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchUnprotectEventData {
     /// Name of the unprotected branch.
@@ -311,6 +318,7 @@ pub struct LoreBranchUnprotectEventData {
 
 #[error_set]
 pub enum BranchError {
+    Cancelled,
     LinkPinsDiverge,
     BranchNotFound,
     BranchAlreadyExists,
@@ -356,34 +364,6 @@ pub enum BranchError {
     SharedStoreNotFound,
     TokenNotFound,
     MissingIdentity,
-}
-
-impl EventError for BranchError {
-    fn translated(&self) -> LoreError {
-        match self {
-            BranchError::Disconnected(_) => LoreError::Connection,
-            BranchError::SlowDown(_) => LoreError::SlowDown,
-            BranchError::Oversized(_) => LoreError::Oversized,
-            BranchError::FileNotFound(_) => LoreError::FileNotFound,
-            BranchError::NotFound(_)
-            | BranchError::BranchNotFound(_)
-            | BranchError::RevisionNotFound(_)
-            | BranchError::LayerNotFound(_)
-            | BranchError::LinkNotFound(_)
-            | BranchError::NodeNotFound(_) => LoreError::NotFound,
-            BranchError::AddressNotFound(_) => LoreError::AddressNotFound,
-            BranchError::PayloadNotFound(_) => LoreError::PayloadNotFound,
-            BranchError::InvalidPath(_)
-            | BranchError::InvalidArguments(_)
-            | BranchError::Divergent(_) => LoreError::InvalidArguments,
-            BranchError::BranchAlreadyExists(_) => LoreError::AlreadyExists,
-            _ => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 pub const MAX_DIVERGENT_HISTORY_LENGTH: usize = 500;
@@ -3502,8 +3482,10 @@ impl LinkedBranches {
 /// Repinning `state` writes a revision on top of `current_latest`, which is returned as the
 /// branch's latest, and `state_staged` is rebased onto it. A dry run stops before the creates.
 ///
-/// A failing create starts no more, deletes the branches made, and returns its error naming its
-/// links. The other failures are logged.
+/// A repository that refuses the caller is skipped, with the repositories linked only below it,
+/// and a link following its parent there keeps its pin and the branch it followed. A failing create
+/// starts no more, deletes the branches made, and returns its error naming its links. The other
+/// failures are logged.
 async fn create_linked_branches(
     cascade: &LinkCascade<'_>,
     repository: &Arc<RepositoryContext>,
@@ -3530,32 +3512,52 @@ async fn create_linked_branches(
         .forward::<BranchError>("walking the nested links")?;
     let repositories =
         link::try_join_links(reached.into_iter().map(cascade_start).collect()).await?;
-    if repositories.is_empty() || cascade.dry_run {
+    let refusing = groups.iter().any(|(link_id, _)| link::denied(*link_id));
+    if (repositories.is_empty() && !refusing) || cascade.dry_run {
         return Ok(LinkedBranches::unchanged(current_latest));
     }
 
-    let creates = (0..repositories.len())
-        .map(|position| create_cascade_branch(cascade, &repositories[position]))
+    let creates = repositories
+        .iter()
+        .map(|linked| {
+            link::skip_denied(
+                (linked.reached.repository, &linked.start().mount_path),
+                create_cascade_branch(cascade, linked),
+            )
+        })
         .collect();
     let results = link::join_links_until_failure(creates).await;
+    let reachable = link::reachable_around(
+        repositories.iter().map(|linked| &linked.reached),
+        link::denied,
+    );
 
     let mut outcomes = Vec::with_capacity(results.len());
     let mut created = Vec::new();
+    let mut orphaned = Vec::new();
     let mut failures = Vec::new();
-    for (linked, result) in repositories.iter().zip(results) {
+    let mut branched = Vec::with_capacity(results.len());
+    for (linked, result) in repositories.into_iter().zip(results) {
         match result {
-            Ok((remote, outcome)) => {
-                if !outcome.reused {
-                    created.push(LinkedBranch {
-                        repository: linked.reached.repository,
-                        remote,
-                    });
+            Ok(Some((remote, outcome))) => {
+                let made = (!outcome.reused).then_some(LinkedBranch {
+                    repository: linked.reached.repository,
+                    remote,
+                });
+                if !reachable.contains(&linked.reached.repository) {
+                    orphaned.extend(made);
+                    continue;
                 }
+                created.extend(made);
                 outcomes.push(outcome);
+                branched.push(linked);
             }
+            Ok(None) => {}
             Err(err) => failures.push((err, linked)),
         }
     }
+    delete_linked_branches(orphaned, cascade.branch).await;
+    let repositories = branched;
     if let Some((first, mounts)) = log_cascade_failures(cascade, failures) {
         delete_linked_branches(created, cascade.branch).await;
         return Err(first).forward_with::<BranchError, _>(|| {
@@ -3584,7 +3586,7 @@ async fn create_linked_branches(
         &groups,
         (&repositories, &index),
         &outcomes,
-        current_latest,
+        (current_branch, current_latest),
     )
     .await
     {
@@ -3723,7 +3725,7 @@ async fn create_cascade_branch(
 /// line of its own. None where nothing failed.
 fn log_cascade_failures(
     cascade: &LinkCascade<'_>,
-    failures: Vec<(BranchError, &CascadeRepository)>,
+    failures: Vec<(BranchError, CascadeRepository)>,
 ) -> Option<(BranchError, String)> {
     let mut failures = failures.into_iter();
     let (first, first_linked) = failures.next()?;
@@ -3751,9 +3753,9 @@ async fn store_cascade_repins(
     groups: &[(RepositoryId, Vec<CascadeMount>)],
     (repositories, index): (&[CascadeRepository], &HashMap<RepositoryId, usize>),
     outcomes: &[link::LinkBranchOutcome],
-    current_latest: Hash,
+    (current_branch, current_latest): (BranchId, Hash),
 ) -> Result<(Hash, Option<Hash>), BranchError> {
-    let linked: Vec<Vec<usize>> = repositories
+    let (linked, holds_refused): (Vec<Vec<usize>>, Vec<bool>) = repositories
         .iter()
         .zip(outcomes)
         .map(|(linked, outcome)| {
@@ -3764,27 +3766,35 @@ async fn store_cascade_repins(
                 .iter()
                 .find(|walked| walked.pin == start)
             {
-                Some(walked) if !outcome.reused => walked
-                    .linked
-                    .iter()
-                    .filter_map(|repository| index.get(repository).copied())
-                    .collect(),
-                _ => Vec::new(),
+                Some(walked) if !outcome.reused => (
+                    walked
+                        .linked
+                        .iter()
+                        .filter_map(|repository| index.get(repository).copied())
+                        .collect(),
+                    walked.linked.iter().copied().any(link::denied),
+                ),
+                _ => (Vec::new(), false),
             }
         })
+        .unzip();
+    let repins: Vec<bool> = linked
+        .iter()
+        .zip(holds_refused)
+        .map(|(below, refused)| refused || !below.is_empty())
         .collect();
 
     let mut heads: Vec<Hash> = repositories
         .iter()
         .map(|linked| linked.start().pin)
         .collect();
-    if linked.iter().any(|below| !below.is_empty()) {
+    if repins.contains(&true) {
         // Few linked repositories hold links, so their repins are boxed rather than held by
         // every create over links.
         Box::pin(repin_holders(
             cascade,
             (repositories, index),
-            &linked,
+            (&linked, &repins),
             &mut heads,
         ))
         .await?;
@@ -3797,23 +3807,24 @@ async fn store_cascade_repins(
         groups,
         (repositories, index),
         &heads,
-        current_latest,
+        (current_branch, current_latest),
     )
     .await
 }
 
-/// Repins the links each of `repositories` holds at the pin its branch starts at, in the levels
-/// [`repin_levels`] orders them in, the repositories of a level at once, and records each head.
+/// Repins the links each of `repositories` that `repins` marks holds at the pin its branch starts
+/// at, in the levels [`repin_levels`] orders them in, the repositories of a level at once, and
+/// records each head.
 async fn repin_holders(
     cascade: &LinkCascade<'_>,
     (repositories, index): (&[CascadeRepository], &HashMap<RepositoryId, usize>),
-    linked: &[Vec<usize>],
+    (linked, repins): (&[Vec<usize>], &[bool]),
     heads: &mut [Hash],
 ) -> Result<(), BranchError> {
     for level in repin_levels(linked) {
         let work = level
             .iter()
-            .filter(|&&position| !linked[position].is_empty())
+            .filter(|&&position| repins[position])
             .map(|&position| {
                 let heads = &*heads;
                 async move {
@@ -3835,7 +3846,7 @@ async fn repin_holders(
                         &holder_groups,
                         (repositories, index),
                         heads,
-                        holder.start().pin,
+                        (holder.start().branch, holder.start().pin),
                     )
                     .await?;
                     Ok::<_, BranchError>((position, head))
@@ -3899,10 +3910,32 @@ async fn repin_links(
     groups: &[(RepositoryId, Vec<CascadeMount>)],
     (repositories, index): (&[CascadeRepository], &HashMap<RepositoryId, usize>),
     heads: &[Hash],
-    current_latest: Hash,
+    (current_branch, current_latest): (BranchId, Hash),
 ) -> Result<(Hash, Option<Hash>), BranchError> {
+    let mount_state = |mount: &CascadeMount| match state_staged {
+        Some(state_staged) if mount.staged => state_staged,
+        _ => state,
+    };
     for (link_id, mounts) in groups {
         let Some(&position) = index.get(link_id) else {
+            if link::denied(*link_id) {
+                // The branch is not made in a repository that refused the caller, so a link
+                // following its parent there stays on the branch it followed.
+                for mount in mounts.iter().filter(|mount| mount.link.is_tracking()) {
+                    let mount_state = mount_state(mount);
+                    mount_state.mark_dirty();
+                    mount_state
+                        .link_update(
+                            repository.clone(),
+                            mount.link.repository,
+                            mount.link.resolve_branch(current_branch),
+                            mount.link.signature,
+                            mount.link.local_node,
+                        )
+                        .await
+                        .forward::<BranchError>("keeping a link on the branch it followed")?;
+                }
+            }
             continue;
         };
         let (pin, head) = (repositories[position].start().pin, heads[position]);
@@ -3915,12 +3948,8 @@ async fn repin_links(
             if mount.link.is_tracking() && signature == mount.link.signature {
                 continue;
             }
-            let mount_state = match state_staged {
-                Some(state_staged) if mount.staged => state_staged,
-                _ => state,
-            };
             link::update_link_pin_by_node(
-                mount_state,
+                mount_state(mount),
                 repository.clone(),
                 mount.link.repository,
                 BranchId::default(),
@@ -4078,7 +4107,7 @@ pub mod test_util {
             &[],
             (&[], &HashMap::new()),
             &[],
-            Hash::default(),
+            (BranchId::default(), Hash::default()),
         ))
     }
 }
@@ -4526,7 +4555,7 @@ pub async fn list(
 ) -> Result<impl tokio_stream::Stream<Item = Context>, BranchError> {
     let stream = repository
         .read_mutable_store()
-        .list(repository.id, KeyType::BranchId)
+        .list(repository.id, KeyType::BranchId, ReadConsistency::Strong)
         .await
         .forward::<BranchError>("Failed to list branches from store")?;
 
@@ -4541,7 +4570,7 @@ pub async fn list(
 pub async fn purge_mapped_branches(repository: Arc<RepositoryContext>) {
     let listed = match repository
         .read_mutable_store()
-        .list(repository.id, KeyType::BranchId)
+        .list(repository.id, KeyType::BranchId, ReadConsistency::Strong)
         .await
     {
         Ok(listed) => listed,
@@ -4706,7 +4735,11 @@ pub async fn list_output(
 
         let all_metadata_stream = repository
             .read_mutable_store()
-            .list(repository.id, KeyType::BranchMetadata)
+            .list(
+                repository.id,
+                KeyType::BranchMetadata,
+                ReadConsistency::Strong,
+            )
             .await
             .forward::<BranchError>("Failed to list branch metadata from store")?;
 
@@ -5114,19 +5147,58 @@ pub async fn diff3_with_source_cap(
     ))
     .await?;
 
-    // `resolve_diff3_base` is documented never to return this, so reaching it is a
-    // bug rather than a repository state. Refuse anyway: the alternative is a diff
-    // against the empty tree that conflicts on every path in both branches.
-    if base_revision.is_zero() {
-        lore_error!(
-            "Resolved a zero base revision for branch {source_branch} revision {source_revision} and branch {target_branch} revision {target_revision}"
-        );
-        return Err(BranchError::from(Divergent));
-    }
+    diff3_with_base(
+        repository,
+        base_revision,
+        merges,
+        source_revision,
+        target_revision,
+        path,
+        include_same,
+        auto_resolve,
+        source_cap,
+        history_walk_concurrency,
+        graft_view,
+        link_settlement,
+        tx,
+    )
+    .await
+}
 
+/// The 3-way diff of `source_revision` and `target_revision` against `base_revision`.
+///
+/// `base_revision` and `merges` must come from one [`resolve_diff3_base_and_merges`] call for
+/// the same two revisions: `merges` is what that base's search proved, and describes no other
+/// base.
+#[allow(clippy::too_many_arguments)]
+pub async fn diff3_with_base(
+    repository: Arc<RepositoryContext>,
+    base_revision: Hash,
+    merges: revision::MergesAcross,
+    source_revision: Hash,
+    target_revision: Hash,
+    path: Option<RelativePath>,
+    include_same: bool,
+    auto_resolve: bool,
+    source_cap: Option<usize>,
+    history_walk_concurrency: Option<usize>,
+    graft_view: Option<Arc<crate::filter::Filter>>,
+    link_settlement: revision::LinkSettlement,
+    tx: mpsc::Sender<Result<DiffItem, BranchError>>,
+) -> Result<Diff3Summary, BranchError> {
     lore_debug!(
         "Revision diff base {base_revision} source {source_revision} target {target_revision}"
     );
+
+    // Base resolution refuses to answer a zero base, so reaching it is a bug rather than a
+    // repository state. Refuse anyway: the alternative is a diff against the empty tree that
+    // conflicts on every path on both sides.
+    if base_revision.is_zero() {
+        lore_error!(
+            "Asked for a 3-way diff of revision {source_revision} and revision {target_revision} against a zero base"
+        );
+        return Err(BranchError::from(Divergent));
+    }
 
     let summary = Diff3Summary {
         base: base_revision,
@@ -5158,9 +5230,9 @@ pub async fn diff3_with_source_cap(
 /// [`emit_diff_item_with_auto_resolve`].
 ///
 /// A function of its own because its items live across several awaits: kept in
-/// [`diff3_with_source_cap`] they would take space in its future while the base
-/// is resolved as well. The caller pins the diff, which takes the caller's
-/// arguments rather than a copy of them. Each item is relayed after the
+/// the caller's body they would take space in its future beside the diff. The
+/// caller pins the diff, which takes the caller's arguments rather than a copy
+/// of them. Each item is relayed after the
 /// `select!` that received it, and a diff that outlives the channel is awaited
 /// after the loop, so no item is held twice.
 #[lore_macro::test_pub]
@@ -5338,8 +5410,7 @@ pub fn resolve_diff3_base(
 /// [`resolve_diff3_base`], also answering what the search for the base proved about merges
 /// between the two branches: [`revision::MergesAcross::NoneAboveBase`] where the branches differ
 /// and no merge in the repository joins them above the base.
-#[lore_macro::test_pub]
-pub(crate) async fn resolve_diff3_base_and_merges(
+pub async fn resolve_diff3_base_and_merges(
     repository: Arc<RepositoryContext>,
     source_branch: BranchId,
     source_revision: Hash,
@@ -5750,7 +5821,9 @@ async fn find_revision_in_history_line(
     let mut line = load_history_line(repository.clone(), newer_revision).await?;
     let mut scanned = 0;
 
+    let cancellation = CancellationCheck::current();
     loop {
+        cancellation.check()?;
         if line[scanned..]
             .iter()
             .any(|&(_, revision)| revision == older_revision)
@@ -5819,7 +5892,9 @@ async fn find_common_revision_in_history_lines(
     let mut other_loaded = 0;
     let mut passed = (0, 0);
 
+    let cancellation = CancellationCheck::current();
     loop {
+        cancellation.check()?;
         for (line, loaded) in [(&self_line, self_loaded), (&other_line, other_loaded)] {
             if let Some((number, revision)) =
                 history::out_of_order(|index| line.get(index).copied(), loaded)
@@ -5991,6 +6066,14 @@ impl AncestorWalk {
         }
     }
 
+    /// Keeps `err` as the failure the search reports, unless an earlier walk failed first.
+    async fn record_failure(&self, err: StateError) {
+        let mut failure = self.failure.write().await;
+        if failure.is_none() {
+            *failure = Some(err);
+        }
+    }
+
     async fn prune_at_or_below(&self) -> u64 {
         match *self.common.read().await {
             Some((found_revision_number, _found_revision)) => {
@@ -6028,7 +6111,12 @@ async fn find_ancestor_walker(
     let mut revision = revision_start;
     let mut pager = find::LinePager::new(repository.clone(), walk.lines_ahead.clone());
     let mut below = u64::MAX;
+    let cancellation = CancellationCheck::current();
     while revision != Hash::default() {
+        // The search checks for cancellation itself once every walk has joined.
+        if cancellation.check().is_err() {
+            break;
+        }
         // Read the line a page at a time rather than a revision per request, no further down than
         // the walks prune: the floor, or the newest common ancestor found so far. A refused page
         // leaves each state to be read on its own below.
@@ -6040,10 +6128,7 @@ async fn find_ancestor_walker(
             Ok(state) => state,
             Err(err) => {
                 lore_warn!("Could not deserialize state for {revision} - aborting walk: {err}");
-                let mut failure = walk.failure.write().await;
-                if failure.is_none() {
-                    *failure = Some(err);
-                }
+                walk.record_failure(err).await;
                 break;
             }
         };
@@ -6225,6 +6310,7 @@ async fn search_common_ancestor_from_merges(
     });
 
     walk.join(&mut tasks).await;
+    check_cancelled()?;
 
     let found = *walk.common.read().await;
     let failure = walk.failure.write().await.take();

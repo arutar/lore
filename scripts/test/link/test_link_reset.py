@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 import json
 import os
+import re
 
 import pytest
 from error_types import (
@@ -11,12 +12,15 @@ from error_types import (
     NotSupportedError,
 )
 from link_helpers import (
+    DEFAULT_LINK_MOUNT,
     assert_crr_clean,
+    assert_mount_exposes,
     build_nested_link_repos_at,
     link_entry,
     make_parent_with_link,
     make_repo,
     make_repo_renumbering_folder,
+    mounted_files,
     remount,
 )
 from lore_parsers import parse_status_json
@@ -670,60 +674,65 @@ def test_link_reset_staged_remove(new_lore_repo):
         ), f"Restored content of {p} must match source repo content"
 
 
-@pytest.mark.smoke
-@pytest.mark.parametrize("staged", [True, False], ids=["staged", "unstaged"])
-def test_link_reset_puts_back_a_link_a_file_replaced(new_lore_repo, staged):
-    """`reset` of a link whose mount a file replaced puts the link back, in the registry and
-    on disk, whether the file was staged or not."""
-    linked = {"shared/linked.txt": "linked\n", "shared/sub/deep.txt": "deep\n"}
-    parent, link_repo = make_parent_with_link(
-        new_lore_repo,
-        "shared",
-        {path.removeprefix("shared/"): content for path, content in linked.items()},
-    )
+REPLACED_LINK_FILES = {"top.txt": "top\n", "sub/a.txt": "a\n"}
+REPLACED_LINK_EXPOSES = {
+    "/": (["sub", "top.txt"], {"top.txt": "top\n"}),
+    "sub": (["a.txt"], {"a.txt": "a\n"}),
+}
 
+
+def replace_mount_with_a_file(new_lore_repo, source_path: str, staged: bool):
+    """Returns (parent, link_repo) with the link at `shared`, mounting `source_path`, replaced
+    by a file, staged when `staged`."""
+    parent, link_repo = make_parent_with_link(
+        new_lore_repo, "shared", REPLACED_LINK_FILES, source_path=source_path
+    )
     parent.rmtree("shared")
     parent.write_files({"shared": "file\n"})
     if staged:
         parent.stage("shared", scan=True)
-    parent.reset("shared")
+    return parent, link_repo
 
+
+def assert_link_put_back(parent: Lore, link_repo: Lore, source_path: str):
+    names, files = REPLACED_LINK_EXPOSES[source_path]
     assert_crr_clean(
         parent,
         expected_files_present=[],
         expected_files_absent=[],
         expected_link_registry={link_repo.get_id(): True},
     )
-    for path, content in linked.items():
-        with parent.open_file(path) as f:
-            assert f.read() == content, f"{path} must hold the linked content"
+    assert_mount_exposes(parent, "shared", source_path, names)
+    assert mounted_files(parent, "shared") == files
 
 
 @pytest.mark.smoke
-def test_link_forced_unstage_puts_back_a_link_a_staged_file_replaced(new_lore_repo):
+@pytest.mark.parametrize("source_path", ["/", "sub"], ids=["root", "folder"])
+@pytest.mark.parametrize("staged", [True, False], ids=["staged", "unstaged"])
+def test_link_reset_puts_back_a_link_a_file_replaced(
+    new_lore_repo, staged, source_path
+):
+    """`reset` of a link whose mount a file replaced puts the link back, in the registry and
+    on disk, exposing what the link mounts, whether the file was staged or not."""
+    parent, link_repo = replace_mount_with_a_file(new_lore_repo, source_path, staged)
+
+    parent.reset("shared")
+
+    assert_link_put_back(parent, link_repo, source_path)
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("source_path", ["/", "sub"], ids=["root", "folder"])
+def test_link_forced_unstage_puts_back_a_link_a_staged_file_replaced(
+    new_lore_repo, source_path
+):
     """A forced `unstage` of a link whose mount a staged file replaced puts the link back, in the
     registry and on disk, and discards the file's add."""
-    linked = {"shared/linked.txt": "linked\n", "shared/sub/deep.txt": "deep\n"}
-    parent, link_repo = make_parent_with_link(
-        new_lore_repo,
-        "shared",
-        {path.removeprefix("shared/"): content for path, content in linked.items()},
-    )
+    parent, link_repo = replace_mount_with_a_file(new_lore_repo, source_path, True)
 
-    parent.rmtree("shared")
-    parent.write_files({"shared": "file\n"})
-    parent.stage("shared", scan=True)
     parent.unstage("shared", force=True)
 
-    assert_crr_clean(
-        parent,
-        expected_files_present=[],
-        expected_files_absent=[],
-        expected_link_registry={link_repo.get_id(): True},
-    )
-    for path, content in linked.items():
-        with parent.open_file(path) as f:
-            assert f.read() == content, f"{path} must hold the linked content"
+    assert_link_put_back(parent, link_repo, source_path)
 
 
 @pytest.mark.smoke
@@ -912,7 +921,8 @@ def test_link_reset_root_handles_staged_link_changes(new_lore_repo):
     # --- staged-add ---
     main_repo = make_repo(new_lore_repo, {"main.txt": "initial content\n"})
     source_repo = make_repo(new_lore_repo, {"a.txt": "link source content\n"})
-    link_path = "linked"
+    # Nested, so the removal stages the directory above the mount too.
+    link_path = "vendor/linked"
     main_repo.link_add(link_path, source_repo.get_id(), "/")
     main_repo.reset(".")
     assert_crr_clean(
@@ -1044,3 +1054,45 @@ def test_dry_run_unstage_and_reset_keep_a_staged_link_change(new_lore_repo, chan
     repo.unstage("lnk")
 
     assert (repo.link_list(), repo.read_files()) == committed
+
+
+def dumped_id(repo: Lore, path: str) -> str:
+    """The node id `repository dump --path` reports for `path`."""
+    name = re.escape(os.path.basename(path))
+    match = re.search(
+        rf"^{name} id (\d+)\b", repo.repository_dump(path=path), re.MULTILINE
+    )
+    assert match, path
+    return match.group(1)
+
+
+@pytest.mark.smoke
+def test_link_reset_of_a_linked_path_leaves_a_parent_move_beside_a_deleted_node(
+    new_lore_repo,
+):
+    """A reset of a path inside a link resets the linked file and keeps the parent's dirty move
+    onto a deleted node of the same name, though both repositories number that node alike."""
+    repo, _link_repo = make_parent_with_link(
+        new_lore_repo,
+        parent_files={"README.txt": "parent\n", "b.txt": "moved\n"},
+        link_files={"README.txt": "linked\n"},
+    )
+    linked = f"{DEFAULT_LINK_MOUNT}/README.txt"
+    assert dumped_id(repo, "README.txt") == dumped_id(repo, linked)
+    repo.remove_file("README.txt")
+    repo.dirty("README.txt")
+    os.rename(os.path.join(repo.path, "b.txt"), os.path.join(repo.path, "README.txt"))
+    repo.dirty_move("b.txt", "README.txt")
+    status = parse_status_json(repo.status(json=True))
+    repo.write_files({linked: "local\n"})
+
+    repo.file_reset(linked)
+
+    files = repo.read_files()
+    assert files[linked] == "linked\n"
+    assert files["README.txt"] == "moved\n"
+    assert "b.txt" not in files
+    assert parse_status_json(repo.status(json=True)) == status
+    assert ("README.txt", "move", "b.txt") in {
+        (entry["path"], entry["action"], entry["fromPath"]) for entry in status
+    }

@@ -22,6 +22,7 @@ use lore_revision::event::LoreEvent;
 use lore_revision::interface::LoreArray;
 use lore_revision::store::event::LoreStorageMutableListEntryEventData;
 use lore_revision::store::event::LoreStorageMutableListItemCompleteEventData;
+use lore_storage::ReadConsistency;
 use lore_storage::StorageError;
 
 use crate::call_delegation::dispatch_call;
@@ -34,7 +35,15 @@ use crate::storage::store::StoreInternal;
 /// One `mutable_list` item — the `(partition, key_type)` to list.
 #[repr(C)]
 #[derive(
-    Copy, Clone, Default, Debug, PartialEq, ValidateText, bitcode::Encode, bitcode::Decode,
+    Copy,
+    Clone,
+    Default,
+    Debug,
+    PartialEq,
+    ValidateText,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
 )]
 pub struct LoreStorageMutableListItem {
     /// Caller-chosen id echoed back on every entry and the terminal event
@@ -47,7 +56,16 @@ pub struct LoreStorageMutableListItem {
 
 /// Arguments for `lore_storage_mutable_list`.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(mutable_list_local)]
 pub struct LoreStorageMutableListArgs {
     /// Open storage handle
@@ -109,7 +127,7 @@ async fn list_item(
     match store
         .mutable
         .clone()
-        .list(item.partition, item.key_type)
+        .list(item.partition, item.key_type, ReadConsistency::Strong)
         .await
     {
         Ok(stream) => {

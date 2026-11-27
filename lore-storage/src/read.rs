@@ -1743,8 +1743,8 @@ pub fn read_into_file(
 /// its own offset and peak memory follows the leaf rather than the content — and no metadata comes
 /// back, because the handle moves into the pipeline. A hole is left unwritten, and every leaf is
 /// written, one of zeros included. That path writes through `<path><temp_file_extension>` and
-/// renames, unless `options.direct_write` asks for the target to be written in place. With
-/// `options.resume_write`, for a range of at least
+/// renames, unless `options` asks for the target to be written in place
+/// ([`ReadOptions::writes_in_place`]). With `options.resume_write`, for a range of at least
 /// [`RESUME_WRITE_MIN_LEN`](crate::options::RESUME_WRITE_MIN_LEN), the temporary file is kept when
 /// the write fails or stops, and a later write of the same content and range resumes from it, as
 /// [`crate::resume`] describes: the file it resumes is sized, and is emptied and written again as a
@@ -1789,7 +1789,7 @@ fn write_root_to_file(
         if fragment.flags & FragmentFlags::PayloadFragmented == FragmentFlags::PayloadFragmented {
             let mut retry = crate::retry(10, 10_000, 10);
 
-            let mut file_path = if options.direct_write {
+            let mut file_path = if options.writes_in_place() {
                 path.to_path_buf()
             } else {
                 let mut temporary_path = path.as_os_str().to_os_string();
@@ -1798,9 +1798,9 @@ fn write_root_to_file(
             };
 
             let mut resuming = options.resume_write
-                && !options.direct_write
+                && !options.writes_in_place()
                 && range.len() >= crate::options::RESUME_WRITE_MIN_LEN;
-            let mut temporary = (!options.direct_write && !resuming)
+            let mut temporary = (!options.writes_in_place() && !resuming)
                 .then(|| TemporaryFile::guard(file_path.clone()));
 
             let mut create_parent = options.create_parent;
@@ -1918,7 +1918,7 @@ fn write_root_to_file(
             // The handle holds no userspace buffer, so there is nothing to flush.
             drop(file);
 
-            if !options.direct_write {
+            if !options.writes_in_place() {
                 lore_io::IoDriver::global()
                     .rename(file_path.as_path(), path)
                     .await
@@ -1941,7 +1941,13 @@ fn write_root_to_file(
             let mut create_parent = options.create_parent;
             let metadata = loop {
                 let directory_missing = {
-                    let err = match write_all_to_file(path, buffer.clone(), options.sync_data).await
+                    let err = match write_all_to_file(
+                        path,
+                        buffer.clone(),
+                        options.sync_data,
+                        options.writes_unbuffered(),
+                    )
+                    .await
                     {
                         Ok(meta) => break meta,
                         Err(err) => err,
@@ -2069,11 +2075,13 @@ fn create_parent_directory(path: &Path) -> impl Future<Output = Result<(), Stora
 /// separate stat round-trip and the metadata comes off the open handle rather than from a second
 /// path resolve. The whole-file operation refuses anything above `lore_io::WHOLE_FILE_LIMIT`,
 /// which the content written here cannot reach: an unfragmented fragment's content is bounded by
-/// `FRAGMENT_SIZE_THRESHOLD`.
+/// `FRAGMENT_SIZE_THRESHOLD`. With `unbuffered` the file is written past the file cache
+/// ([`lore_io::IoDriver::write_file_bytes_unbuffered`]).
 pub async fn write_all_to_file(
     path: impl AsRef<Path>,
     buffer: Bytes,
     sync_data: bool,
+    unbuffered: bool,
 ) -> Result<std::fs::Metadata, std::io::Error> {
     let path = path.as_ref().to_path_buf();
     let buffer_len = buffer.len();
@@ -2081,20 +2089,66 @@ pub async fn write_all_to_file(
     // Reissued while the open fails transiently: a reader of this path grants no write access
     // for as long as it is open, so on Windows a write landing on a file being hashed or
     // fragmented waits for that scan rather than failing the materialization.
-    let metadata = crate::fs_util::retry_transient(|| {
+    let (metadata, written_unbuffered) = crate::fs_util::retry_transient(|| {
         let path = path.clone();
         let buffer = buffer.clone();
         async move {
-            lore_io::IoDriver::global()
-                .write_file_bytes(path, buffer, sync_data)
-                .await
+            let driver = lore_io::IoDriver::global();
+            if unbuffered {
+                driver
+                    .write_file_bytes_unbuffered(path, buffer, sync_data)
+                    .await
+            } else {
+                driver
+                    .write_file_bytes(path, buffer, sync_data)
+                    .await
+                    .map(|metadata| (metadata, false))
+            }
         }
     })
     .await?;
+    if unbuffered && !written_unbuffered {
+        log_unbuffered_fallback(&path, &"the volume refused it");
+    }
 
     lore_base::lore_trace!("Wrote {} bytes to {}", buffer_len, path.display());
 
     Ok(metadata)
+}
+
+/// Logs that `path`, refused an unbuffered write for `reason`, is written through the file cache,
+/// once per command: for the first such file of each `LORE_CONTEXT`, and once in a process that
+/// runs without one. Only the last context to warn is remembered, so commands that run at the same
+/// time in one process warn again each time they alternate. [`lore_io::unbuffered_fallbacks`]
+/// counts them all.
+fn log_unbuffered_fallback(path: &Path, reason: &dyn std::fmt::Display) {
+    type Context = std::sync::Weak<dyn std::any::Any + Send + Sync>;
+    static LOGGED: std::sync::Mutex<Option<Context>> = std::sync::Mutex::new(None);
+    static LOGGED_WITHOUT_CONTEXT: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    let first = match lore_base::runtime::try_lore_context() {
+        Some(context) => {
+            let mut logged = LOGGED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let current = Arc::downgrade(&context);
+            let first = !logged
+                .as_ref()
+                .is_some_and(|logged| std::sync::Weak::ptr_eq(logged, &current));
+            *logged = Some(current);
+            first
+        }
+        None => !LOGGED_WITHOUT_CONTEXT.swap(true, Ordering::Relaxed),
+    };
+    if first {
+        lore_base::lore_warn!(
+            "Writing {} through the file cache: {reason}. Further files of this command refused \
+             an unbuffered write are written so with no further warning, unless another command \
+             in this process warns in between.",
+            path.display()
+        );
+    }
 }
 
 /// The root a key resolved to, plus the session the tail should use for anything the root refers

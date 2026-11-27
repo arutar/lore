@@ -71,10 +71,14 @@ async fn list_recursive(
 
         let resolved_branch = link_reference.resolve_branch(parent_branch);
 
-        let described =
-            super::describe_link(link_context.clone(), link_reference.signature, &local_node)
-                .await
-                .forward_with::<LinkError, _>(|| super::unreachable(link_reference.repository))?;
+        let Some(described) = super::skip_denied(
+            (link_reference.repository, &full_path),
+            super::describe_link(link_context.clone(), link_reference.signature, &local_node),
+        )
+        .await?
+        else {
+            continue;
+        };
 
         event::LoreEvent::LinkEntry(LoreLinkEntryEventData {
             link: link_reference.repository,
@@ -108,7 +112,7 @@ async fn list_recursive(
 
 /// Data for an event describing a link that has staged changes.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreLinkStagedEntryEventData {
     /// Path of the link within the parent repository.
@@ -190,9 +194,15 @@ async fn list_staged_recursive(
         };
 
         let link_repository = repository.to_link_context(link_ref.repository).await;
-        let link_state = State::deserialize(link_repository.clone(), link_ref.signature)
-            .await
-            .forward_with::<LinkError, _>(|| super::unreachable(link_ref.repository))?;
+        let Some(link_state) = super::skip_denied(
+            (link_ref.repository, &full_path),
+            State::deserialize(link_repository.clone(), link_ref.signature),
+        )
+        .await
+        .forward::<LinkError>("Failed deserializing state")?
+        else {
+            continue;
+        };
 
         if node.is_staged() && !node.is_staged_add() {
             let staged_file_count = crate::state::count_staged_files(

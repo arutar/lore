@@ -9,7 +9,6 @@ use serde::Serialize;
 use crate::change::FileAction;
 use crate::errors::*;
 use crate::event;
-use crate::event::EventError;
 use crate::file::diff::DiffContent;
 use crate::file::diff::PatchEntry;
 use crate::file::diff::normalise_text;
@@ -17,7 +16,6 @@ use crate::file::diff::read_node_content;
 use crate::file::diff::read_working_content;
 use crate::file::diff::walk_patch;
 use crate::file::history;
-use crate::interface::LoreError;
 use crate::lore::Hash;
 use crate::lore::RepositoryId;
 use crate::lore_debug;
@@ -37,6 +35,7 @@ pub const DEFAULT_MAX_REVISIONS: u32 = 100;
 
 #[error_set]
 pub enum AuditError {
+    Cancelled,
     LinkPinsDiverge,
     InvalidArguments,
     InvalidPath,
@@ -84,25 +83,6 @@ pub enum AuditError {
     MissingIdentity,
 }
 
-impl EventError for AuditError {
-    fn translated(&self) -> LoreError {
-        match self {
-            AuditError::InvalidArguments(_) | AuditError::InvalidPath(_) => {
-                LoreError::InvalidArguments
-            }
-            AuditError::FileNotFound(_) => LoreError::FileNotFound,
-            AuditError::RevisionNotFound(_)
-            | AuditError::BranchNotFound(_)
-            | AuditError::NotFound(_) => LoreError::NotFound,
-            _ => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
-}
-
 /// What a range of lines resolved to, or why it did not resolve.
 ///
 /// An outcome is named the same way wherever it is reported, as
@@ -110,7 +90,17 @@ impl EventError for AuditError {
 /// cbindgen:prefix-with-name
 /// cbindgen:rename-all=ScreamingSnakeCase
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Debug,
+    Serialize,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum LoreFileAuditOutcome {
     /// Resolved to the revision that last changed the lines.
@@ -166,7 +156,9 @@ impl LoreFileAuditOutcome {
 /// audit that fails before the walk starts reports no range. Read the
 /// completion status before treating the ranges received as the whole answer.
 #[repr(C)]
-#[derive(Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFileAuditEventData {
     /// Identifier of the repository the range came from. A walk that follows
@@ -315,8 +307,8 @@ pub async fn audit(
 
     // A path the revision does not hold is a not-found path, whether it was
     // deleted or never added, and no walk runs for it.
-    let node_link = state
-        .find_node_link(repository.clone(), relative_path.as_str())
+    let found = state
+        .locate_node(repository.clone(), relative_path.as_str())
         .await
         .map_matched_err("resolving the audited path", |m| match m {
             MatchedStateErrors::NodeNotFound(traced) => AuditError::FileNotFound(
@@ -327,7 +319,7 @@ pub async fn audit(
             ),
             other => other.forward::<AuditError>("resolving the audited path"),
         })?;
-    if !node_link.is_valid() {
+    if !found.is_valid() {
         return Err(FileNotFound { resource: path }.into());
     }
 
@@ -336,19 +328,13 @@ pub async fn audit(
     let working = read_working_text(&repository, &relative_path, &options).await?;
 
     // A path resolving into a linked repository carries its own node ids and its
-    // own chain, so the walk continues against that repository's revision. The
-    // link is entered through the resolve the read path already uses, which
-    // leaves a path in the audit's own repository where it stands.
-    let linked = node_link.crosses_link(&repository, &state);
-    let (repository, state) = node_link
-        .resolve(repository, state)
-        .await
-        .forward::<AuditError>("Failed to enter the repository the path resolves into")?;
+    // own chain, so the walk continues against that repository's revision.
+    let linked = found.crossed_link();
+    let (node, (repository, state)) = found.held((repository, state)).into_parts();
 
-    let committed =
-        read_audited_content(repository.clone(), &state, node_link.node, &relative_path)
-            .await?
-            .into_text();
+    let committed = read_audited_content(repository.clone(), &state, node, &relative_path)
+        .await?
+        .into_text();
 
     let query = AuditQuery {
         repository: repository.id,
@@ -365,7 +351,7 @@ pub async fn audit(
     walk_predecessors(
         repository.clone(),
         state,
-        node_link.node,
+        node,
         unattributed,
         committed,
         &WalkRequest {

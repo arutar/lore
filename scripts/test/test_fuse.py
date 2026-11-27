@@ -3,8 +3,8 @@
 """FUSE instances served by the background service: clone, read, sync, a clone
 that starts the service, a service stop that meets a busy mount, a forced stop after a
 replacement service remounted, two service starts racing one that is mounting, the
-relayed staged-link and latest-list listings, an interactive commit through the mount,
-and a diff after a sync."""
+relayed staged-link and latest-list listings, a listing of the shared stores outside the
+service, an interactive commit through the mount, and a diff after a sync."""
 
 import contextlib
 import errno
@@ -29,6 +29,7 @@ from service_util import (
     LORE_SERVICE_SOCKET_VAR,
     SERVICE_UNAVAILABLE,
 )
+from test_utils import shared_stores_listed_outside_the_service, store_listing
 
 from lore import Lore, external_root
 
@@ -184,11 +185,7 @@ def test_reset_through_fuse_puts_back_the_spelling_the_revision_holds(
 def store_holding(repo: Lore, instance: Lore) -> str | None:
     """The path of the shared store whose registry lists `instance`, read through
     `repo`, an ordinary clone, or `None` where none lists it."""
-    wanted = os.path.realpath(instance.path)
-    for store, entry in repo.shared_store_list(include_instances=True).entries.items():
-        if any(os.path.realpath(path) == wanted for _, path in entry.instances or []):
-            return store
-    return None
+    return store_listing(repo.shared_store_list(include_instances=True), instance)
 
 
 @pytest.mark.smoke
@@ -213,6 +210,23 @@ def test_fuse_clone_uses_a_shared_store_unasked(
     assert store is not None and os.path.realpath(store).startswith(base + os.sep), (
         f"the store under {base} lists the clone, not {store}"
     )
+
+
+@pytest.mark.smoke
+def test_shared_store_list_outside_the_service_lists_a_mounted_clone(
+    new_lore_repo, fuse_mounts
+):
+    """A listing of the shared stores with their instances, run outside the
+    service with relaying off, lists a mounted virtual clone, whose store the
+    service holds for as long as it serves the clone, rather than waiting for
+    the store until the service stops."""
+    repo: Lore = new_lore_repo()
+    repo.write_commit_push("initial", {"readme.txt": b"listed beside the service\n"})
+    fuse = fuse_clone(repo, fuse_mounts)
+
+    stores, output = shared_stores_listed_outside_the_service(repo)
+
+    assert store_listing(stores, fuse) is not None, output
 
 
 @pytest.mark.smoke
@@ -1379,11 +1393,24 @@ def linking_repositories(new_lore_repo, link_path: str) -> tuple[Lore, Lore, str
     return parent, linked, base
 
 
-def assert_read_only_and_empty(path: str) -> None:
-    """The directory at `path` lists nothing, carries no write bit, and refuses a file: the
-    kernel refuses it by the mode, and the mount, which answers `EROFS`, a caller the mode does
-    not stop."""
-    assert listing(path) == []
+# What the linked repository of `linking_repositories` holds, by path.
+LINKED = {"linked.txt": "linked content\n", "sub/deep.txt": "deep\n"}
+
+
+def assert_read_only_serving(path: str, files: dict[str, str]) -> None:
+    """The directory at `path` serves `files`, by path below it, and nothing else, with no write
+    bit on it or anything below it, and refuses a new file: the kernel refuses it by the mode,
+    and the mount, which answers `EROFS`, a caller the mode does not stop."""
+    served = {}
+    for directory, directories, names in os.walk(path):
+        for name in [*directories, *names]:
+            mode = os.stat(os.path.join(directory, name)).st_mode
+            assert mode & 0o222 == 0, f"{name}: {oct(mode)}"
+        for name in names:
+            served[os.path.relpath(os.path.join(directory, name), path)] = Path(
+                directory, name
+            ).read_text()
+    assert served == files
     mode = os.stat(path).st_mode
     assert stat.S_ISDIR(mode) and mode & 0o222 == 0, oct(mode)
     with pytest.raises(OSError) as refused:
@@ -1395,9 +1422,9 @@ def assert_read_only_and_empty(path: str) -> None:
 def test_a_commit_after_a_sync_brings_a_link_leaves_the_linked_repository_whole(
     new_lore_repo, fuse_mounts
 ):
-    """A sync bringing a link serves it as an empty, read-only directory, and a commit after it
-    commits only the parent's own change: the linked repository keeps its files and the link
-    its pin."""
+    """A sync bringing a link serves it read-only with the content of the revision it pins, and
+    a commit after it commits only the parent's own change: the linked repository keeps its
+    files and the link its pin."""
     parent, linked, base = linking_repositories(new_lore_repo, "vendor/lib")
     pin = linked.branch_info().local_latest
     fuse = parent.clone(vfs="fuse", use_shared_store=True, revision=base)
@@ -1405,7 +1432,7 @@ def test_a_commit_after_a_sync_brings_a_link_leaves_the_linked_repository_whole(
 
     fuse.sync()
     assert listing(fuse.path) == ["README.txt", "vendor"]
-    assert_read_only_and_empty(os.path.join(fuse.path, "vendor", "lib"))
+    assert_read_only_serving(os.path.join(fuse.path, "vendor", "lib"), LINKED)
     fuse.write_files({"README.txt": "edited\n"})
     fuse.stage(scan=True)
     assert status_of(fuse) == {"README.txt": True}
@@ -1424,17 +1451,17 @@ def test_a_commit_after_a_sync_brings_a_link_leaves_the_linked_repository_whole(
 
 
 @pytest.mark.smoke
-def test_a_link_at_the_root_is_served_as_an_empty_read_only_directory(
+def test_a_link_at_the_root_is_served_read_only_with_the_content_it_pins(
     new_lore_repo, fuse_mounts
 ):
-    """A FUSE instance of a revision holding a link at its root lists the link as an empty,
-    read-only directory beside the root's files, and takes writes beside it."""
+    """A FUSE instance of a revision holding a link at its root serves the link read-only with
+    the content of the revision it pins, beside the root's files, and takes writes beside it."""
     parent, _, _ = linking_repositories(new_lore_repo, "lib")
     fuse = fuse_clone(parent, fuse_mounts)
 
     assert listing(fuse.path) == ["README.txt", "lib"]
     assert cat(os.path.join(fuse.path, "README.txt")) == b"baseline\n"
-    assert_read_only_and_empty(os.path.join(fuse.path, "lib"))
+    assert_read_only_serving(os.path.join(fuse.path, "lib"), LINKED)
     fuse.write_files({"new.txt": "new\n"})
     assert status_of(fuse) == {"new.txt": False}
 
@@ -1442,24 +1469,41 @@ def test_a_link_at_the_root_is_served_as_an_empty_read_only_directory(
 @pytest.mark.smoke
 @pytest.mark.parametrize("force", [False, True], ids=["checked", "forced"])
 def test_link_update_and_remove_on_a_fuse_instance_commit_and_push(
-    new_lore_repo, fuse_mounts, force
+    new_lore_repo, fuse_mounts, lore_service_runner, force
 ):
-    """`lore link update` moving a link's pin and `lore link remove` work on a FUSE instance,
-    writing nothing through the mount, and what they commit and push is what an ordinary clone
-    then holds."""
+    """`lore link update` moving a link's pin and `lore link remove` on a FUSE instance change
+    what the mount serves at once, and a remount before their commit serves what they staged.
+    Each commit leaves status clean, and what they push is what an ordinary clone then holds."""
     parent, linked, _ = linking_repositories(new_lore_repo, "vendor/lib")
     fuse = fuse_clone(parent, fuse_mounts)
+    lib = os.path.join(fuse.path, "vendor", "lib")
+    assert_read_only_serving(lib, LINKED)
     linked.write_commit_push("Linked two", {"two.txt": "two\n"})
 
+    def remount() -> None:
+        killed = lore_service_runner.service_processes[None]
+        killed.kill()
+        killed.wait()
+        fuse.status()
+
     fuse.link_update("vendor/lib")
+    moved = {**LINKED, "two.txt": "two\n"}
+    assert_read_only_serving(lib, moved)
+    remount()
+    assert_read_only_serving(lib, moved)
     fuse.commit("Move the pin")
+    assert status_of(fuse) == {}
     fuse.push()
     check: Lore = parent.clone()
     check.sync()
     assert check.read_files()["vendor/lib/two.txt"] == "two\n"
 
     fuse.link_remove("vendor/lib", force=force)
+    assert listing(os.path.join(fuse.path, "vendor")) == []
+    remount()
+    assert listing(os.path.join(fuse.path, "vendor")) == []
     fuse.commit("Remove the link")
+    assert status_of(fuse) == {}
     fuse.push()
     check.sync()
     assert check.read_files() == {"README.txt": "baseline\n"}

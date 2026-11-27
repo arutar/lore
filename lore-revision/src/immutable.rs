@@ -63,7 +63,9 @@ use lore_storage::read::Flown;
 
 /// Event data reporting a single fragment written or deduplicated.
 #[repr(C)]
-#[derive(Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFragmentWriteEventData {
     /// The fragment that was written
@@ -173,6 +175,7 @@ pub fn read_options_from_repository(repository: &RepositoryContext) -> ReadOptio
         no_local_write: local_reads == LocalReads::Skip,
         strict_local: local_reads == LocalReads::Strict,
         direct_write: repository.direct_file_write(),
+        write_in_place: repository.write_in_place(),
         sync_data,
         trust_remote: repository.remote_trust.unwrap_or(globals_trust_remote),
         ..Default::default()
@@ -292,11 +295,9 @@ pub async fn store_raw_remote_retry(
     loop {
         match remote_storage.put(address, fragment, payload.clone()).await {
             Ok(_) => return Ok(()),
-            Err(ProtocolError::SlowDown(_)) => {
+            Err(error @ ProtocolError::SlowDown(_)) => {
                 if !retry.wait().await {
-                    return Err(ImmutableError::internal(
-                        "Failed to store fragments, remote error",
-                    ));
+                    return Err(error).forward::<ImmutableError>("storing fragment to remote");
                 }
             }
             Err(ProtocolError::Disconnected(_)) => {

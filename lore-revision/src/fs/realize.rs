@@ -28,7 +28,9 @@ use crate::errors::WriteRequired;
 use crate::event;
 use crate::filter::Filter;
 use crate::filter::FilterMode;
+use crate::filter::FilterPath;
 use crate::filter::FilterStates;
+use crate::filter::Scope;
 use crate::fs::filesystem_provider::FilesystemDiffIntent;
 use crate::fs::filesystem_provider::FsError;
 use crate::fs::filesystem_provider::HoldOptions;
@@ -37,6 +39,7 @@ use crate::fs::filesystem_provider::InstanceOperationImpl;
 use crate::fs::filesystem_provider::ListedEntry;
 use crate::fs::filesystem_provider::MeasuredNode;
 use crate::hash;
+use crate::interface::LoreNodeType;
 use crate::interface::LoreString;
 use crate::link::LinkFlags;
 use crate::lore::BranchId;
@@ -73,11 +76,13 @@ use crate::revision::sync::SyncVerifyArgs;
 use crate::revision::sync::SyncVerifyStats;
 use crate::stage;
 use crate::state;
+use crate::state::HeldNode;
 use crate::state::Mark;
 use crate::state::NameChange;
 use crate::state::NodeComparison;
 use crate::state::NodeMapping;
 use crate::state::State;
+use crate::state::StateNodeChildrenWithNameIterator;
 use crate::state::os_diff::ListedSpellings;
 use crate::state::os_diff::types_agree;
 use crate::util;
@@ -324,10 +329,13 @@ pub async fn realize_state(
         );
     }
 
-    let view_change = options
-        .view
-        .is_some()
-        .then(|| NodeMapping::root(repository_target.clone(), state_target.clone()));
+    let emptied = if !options.root_files.is_empty() {
+        EmptiedDirectories::Excluded
+    } else if options.view.is_some() || options.reset {
+        EmptiedDirectories::Target
+    } else {
+        EmptiedDirectories::Unplaced
+    };
     realize_changes(
         repository_target,
         operation,
@@ -337,7 +345,7 @@ pub async fn realize_state(
         None,
         dry_run,
         None, /* Not a merge */
-        view_change.as_ref(),
+        Some(&emptied),
         stats,
     )
     .await?;
@@ -358,37 +366,50 @@ pub async fn realize_state(
 /// Such a directory is one change, expanded as verification and realization get to it, so a sync
 /// deleting millions of files doesn't hold a change for each. Where the changes are taken one by
 /// one, by a dependency set, by keeping local work file by file or by hashing every file, each is
-/// listed.
-async fn diff_for_sync(
+/// listed. Under a target view, but for a dependency set, a delete in a directory the view
+/// excludes that holds something it places is marked
+/// ([`DiffFlags::PlacesDirectories`](state::DiffFlags::PlacesDirectories)).
+///
+/// Not an `async fn`, which would hold a second copy of `repository_target` across the walk.
+#[allow(clippy::manual_async_fn)]
+fn diff_for_sync(
     repository_current: Arc<RepositoryContext>,
     state_current: Arc<State>,
     repository_target: Arc<RepositoryContext>,
     state_target: Arc<State>,
     options: &SyncOptions,
-) -> Result<(Vec<NodeChange>, Option<Arc<state::Subtrees>>), SyncError> {
-    if options.root_files.is_empty() && !options.forward_changes && !options.force_hash_check {
-        let (changes, subtrees) = state::diff_collect_subtrees(
+) -> impl Future<Output = Result<(Vec<NodeChange>, Option<Arc<state::Subtrees>>), SyncError>> + '_ {
+    let flags = if repository_target.filter.view.is_empty() || !options.root_files.is_empty() {
+        state::DiffFlags::empty()
+    } else {
+        state::DiffFlags::PlacesDirectories
+    };
+    async move {
+        if options.root_files.is_empty() && !options.forward_changes && !options.force_hash_check {
+            let (changes, subtrees) = state::diff_collect_subtrees(
+                repository_current,
+                state_current,
+                repository_target,
+                state_target,
+                flags,
+                options.filter_mode,
+            )
+            .await
+            .forward::<SyncError>("Failed to calculate delta changes between states")?;
+            return Ok((changes, Some(subtrees)));
+        }
+        let changes = state::diff_collect_flagged(
             repository_current,
             state_current,
             repository_target,
             state_target,
+            flags,
             options.filter_mode,
         )
         .await
         .forward::<SyncError>("Failed to calculate delta changes between states")?;
-        return Ok((changes, Some(subtrees)));
+        Ok((changes, None))
     }
-    let changes = state::diff_collect(
-        repository_current,
-        state_current,
-        repository_target,
-        state_target,
-        None, /* No subpath */
-        options.filter_mode,
-    )
-    .await
-    .forward::<SyncError>("Failed to calculate delta changes between states")?;
-    Ok((changes, None))
 }
 
 /// The changes a verify leaves to realize, and the files a link delete among them keeps.
@@ -683,25 +704,6 @@ fn changes_in_dependency_set(
         .collect()
 }
 
-/// The node `current` holds at `path`, as [`NodeMapping::node_at`] finds it, with the context and
-/// state holding it: the linked ones the walk opened where `path` crosses a link, and `current`'s
-/// own elsewhere.
-async fn held_at(
-    current: &NodeMapping,
-    path: &RelativePath,
-) -> Option<(NodeID, crate::link::LinkedState)> {
-    let below = path.below(&current.path)?;
-    let (node_link, linked) = current
-        .state
-        .find_relative(current.repository.clone(), current.node, below)
-        .await
-        .ok()?;
-    node_link.node.is_valid_node_id().then(|| {
-        let held = linked.unwrap_or_else(|| (current.repository.clone(), current.state.clone()));
-        (node_link.node, held)
-    })
-}
-
 /// How the working file at `repository_path`, the path a change names or the one a move carries
 /// its file from, compares to the node it was realized from, and whether the current revision is
 /// what holds that node.
@@ -740,7 +742,10 @@ fn modification_against_measured_node<'a>(
 
         let from_is_current = change.from.mapping.state.revision() == current.state.revision();
         let held = if !from_is_current {
-            held_at(current, repository_path).await
+            current
+                .held_at(repository_path)
+                .await
+                .map(HeldNode::into_parts)
         } else if change.from.mapping.node.is_valid_node_id()
             || !info.is_file()
             || incoming.link_delete_above(repository_path).is_none()
@@ -966,14 +971,14 @@ async fn link_held_at(
     mapping: &NodeMapping,
     path: &RelativePath,
 ) -> Result<Option<(Arc<RepositoryContext>, Node)>, SyncError> {
-    let Some((found, (repository, state))) = held_at(mapping, path).await else {
+    let Some(held) = mapping.held_at(path).await else {
         return Ok(None);
     };
-    let node = state
-        .node(repository.clone(), found)
+    let node = held
+        .read()
         .await
         .forward::<SyncError>("Failed loading the link node the working tree stands on")?;
-    Ok(node.is_link().then_some((repository, node)))
+    Ok(node.is_link().then(|| (held.repository().clone(), node)))
 }
 
 /// What a sync does with the mount of a link it deletes or moves, once [`verify_mount`] has found
@@ -1055,24 +1060,31 @@ async fn incoming_writes<'a>(
     if change.action == change::FileAction::Delete {
         return Ok(IncomingWrites::Changes(incoming));
     }
-    let node = change
+    let link = change
         .to
         .get_node()
         .await
-        .forward::<SyncError>("Failed loading the incoming link node")?;
-    let Some((node, (repository, state))) =
-        open_mounted_tree(&change.to.mapping.repository, &node).await
-    else {
-        return Err(SyncError::internal(format!(
+        .forward::<SyncError>("Failed loading the incoming link node")?
+        .linked_node();
+    let Some((repository, state)) = crate::link::skip_denied(
+        (link.repository, change.path().as_str()),
+        link.open(&change.to.mapping.repository),
+    )
+    .await
+    .forward_with::<SyncError, _>(|| {
+        format!(
             "Failed to open the revision the link at {} moves to",
             change.path()
-        )));
+        )
+    })?
+    else {
+        return Ok(IncomingWrites::Nothing);
     };
     Ok(IncomingWrites::Tree(NodeMapping {
         repository,
         state,
         path: change.path().clone(),
-        node,
+        node: link.node,
     }))
 }
 
@@ -1247,6 +1259,8 @@ enum IncomingWrites<'a> {
     Changes(&'a IncomingChanges),
     /// The tree a link mounts there.
     Tree(NodeMapping),
+    /// Nothing, as a link to a repository that refuses the caller is left out.
+    Nothing,
 }
 
 impl IncomingWrites<'_> {
@@ -1256,6 +1270,7 @@ impl IncomingWrites<'_> {
         match self {
             IncomingWrites::Changes(incoming) => Ok(incoming.writes_meet(kept, filter)),
             IncomingWrites::Tree(incoming) => incoming_tree_meets(incoming, filter, kept).await,
+            IncomingWrites::Nothing => Ok(false),
         }
     }
 
@@ -1264,6 +1279,7 @@ impl IncomingWrites<'_> {
         match self {
             IncomingWrites::Changes(incoming) => incoming.writes_near(mount),
             IncomingWrites::Tree(_) => true,
+            IncomingWrites::Nothing => false,
         }
     }
 }
@@ -1289,16 +1305,9 @@ async fn incoming_tree_meets(
 ) -> Result<bool, SyncError> {
     let mut path = kept.path.clone();
     while path.as_str() != incoming.path.as_str() && incoming.path.covers(&path) {
-        let found = incoming.node_at(&path).await;
-        if found.node.is_valid_node_id() {
-            let (repository, state) = found
-                .resolve(incoming.repository.clone(), incoming.state.clone())
-                .await
-                .forward_with::<SyncError, _>(|| {
-                    format!("Failed to deserialize state {}", found.revision)
-                })?;
-            let is_directory = state
-                .node(repository, found.node)
+        if let Some(held) = incoming.held_at(&path).await {
+            let is_directory = held
+                .read()
                 .await
                 .forward::<SyncError>("Failed loading the incoming node")?
                 .is_directory();
@@ -1658,8 +1667,8 @@ impl KeptEntries {
 /// ([`MountWalk`]), which stays with the directories leading to it, and the files `held` names,
 /// lowercase and sorted, and answers what stayed. A forced removal takes everything. Where `shown`
 /// is `None`, the link's revision cannot be opened, so only an empty mount goes. A provider holding
-/// its state has no mount to remove
-/// ([`holds_state`](crate::fs::filesystem_provider::FilesystemProvider::holds_state)).
+/// its state has no mount to remove: the link it serves at `mount` is taken away
+/// ([`InstanceOperationImpl::place_link`]).
 ///
 /// `root` is the working tree's, to tell a nested repository by.
 pub(crate) async fn remove_link_mount(
@@ -1672,6 +1681,7 @@ pub(crate) async fn remove_link_mount(
 ) -> Result<KeptEntries, SyncError> {
     let mut kept = KeptEntries::default();
     if operation.holds_state() {
+        operation.place_link(mount, None, false).await?;
         return Ok(kept);
     }
     if execution_context().globals().force() {
@@ -1908,16 +1918,12 @@ impl IncomingChanges {
             .as_str()
             .splitn(mount_components + 1, '/')
             .nth(mount_components)?;
-        let (found, nested) = state
-            .find_relative(repository.clone(), *mounted, below)
+        let held = state
+            .locate_node_below(repository.clone(), *mounted, below)
             .await
-            .ok()?;
-        found.node.is_valid_node_id().then(|| {
-            (
-                found.node,
-                nested.unwrap_or_else(|| (repository.clone(), state.clone())),
-            )
-        })
+            .ok()?
+            .held((repository.clone(), state.clone()));
+        held.id().is_valid_node_id().then(|| held.into_parts())
     }
 
     /// The link delete mounted above `path`, or at it where `at_path` says so, the outermost
@@ -2386,15 +2392,13 @@ async fn tracked_source(
     from: &RelativePath,
 ) -> Option<(Arc<RepositoryContext>, Node)> {
     let repository = change.from.mapping.repository.clone();
-    if let Some(current) = merge_current {
-        let link = NodeMapping::root(repository.clone(), current.clone())
-            .node_at(from)
-            .await;
-        if link.node.is_valid_node_id() {
-            let (repository, state) = link.resolve(repository, current.clone()).await.ok()?;
-            let node = state.node(repository.clone(), link.node).await.ok()?;
-            return Some((repository, node));
-        }
+    if let Some(current) = merge_current
+        && let Some(held) = NodeMapping::root(repository.clone(), current.clone())
+            .held_at(from)
+            .await
+    {
+        let node = held.read().await.ok()?;
+        return Some((held.repository().clone(), node));
     }
     let node = change.from.get_node().await.ok()?;
     Some((repository, node))
@@ -2850,14 +2854,11 @@ pub async fn verify_filesystem(
         }
 
         if is_delete {
-            let current_node_link = current.node_at(change.path()).await;
-            let (repository_current, state_current) = current_node_link
-                .resolve(repository.clone(), current.state.clone())
+            let (subnode_current, (repository_current, state_current)) = current
+                .node_at(change.path())
                 .await
-                .forward_with::<SyncError, _>(|| {
-                    format!("Failed to deserialize state {}", current_node_link.revision)
-                })?;
-            let subnode_current = current_node_link.node;
+                .held((repository.clone(), current.state.clone()))
+                .into_parts();
             let state_from = change.from.mapping.state.clone();
             let mut directory_changes = state::diff_filesystem_subtree(
                 &operation,
@@ -2909,9 +2910,16 @@ pub async fn verify_filesystem(
                 has_modified_file = true;
                 Box::pin(report_local_work(&operation, &subchange)).await;
             }
-            directory_changes.finish().await.forward::<SyncError>(
+            let walked = directory_changes.finish().await.forward::<SyncError>(
                 "Failed to calculate delta changes between file system and target state",
             )?;
+            if let Some(path) = walked.unreadable.into_inner() {
+                lore_error!(
+                    "Deleted directory {} holds what cannot be read: {path}",
+                    change.path()
+                );
+                return Err(LocalModifications.into());
+            }
             if has_modified_file {
                 return Err(LocalModifications.into());
             }
@@ -2970,9 +2978,8 @@ impl MergeCurrent {
 /// from its base; it is `None` for changes that start from the revision the working tree stands
 /// on.
 ///
-/// `view_change` is the target revision at the root where the realize carries the tree to another
-/// view, as `lore sync --view` does, for the removal of the directories the new view no longer
-/// creates ([`remove_emptied_directories`]); it is `None` everywhere else.
+/// `emptied` says which directories the realize removes once its deletes and moves are done, which
+/// it does last ([`remove_emptied_directories`]); with `None` it leaves them to its caller.
 ///
 /// A change staged in `state_stage` inside a directory marked dirty as moved stages the
 /// directory's whole move, as staging inside it does.
@@ -2989,7 +2996,7 @@ pub(crate) fn realize_changes<'a>(
     state_stage: Option<Arc<State>>,
     dry_run: bool,
     merge_current: Option<MergeCurrent>,
-    view_change: Option<&'a NodeMapping>,
+    emptied: Option<&'a EmptiedDirectories>,
     stats: Arc<SyncRealizeStats>,
 ) -> impl Future<Output = Result<(), SyncError>> + 'a {
     async move {
@@ -3022,7 +3029,6 @@ pub(crate) fn realize_changes<'a>(
             state_stage: state_stage.clone(),
             dry_run,
             merge_current: merge_current.clone(),
-            view_change: view_change.cloned(),
             stats: stats.clone(),
         });
         let kept_directories =
@@ -3089,6 +3095,20 @@ pub(crate) fn realize_changes<'a>(
         drained?;
 
         remove_directories_moved_out_of(&operation, &changes, kept_directories).await;
+        if let Some(emptied) = emptied
+            && !dry_run
+            && !repository.is_layer()
+        {
+            remove_emptied_directories(
+                &operation,
+                &repository,
+                &changes,
+                &RelativePath::new(),
+                emptied,
+                &stats,
+            )
+            .await;
+        }
 
         Ok(())
     }
@@ -3313,9 +3333,6 @@ struct DeleteContext {
     dry_run: bool,
     /// What a merge's realize reads the working tree against ([`realize_changes`]).
     merge_current: Option<MergeCurrent>,
-    /// The target revision at the root, where the realize carries the tree to another view
-    /// ([`realize_changes`]).
-    view_change: Option<NodeMapping>,
     stats: Arc<SyncRealizeStats>,
 }
 
@@ -3388,18 +3405,6 @@ async fn realize_changes_delete(
         if !realize_delete(context, change, variants, &kept_lowercase).await? {
             kept.push(change.clone());
         }
-    }
-
-    if !context.dry_run && !context.repository.is_layer() {
-        remove_emptied_directories(
-            &context.operation,
-            &context.repository,
-            &delete_changes,
-            &RelativePath::new(),
-            context.view_change.as_ref(),
-            &context.stats,
-        )
-        .await;
     }
 
     Ok(kept)
@@ -3804,7 +3809,6 @@ async fn realize_delete(
         state_stage,
         dry_run,
         merge_current,
-        view_change: _,
         stats,
     } = context;
     let (dry_run, is_merge) = (*dry_run, merge_current.is_some());
@@ -3887,130 +3891,260 @@ async fn realize_delete(
     Ok(deleted)
 }
 
-/// Removes each directory below `floor` and above a delete in `changes` that the deletes left
-/// empty and the view does not place on disk ([`unplaced`]), deepest first, reporting each one
-/// removed. Each removal counts as a delete in `stats`, done and in total, and a progress event
-/// follows the last.
+/// Which directories a realize removes once its deletes and moves leave them empty. Each is one the
+/// view excludes, as one it keeps stays whatever it holds.
+#[lore_macro::test_pub]
+#[derive(Clone, Copy)]
+pub(crate) enum EmptiedDirectories {
+    /// Those the view excludes, where it re-includes below a directory it excludes.
+    Excluded,
+    /// Those [`Excluded`](Self::Excluded) takes but the ones above a delete or a move's source in
+    /// a linked tree, the changes carrying the tree to another revision under one view, from a walk
+    /// marking a delete beside what the view places
+    /// ([`DiffFlags::PlacesDirectories`](state::DiffFlags::PlacesDirectories)).
+    Unplaced,
+    /// Every one the view excludes, whether or not it re-includes below it: the realize carries the
+    /// tree to another view, or resets it to the target revision from the working tree.
+    Target,
+}
+
+/// Removes each directory below `floor` above a delete or a move's source in `changes`
+/// ([`emptied_directory_candidates`]) that is empty and that the view excludes, deepest first,
+/// reporting each one removed. Each removal counts as a delete in `stats`, done and in total, and a
+/// progress event follows the last.
 ///
-/// One still holding anything, a local file included, is kept. `view_change` is the target
-/// revision at `floor` where the deletes carry the tree to another view. `floor` is the root, or
-/// the mount of a layer, which stands whatever the view and is realized under the layer's context,
-/// so the layer's sync removes the directories below it rather than the realize. A realize under a
-/// link's context keeps every directory. The directories of a link the realized tree mounts are
-/// treated as any other. Under one view without a rule re-including below a directory it excludes,
-/// none of them is on disk to remove. Ancestors a delete shares with the one before it are
-/// gathered once, which sorted deletes make the most of.
+/// A directory stays where something stays below it ([`StayingDirectories`]): a write in
+/// `changes` the view keeps, a file the walk found beside a delete, a directory the view keeps, or
+/// one still holding anything, a local file included, which an `rmdir` refusing it finds. One the
+/// disk doesn't hold keeps none above it. Under [`EmptiedDirectories::Unplaced`] a directory above
+/// a delete in a linked tree stays, as the link's mount does. `floor` is the root, or the mount of
+/// a layer, which stands whatever the view and is realized under the layer's context, so the
+/// layer's sync removes the directories below it rather than the realize. A realize under a link's
+/// context keeps every directory. Under a view without a rule re-including below a directory it
+/// excludes, no excluded directory is on disk to remove but under [`EmptiedDirectories::Target`],
+/// and with no view every directory stays. Ancestors a change shares with the one before it are
+/// gathered once, which sorted changes make the most of.
 #[lore_macro::test_pub]
 pub(crate) async fn remove_emptied_directories(
     operation: &InstanceOperationImpl,
     repository: &RepositoryContext,
     changes: &[NodeChange],
     floor: &RelativePath,
-    view_change: Option<&NodeMapping>,
+    emptied: &EmptiedDirectories,
     stats: &Arc<SyncRealizeStats>,
 ) {
-    if repository.is_link() || (view_change.is_none() && !repository.filter.view.reincludes()) {
+    let filter = &repository.filter;
+    let nothing_to_remove = match emptied {
+        EmptiedDirectories::Target => filter.view.is_empty(),
+        _ => !filter.view.reincludes(),
+    };
+    if repository.is_link() || nothing_to_remove {
         return;
     }
+    let mut staying = emptied_directory_candidates(changes, floor);
+    if staying.directories.is_empty() {
+        return;
+    }
+    staying.mark_writes(filter, changes, emptied);
     let mut removed = false;
-    for directory in emptied_directory_candidates(changes, floor) {
-        if !unplaced(repository, view_change, &directory).await {
+    let mut next = 0;
+    loop {
+        let index = next;
+        let Some((directory, stays)) = staying.directories.get(index) else {
+            break;
+        };
+        next += 1;
+        if *stays {
             continue;
         }
-        if operation.remove_empty_directory(&directory).await.is_ok() {
-            stats
-                .complete
-                .file_delete_total
-                .fetch_add(1, Ordering::Relaxed);
-            stats.complete.file_delete.fetch_add(1, Ordering::Relaxed);
-            event::LoreEvent::RevisionSyncFile(LoreRevisionSyncFileEventData {
-                path: LoreString::from(&directory),
-                size: 0,
-                action: change::FileAction::Delete.into(),
-                flag_file: 0,
-            })
-            .send();
-            removed = true;
+        if !filter.excludes(directory, true, FilterMode::View) {
+            staying.mark(index);
+            continue;
         }
+        match operation.remove_empty_directory(directory).await {
+            Ok(()) => {}
+            Err(error) if error.is_file_not_found() => continue,
+            Err(_) => {
+                staying.mark(index);
+                continue;
+            }
+        }
+        stats
+            .complete
+            .file_delete_total
+            .fetch_add(1, Ordering::Relaxed);
+        stats.complete.file_delete.fetch_add(1, Ordering::Relaxed);
+        event::LoreEvent::RevisionSyncFile(LoreRevisionSyncFileEventData {
+            path: LoreString::from(directory),
+            size: 0,
+            action: change::FileAction::Delete.into(),
+            flag_file: 0,
+        })
+        .send();
+        removed = true;
     }
     if removed {
         stats.send_progress();
     }
 }
 
-/// Each directory below `floor` above a delete in `changes`, deepest first.
-fn emptied_directory_candidates(changes: &[NodeChange], floor: &RelativePath) -> Vec<RelativePath> {
+/// The directories [`remove_emptied_directories`] may remove, deepest first, each marked where it
+/// stays on disk. A directory staying keeps every directory above it, so marking one marks its
+/// ancestors among them, and stops at the first already marked, whose ancestors are.
+struct StayingDirectories {
+    /// Each directory with whether it stays, sorted by path, descending, which puts a directory
+    /// after every directory below it.
+    directories: Vec<(RelativePath, bool)>,
+}
+
+impl StayingDirectories {
+    /// Whether the directory at `index` stays.
+    fn stays(&self, index: usize) -> bool {
+        self.directories[index].1
+    }
+
+    /// The index of the directory at `path`, if it is one of them.
+    fn find(&self, path: &str) -> Option<usize> {
+        position(&self.directories, path)
+    }
+
+    /// The index of the nearest of them at or above `path`.
+    fn nearest_at_or_above(&self, path: &str) -> Option<usize> {
+        let mut path = path;
+        loop {
+            if let Some(index) = self.find(path) {
+                return Some(index);
+            }
+            path = path.rsplit_once('/')?.0;
+        }
+    }
+
+    /// Marks the directory at `index` and each one above it, which sort after it.
+    fn mark(&mut self, index: usize) {
+        let (marked, above) = self.directories.split_at_mut(index + 1);
+        let (directory, stays) = &mut marked[index];
+        *stays = true;
+        let mut path = directory.as_str();
+        while let Some((parent, _)) = path.rsplit_once('/') {
+            if let Some(index) = position(above, parent) {
+                if above[index].1 {
+                    return;
+                }
+                above[index].1 = true;
+            }
+            path = parent;
+        }
+    }
+
+    /// Marks each directory at or above a write in `changes` the view keeps ([`keeps_write`]),
+    /// and each directory above a delete or a move's source the walk found something the view
+    /// places beside ([`change::Flags::KeptBeside`]). Under
+    /// [`EmptiedDirectories::Unplaced`] it marks each directory above a delete or a move's source
+    /// in a linked tree as well, since the walk names no link's mount. A write is asked about only
+    /// below a directory not yet marked, and changes in one directory, adjacent in sorted changes,
+    /// look its candidate up once.
+    fn mark_writes(
+        &mut self,
+        filter: &Filter,
+        changes: &[NodeChange],
+        emptied: &EmptiedDirectories,
+    ) {
+        let mut previous: Option<(&str, Option<usize>)> = None;
+        for change in changes {
+            let in_link = matches!(emptied, EmptiedDirectories::Unplaced)
+                && change.from.mapping.repository.is_link();
+            if (in_link || change.flags.contains(change::Flags::KeptBeside))
+                && let Some((parent, _)) = change
+                    .move_source()
+                    .and_then(|source| source.as_str().rsplit_once('/'))
+                && let Some(index) = self.nearest_at_or_above(parent)
+                && !self.stays(index)
+            {
+                self.mark(index);
+            }
+            let path = change.path().as_str();
+            let (path, places) = if change.action == change::FileAction::Delete {
+                let stays = in_link || change.flags.contains(change::Flags::KeptBeside);
+                match path.rsplit_once('/') {
+                    Some((parent, _)) if stays => (parent, None),
+                    _ => continue,
+                }
+            } else {
+                (path, Some(change))
+            };
+            let nearest = self.find(path).or_else(|| {
+                let parent = path.rsplit_once('/')?.0;
+                match previous {
+                    Some((directory, nearest)) if directory == parent => nearest,
+                    _ => {
+                        let nearest = self.nearest_at_or_above(parent);
+                        previous = Some((parent, nearest));
+                        nearest
+                    }
+                }
+            });
+            let Some(index) = nearest.filter(|&index| !self.stays(index)) else {
+                continue;
+            };
+            if let Some(write) = places
+                && !keeps_write(filter, write)
+            {
+                continue;
+            }
+            self.mark(index);
+        }
+    }
+}
+
+/// Whether `filter`'s view keeps `write`, a change deleting nothing, at its path: a file, a link
+/// or a directory it keeps, which the realize places on disk whatever is written below it.
+fn keeps_write(filter: &Filter, write: &NodeChange) -> bool {
+    let path = write.path();
+    match write.to.flags.node_type() {
+        LoreNodeType::File => !filter.excludes(path, false, FilterMode::View),
+        LoreNodeType::Link => !filter.excludes_tree(path, true, FilterMode::View),
+        LoreNodeType::Directory => !filter.exclusion_states(path).excluded(FilterMode::View),
+    }
+}
+
+/// The index of the directory at `path` in `directories`, sorted by path, descending.
+fn position(directories: &[(RelativePath, bool)], path: &str) -> Option<usize> {
+    directories
+        .binary_search_by(|(directory, _)| path.cmp(directory.as_str()))
+        .ok()
+}
+
+/// Each directory below `floor` above a delete or a move's source in `changes`, deepest first,
+/// none of them marked yet.
+fn emptied_directory_candidates(
+    changes: &[NodeChange],
+    floor: &RelativePath,
+) -> StayingDirectories {
     let mut directories = Vec::new();
     let mut previous = "";
-    for change in changes
-        .iter()
-        .filter(|change| change.action == change::FileAction::Delete)
-    {
-        let mut directory = change.path().parent_path();
+    for change in changes {
+        let vacated = match change.action {
+            change::FileAction::Delete => change.path(),
+            _ => match change.move_source() {
+                Some(source) => source,
+                None => continue,
+            },
+        };
+        let mut directory = vacated.parent_path();
         while directory
             .below(floor)
             .is_some_and(|below| !below.is_empty())
             && !directory.covers(&previous)
         {
             let parent = directory.parent_path();
-            directories.push(directory);
+            directories.push((directory, false));
             directory = parent;
         }
-        previous = change.path().as_str();
+        previous = vacated.as_str();
     }
-    directories.sort_unstable_by(|left, right| right.as_str().cmp(left.as_str()));
-    directories.dedup_by(|left, right| left.as_str() == right.as_str());
-    directories
-}
-
-/// Whether `repository`'s view leaves `directory` off the disk once nothing below it stands: it
-/// excludes it, or, where the realize carries the tree to that view from another, `view_change`
-/// being the target revision at the realize's floor, the view includes it without creating it
-/// ([`FilterStates::creates_directory`]) or covering its subtree, and the target revision holds it
-/// with children ([`held_directory`]).
-async fn unplaced(
-    repository: &RepositoryContext,
-    view_change: Option<&NodeMapping>,
-    directory: &RelativePath,
-) -> bool {
-    let filter = &repository.filter;
-    let states = filter.exclusion_states(directory);
-    if states.excluded(FilterMode::View) {
-        return true;
-    }
-    let Some(target) = view_change else {
-        return false;
-    };
-    if states.creates_directory(false) || filter.view_covers_subtree(states, directory) {
-        return false;
-    }
-    held_directory(target, directory)
-        .await
-        .is_some_and(|node| node.child().is_some())
-}
-
-/// The node `target`'s revision holds at the directory `directory`, spelled from the top-level
-/// root below `target`'s path, crossing each link on the way into its linked tree; `None` where
-/// the revision holds nothing there, or `directory` is a link's mount, which stands on disk for
-/// the link whatever the view.
-async fn held_directory(target: &NodeMapping, directory: &RelativePath) -> Option<Node> {
-    let mut rest = directory.below(&target.path)?;
-    let mut side = state::DiffSide {
-        repository: target.repository.clone(),
-        state: target.state.clone(),
-        node: target.node,
-    };
-    loop {
-        let stop = side.stop(rest).await.ok()?;
-        match stop.at {
-            state::Stop::End => return side.state.node(side.repository, stop.node).await.ok(),
-            state::Stop::Link(link) if stop.length < rest.len() => {
-                rest = &rest[stop.length + 1..];
-                side = side.enter(&link).await.ok()?;
-            }
-            state::Stop::Link(_) | state::Stop::Missing => return None,
-        }
-    }
+    directories.sort_unstable_by(|(left, _), (right, _)| right.as_str().cmp(left.as_str()));
+    directories.dedup_by(|(left, _), (right, _)| left.as_str() == right.as_str());
+    StayingDirectories { directories }
 }
 
 struct SyncWorkItem {
@@ -4349,6 +4483,11 @@ async fn realize_moved_mount(
         let shown = mount_shown(change, current.as_ref(), staged.flatten().as_ref())
             .await?
             .flatten();
+        let link = Box::pin(crate::link::skip_denied(
+            (node.address.context.into(), path.as_str()),
+            open_pinned_link(&repository, node, path),
+        ))
+        .await?;
         remove_link_mount(
             operation,
             &change.from.mapping.repository.filter,
@@ -4360,11 +4499,14 @@ async fn realize_moved_mount(
         .await
         .forward::<SyncError>("Failed removing the subtree the link exposed")?
         .report(path);
+        let Some(link) = link else {
+            return Ok(());
+        };
         operation
             .create_dir_all(path)
             .await
             .forward::<SyncError>("Failed recreating the link directory")?;
-        return Box::pin(clone_added_link(&repository, operation, node, path)).await;
+        return Box::pin(clone_opened_link(link, operation, node, path)).await;
     }
 
     let from_node = change
@@ -4378,23 +4520,26 @@ async fn realize_moved_mount(
         return Ok(());
     }
 
-    let link_context = repository
-        .to_link_context(node.address.context.into())
-        .await;
-    crate::link::realize_link_pin_change_boxed(
-        operation,
-        repository,
-        link_context,
-        crate::link::LinkPinRealizeTarget {
-            link_path: change.path().clone(),
-            old_signature: change.from.address.hash,
-            new_signature: node.address.hash,
-            current_node: from_node.child,
-            mount_source: crate::link::LinkMountSource::Node(node.child),
-        },
-        false,
+    let link_id = node.address.context.into();
+    let link_context = repository.to_link_context(link_id).await;
+    crate::link::skip_denied(
+        (link_id, change.path().as_str()),
+        crate::link::realize_link_pin_change_boxed(
+            operation,
+            repository,
+            link_context,
+            crate::link::LinkPinRealizeTarget {
+                link_path: change.path().clone(),
+                old_signature: change.from.address.hash,
+                new_signature: node.address.hash,
+                current_node: from_node.child,
+                mount_source: crate::link::LinkMountSource::Node(node.child),
+            },
+            false,
+        ),
     )
     .await
+    .map(drop)
     .forward::<SyncError>("Failed realizing the subtree a link exposes")
 }
 
@@ -4441,8 +4586,8 @@ async fn recover_refused_move(
 /// realized before it carried it to ([`RealizeMoves::moved_source`]), and adds a directory it moves
 /// to them. The rename creates the directory `to` lands in where it is missing
 /// ([`InstanceOperationImpl::rename_creating_parent`]): a directory the realize adds stands on disk
-/// only as the parent of what lands in it, unless the view creates it
-/// ([`FilterStates::creates_directory`]). Where the rename fails, it takes the entry the working
+/// only as the parent of what lands in it, unless the realize creates it ahead of what it holds
+/// ([`creates_directory_ahead`]). Where the rename fails, it takes the entry the working
 /// tree holds the source in under another spelling, where `view_filter` holds the source
 /// ([`rename_held_spelling`]), and otherwise recovers as [`recover_refused_move`] describes,
 /// counting a rename left undone in `kept`.
@@ -4494,6 +4639,69 @@ pub(crate) fn report_kept_renames(kept: &KeptRenames) {
     }
 }
 
+/// Whether a write of the working tree creates the directory `node_id` of `state`, at `path` with
+/// the view verdict `states`, ahead of what it holds: `filter`'s view keeps the directory
+/// ([`FilterStates::creates_directory`]) and none of its entries is a file or directory the view
+/// keeps. One with such an entry is created as a parent: of the first file written below it, or of
+/// the first directory below it created ahead. Without a view, a directory is created ahead of what
+/// it holds only where it is empty.
+///
+/// Where the view excludes everything below the directory ([`Filter::view_hides_below`]), its
+/// entries are not read.
+#[lore_macro::test_pub]
+pub(crate) async fn creates_directory_ahead(
+    filter: &Filter,
+    state: &Arc<State>,
+    repository: &Arc<RepositoryContext>,
+    node_id: NodeID,
+    node: &Node,
+    path: &RelativePath,
+    states: FilterStates,
+) -> Result<bool, state::StateError> {
+    if !states.creates_directory() || node.child().is_none() {
+        return Ok(states.creates_directory());
+    }
+    if filter.view.is_empty() {
+        return Ok(false);
+    }
+    if filter.view_hides_below(states, path) {
+        return Ok(true);
+    }
+    let mut children =
+        StateNodeChildrenWithNameIterator::new(state.clone(), repository.clone(), node_id).await?;
+    let mut child_path = path.push_into_buf("");
+    while let Some((_, child, name)) = children.next().await? {
+        if child.is_link() {
+            continue;
+        }
+        child_path.push(name);
+        if keeps_entry(filter, states, &child_path, &child) {
+            return Ok(false);
+        }
+        child_path.pop();
+    }
+    Ok(true)
+}
+
+/// Whether `filter`'s view keeps the file or directory `child` at `path` below a directory with the
+/// view verdict `states`, by the verdict on `child` itself: a directory it keeps is one it creates
+/// ([`FilterStates::creates_directory`]).
+pub(crate) fn keeps_entry(
+    filter: &Filter,
+    states: FilterStates,
+    path: &impl FilterPath,
+    child: &Node,
+) -> bool {
+    let (_, reason) = filter.child_exclude_reason(
+        states,
+        path,
+        child.is_directory(),
+        FilterMode::View,
+        Scope::Node,
+    );
+    reason.is_none() && (child.is_file() || child.is_directory())
+}
+
 /// Realizes on disk a node a change adds, modifies or moves, and stages it in `state_stage` when
 /// given.
 ///
@@ -4526,18 +4734,34 @@ fn realize_change_modify_add<'a>(
         let path = change.path();
 
         // Only on-disk work honours the view. This gates directory creation, link cloning and the
-        // file write. A directory the view does not create is created by the first write below
-        // it. A link's content is written only here, so a link is kept wherever the view could
-        // re-include something below it. The move rename below is not gated by the view, because
-        // it repositions a path an earlier in-view realize may have written. Nothing of a link is
-        // written to a provider holding its state, which serves the link from its node.
+        // file write. A link's content is written only here, so a link is kept wherever the view
+        // could re-include something below it. The move rename below is not gated by the view,
+        // because it repositions a path an earlier in-view realize may have written. Nothing of a
+        // link is written to a provider holding its state, which serves the link from its node:
+        // the link is placed there, and taken away from where it moves from.
         let held_link = node.is_link() && operation.holds_state();
+        if held_link && !dry_run {
+            if let Some(from_path) = change.move_source() {
+                operation.place_link(from_path, None, false).await?;
+            }
+            operation
+                .place_link(path, Some(&node), execution_context().globals().force())
+                .await?;
+        }
         let write_to_disk = if node.is_link() {
             !held_link && !view_filter.excludes_tree(path, true, FilterMode::View)
         } else if node.is_directory() {
-            view_filter
-                .exclusion_states(path)
-                .creates_directory(node.child().is_none())
+            creates_directory_ahead(
+                &view_filter,
+                &change.to.mapping.state,
+                &change.to.mapping.repository,
+                change.to.mapping.node,
+                &node,
+                path,
+                view_filter.exclusion_states(path),
+            )
+            .await
+            .forward::<SyncError>("Reading the entries of a directory")?
         } else {
             !view_filter.excludes(path, false, FilterMode::View)
         };
@@ -4583,25 +4807,31 @@ fn realize_change_modify_add<'a>(
         };
 
         if (node.is_directory() || node.is_link()) && write_to_disk {
-            if !dry_run
-                && operation.create_dir_all(&to_path).await.is_err()
-                && operation
-                    .file_info(&to_path)
-                    .await
-                    .is_ok_and(|info| !info.is_dir())
-            {
-                return Err(SyncError::internal(format!(
-                    "Failed to create directory {path}"
-                )));
-            }
-
             // When a link is added, the linked contents are not marked
             // for add. That's why we can just clone the linked files
             if node.is_link() && change.action == change::FileAction::Add {
-                Box::pin(clone_added_link(&repository, &operation, &node, path)).await?;
-            } else if node.is_link() && !dry_run {
-                realize_moved_mount(&operation, &change, &node, moves.merge_current.as_ref())
+                Box::pin(realize_added_link(
+                    &repository,
+                    &operation,
+                    &node,
+                    path,
+                    dry_run,
+                ))
+                .await?;
+            } else {
+                if !dry_run {
+                    create_directory(&operation, path).await?;
+                }
+                // Boxed: a mount moves rarely, and its realize would grow every change's future.
+                if node.is_link() && !dry_run {
+                    Box::pin(realize_moved_mount(
+                        &operation,
+                        &change,
+                        &node,
+                        moves.merge_current.as_ref(),
+                    ))
                     .await?;
+                }
             }
         } else if node.is_file() && !dry_run && write_to_disk {
             if content_is_in_place(&change, renamed) {
@@ -4637,50 +4867,116 @@ fn realize_change_modify_add<'a>(
     }
 }
 
-/// Clones the content of the link `node` adds at `path` into the working tree.
-async fn clone_added_link(
+/// Creates the directory at `path`, where nothing but a directory stands.
+async fn create_directory(
+    operation: &Arc<InstanceOperationImpl>,
+    path: &RelativePath,
+) -> Result<(), SyncError> {
+    if operation.create_dir_all(path).await.is_err()
+        && operation
+            .file_info(path)
+            .await
+            .is_ok_and(|info| !info.is_dir())
+    {
+        return Err(SyncError::internal(format!(
+            "Failed to create directory {path}"
+        )));
+    }
+    Ok(())
+}
+
+/// Clones the link `node` adds at `path` into a mount created there, once the repository it pins
+/// is reached and its pinned revision read, so a link that can't be reached leaves no mount behind.
+/// A linked repository that refuses the caller is left out, as a clone leaves it.
+async fn realize_added_link(
     repository: &Arc<RepositoryContext>,
     operation: &Arc<InstanceOperationImpl>,
     node: &Node,
     path: &RelativePath,
+    dry_run: bool,
 ) -> Result<(), SyncError> {
-    let link_id = node.address.context;
+    let Some(link) = crate::link::skip_denied(
+        (node.address.context.into(), path.as_str()),
+        open_pinned_link(repository, node, path),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    if !dry_run {
+        create_directory(operation, path).await?;
+    }
+    clone_opened_link(link, operation, node, path).await
+}
+
+/// The repository a link pins, connected to and read at the pinned revision.
+struct OpenedLink {
+    context: Arc<RepositoryContext>,
+    storage: Arc<lore_transport::StorageSession>,
+    state: Arc<State>,
+}
+
+/// Connects to the repository the link `node` at `path` pins and reads the revision it pins.
+async fn open_pinned_link(
+    repository: &Arc<RepositoryContext>,
+    node: &Node,
+    path: &RelativePath,
+) -> Result<OpenedLink, SyncError> {
     let link_revision = node.address.hash;
-
-    let link = repository.to_link_context(link_id.into()).await;
-    let link_remote = link
-        .remote()
+    let context = repository
+        .to_link_context(node.address.context.into())
+        .await;
+    let opened = async {
+        let link_remote = context
+            .remote()
+            .await
+            .forward::<SyncError>("Failed to connect to link remote")?;
+        let correlation_id = execution_context().globals().correlation_id.to_string();
+        let storage = link_remote
+            .session(context.id, &correlation_id)
+            .await
+            .forward::<SyncError>("Failed to connect to link remote")?;
+        let state = State::deserialize(context.clone(), link_revision)
+            .await
+            .forward_with::<SyncError, _>(|| {
+                format!("Failed to deserialize state {link_revision}")
+            })?;
+        Ok::<_, SyncError>((storage, state))
+    };
+    let (storage, state) = opened
         .await
-        .forward::<SyncError>("Failed to connect to link remote")?;
-    let correlation_id = execution_context().globals().correlation_id.to_string();
-    let link_storage = link_remote
-        .session(link.id, &correlation_id)
-        .await
-        .forward::<SyncError>("Failed to connect to link remote")?;
-    let link_state = State::deserialize(link.clone(), link_revision)
-        .await
-        .forward_with::<SyncError, _>(|| format!("Failed to deserialize state {link_revision}"))?;
+        .forward_with::<SyncError, _>(|| format!("Failed to fetch the link at {path}"))?;
+    Ok(OpenedLink {
+        context,
+        storage,
+        state,
+    })
+}
 
-    let clone_path = path.clone();
-
+/// Clones the content of the link `node` at `path` into the working tree.
+async fn clone_opened_link(
+    link: OpenedLink,
+    operation: &Arc<InstanceOperationImpl>,
+    node: &Node,
+    path: &RelativePath,
+) -> Result<(), SyncError> {
+    let OpenedLink {
+        context,
+        storage,
+        state,
+    } = link;
     let clone_ctx = CloneContext {
-        repository: link.clone(),
-        state: link_state,
+        repository: context.clone(),
+        state,
         operation: operation.clone(),
         options: Arc::default(),
         stats: Arc::default(),
         modified_times: operation.modified_times(),
     };
-    let clone_states = link.filter.mount_states(&clone_path);
-    clone::clone_node(
-        clone_ctx,
-        link_storage,
-        clone_path,
-        node.child,
-        clone_states,
-    )
-    .await
-    .forward::<SyncError>("Failed to sync link")
+    let clone_states = context.filter.mount_states(path);
+    clone::clone_node(clone_ctx, storage, path.clone(), node.child, clone_states)
+        .await
+        .forward_with::<SyncError, _>(|| format!("Failed to fetch the link at {path}"))
 }
 
 /// Stages a realized move by relinking `from_node`, the staged node at `from_path`, to `to_path`,
@@ -4699,9 +4995,10 @@ pub(crate) async fn relink_moved_node(
     is_merge: bool,
 ) -> Result<NodeID, SyncError> {
     let new_parent_id = state_stage
-        .find_node_link(repository.clone(), to_path.parent().unwrap_or(""))
+        .locate_node(repository.clone(), to_path.parent().unwrap_or(""))
         .await
         .forward::<SyncError>("Failed to stage change")?
+        .identity()
         .node;
 
     let from_name = from_path.name();
@@ -4799,10 +5096,10 @@ pub(crate) async fn stage_realized_delete(
     is_merge: bool,
 ) -> Result<(), SyncError> {
     let node_link = match state_stage
-        .find_node_link(repository.clone(), change.path().as_str())
+        .locate_node(repository.clone(), change.path().as_str())
         .await
     {
-        Ok(node_link) => node_link,
+        Ok(found) => found.identity(),
         Err(e) if e.is_node_not_found() => return Ok(()),
         Err(err) => return Err(err).forward::<SyncError>("Failed to stage change"),
     };
@@ -4866,9 +5163,10 @@ pub(crate) fn stage_realized_change<'a>(
             && let Some(from_path) = change.move_source()
         {
             let from_node = state_stage
-                .find_node_link(repository.clone(), from_path.as_str())
+                .locate_node(repository.clone(), from_path.as_str())
                 .await
                 .forward::<SyncError>("Failed to stage change")?
+                .identity()
                 .node;
             relink_moved_node(
                 state_stage,

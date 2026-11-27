@@ -6,9 +6,7 @@ use lore_error_set::prelude::*;
 use serde::Serialize;
 
 use crate::errors::*;
-use crate::event::EventError;
 use crate::event::LoreEvent;
-use crate::interface::LoreError;
 use crate::lore::execution_context;
 use crate::lore_debug;
 use crate::repository::RepositoryContext;
@@ -21,7 +19,9 @@ use crate::util::serde::u8_as_bool;
 
 /// Progress of a bisect search across a range of revisions.
 #[repr(C)]
-#[derive(Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRevisionBisectEventData {
     /// Revision number at the start of the search range.
@@ -37,6 +37,7 @@ pub struct LoreRevisionBisectEventData {
 
 #[error_set]
 pub enum BisectError {
+    Cancelled,
     LinkPinsDiverge,
     NodeNotFound,
     LinkNotFound,
@@ -82,23 +83,6 @@ pub enum BisectError {
     SharedStoreNotFound,
     TokenNotFound,
     MissingIdentity,
-}
-
-impl EventError for BisectError {
-    fn translated(&self) -> LoreError {
-        match self {
-            BisectError::Disconnected(_) => LoreError::Connection,
-            BisectError::SlowDown(_) => LoreError::SlowDown,
-            BisectError::Oversized(_) => LoreError::Oversized,
-            BisectError::NotFound(_) => LoreError::NotFound,
-            BisectError::AddressNotFound(_) => LoreError::AddressNotFound,
-            _ => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 #[derive(Clone, Debug, Default)]

@@ -11,14 +11,12 @@ use lore_base::error::InvalidArguments;
 use lore_error_set::prelude::*;
 use lore_macro::LoreArgs;
 use lore_macro::ValidateText;
-use lore_revision::event::EventError;
 use lore_revision::event::LoreErrorCode;
 use lore_revision::event::LoreEvent;
 use lore_revision::event::LoreMetadataEventData;
 use lore_revision::event::revision_tree::LoreRevisionTreeBatchCompleteEventData;
 use lore_revision::event::revision_tree::LoreRevisionTreeMetadataGetCompleteEventData;
 use lore_revision::interface::LoreArray;
-use lore_revision::interface::LoreError;
 use lore_revision::interface::LoreMetadata;
 use lore_revision::interface::LoreString;
 use lore_revision::metadata::Metadata;
@@ -35,7 +33,16 @@ use crate::revision_tree::handle::RevisionTreeInternal;
 
 /// One metadata key to read.
 #[repr(C)]
-#[derive(Clone, Debug, Default, PartialEq, ValidateText, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    ValidateText,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 pub struct LoreRevisionTreeMetadataGetEntry {
     /// Caller-chosen id echoed back as `entry_id` on this entry's `METADATA_GET_COMPLETE`
     pub entry_id: u64,
@@ -45,7 +52,16 @@ pub struct LoreRevisionTreeMetadataGetEntry {
 
 /// Arguments for `lore_revision_tree_metadata_get`.
 #[repr(C)]
-#[derive(Clone, Debug, Default, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(metadata_get_impl)]
 pub struct LoreRevisionTreeMetadataGetArgs {
     /// Caller-chosen id echoed back as `batch_id` on `BATCH_COMPLETE`
@@ -71,19 +87,6 @@ impl MetadataGetError {
         Self::from(InvalidArguments {
             reason: reason.into(),
         })
-    }
-}
-
-impl EventError for MetadataGetError {
-    fn translated(&self) -> LoreError {
-        match self {
-            MetadataGetError::InvalidArguments(_) => LoreError::InvalidArguments,
-            MetadataGetError::Internal(_) => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
     }
 }
 
@@ -115,15 +118,6 @@ fn emit_batch_complete(batch_id: u64, error_code: LoreErrorCode) {
         error_code,
     })
     .send();
-}
-
-/// The code the batch terminal reports for a finished call.
-fn batch_error_code(result: &Result<(), MetadataGetError>) -> LoreErrorCode {
-    match result {
-        Ok(()) => LoreErrorCode::None,
-        Err(MetadataGetError::InvalidArguments(_)) => LoreErrorCode::InvalidArguments,
-        Err(MetadataGetError::Internal(_)) => LoreErrorCode::Internal,
-    }
 }
 
 /// Reject the whole batch as a bad argument, attributing it to `entry_id`.
@@ -362,7 +356,7 @@ async fn metadata_get_impl(
         async move |internal: Arc<RevisionTreeInternal>, args: LoreRevisionTreeMetadataGetArgs| {
             let batch_id = args.batch_id;
             let result = metadata_get_batch(internal, &args).await;
-            emit_batch_complete(batch_id, batch_error_code(&result));
+            emit_batch_complete(batch_id, LoreErrorCode::of(&result));
             result
         },
     )

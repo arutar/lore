@@ -649,7 +649,9 @@ pub const DEFAULT_EVENT_INTERVAL_MS: u64 = 100;
 /// its default, and a field a release adds in its padding is left unset by
 /// code built against an earlier header.
 #[repr(C)]
-#[derive(Default, Debug, Clone, PartialEq, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Default, Debug, Clone, PartialEq, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 pub struct LoreGlobalArgs {
     /// Repository path
     pub repository_path: LoreString,
@@ -685,6 +687,17 @@ pub struct LoreGlobalArgs {
     /// Use in-memory stores instead of file-backed stores. No store data is
     /// read from or written to the .urc/immutable/ and .urc/mutable/ directories.
     pub in_memory: u8,
+    /// Leave the local stores' background index writes until the call ends: the delayed flushes
+    /// of their changes, and the writes of eviction passes, which still run and evict in memory.
+    /// The call's own flushes write as they do without it. The call writes what it held back
+    /// before it completes, whether or not it fails, and a call that otherwise succeeds fails if
+    /// that write fails. A storage handle opened with this holds the writes back until its close,
+    /// whose flush writes them. In a process that serves several calls, such as the Lore service,
+    /// a store holds back the background writes of every call on it while a call or handle that
+    /// set this is active. If the process stops meanwhile, the index loses the changes held back:
+    /// content fetched from the remote is fetched again, and content written locally stays in the
+    /// packfiles unindexed until compaction reclaims it.
+    pub no_background_flush: u8,
     /// Maximum number of files being processed in parallel
     pub file_count_limit: u64,
     /// Maximum total size of all files being processed in parallel
@@ -879,6 +892,11 @@ impl LoreGlobalArgs {
         self.in_memory != 0
     }
 
+    /// Whether the call leaves its stores' background index writes until it ends.
+    pub fn no_background_flush(&self) -> bool {
+        self.no_background_flush != 0
+    }
+
     pub fn sync_data(&self) -> bool {
         self.sync_data != 0
     }
@@ -1052,6 +1070,11 @@ pub struct ExecutionContext {
     /// The environment of the process that relayed this call, read in place of this process's
     /// through [`lore_base::env::var`]. `None` for a call made in this process.
     environment: Option<CallEnvironment>,
+    /// Cancelled once nobody is waiting for this call's result. `None` for a call nothing can
+    /// cancel, such as a client command.
+    cancellation: Option<crate::runtime::Cancellation>,
+    /// The linked repositories that refused this call's caller, which the rest of the call skips.
+    denied_repositories: parking_lot::Mutex<std::collections::HashSet<crate::lore::RepositoryId>>,
 }
 
 impl ExecutionContext {
@@ -1114,6 +1137,19 @@ impl ExecutionContext {
         }
     }
 
+    /// This context, for a call that stops at its next cancellation check once `cancellation` is
+    /// cancelled.
+    pub fn with_cancellation(self, cancellation: crate::runtime::Cancellation) -> Self {
+        Self {
+            cancellation: Some(cancellation),
+            ..self
+        }
+    }
+
+    pub fn cancellation(&self) -> Option<&crate::runtime::Cancellation> {
+        self.cancellation.as_ref()
+    }
+
     /// This context for a holder that serves past the call that made it, a mounted filesystem,
     /// for a caller with `environment` under `globals`: this mode, and a dispatcher that sends
     /// nowhere, as no call awaits what the holder logs.
@@ -1136,6 +1172,28 @@ impl ExecutionContext {
             mode: self.mode,
             caller_state: self.caller_state.clone(),
             environment,
+            ..Default::default()
+        }
+    }
+
+    /// This context for work a server call starts that runs to its end even once nobody waits for
+    /// the call, such as what follows a write: the same call and user, adding to the same write
+    /// accounting, with nothing to cancel it. Its dispatcher sends nowhere, as a server call's
+    /// does, and it has its own push statistics and slots.
+    pub async fn outliving(&self) -> Self {
+        let mut dispatcher = EventDispatcher::new(None);
+        dispatcher
+            .correlation_id
+            .clone_from(&self.dispatcher.correlation_id);
+        Self {
+            globals: self.globals.clone(),
+            dispatcher,
+            log_level: self.log_level,
+            user_id: Mutex::new(self.user_id().await),
+            mode: self.mode,
+            caller_state: self.caller_state.clone(),
+            fragment_stats: OnceLock::from(self.fragment_stats().clone()),
+            environment: self.environment.clone(),
             ..Default::default()
         }
     }
@@ -1183,6 +1241,14 @@ impl ExecutionContext {
         self.push_budget
             .get_or_init(crate::branch::push::PushBudget::default)
     }
+
+    pub(crate) fn deny_repository(&self, id: crate::lore::RepositoryId) {
+        self.denied_repositories.lock().insert(id);
+    }
+
+    pub(crate) fn repository_denied(&self, id: crate::lore::RepositoryId) -> bool {
+        self.denied_repositories.lock().contains(&id)
+    }
 }
 
 impl Default for ExecutionContext {
@@ -1199,7 +1265,9 @@ impl Default for ExecutionContext {
             fragment_stats: OnceLock::new(),
             push_stats: OnceLock::new(),
             push_budget: OnceLock::new(),
+            denied_repositories: Default::default(),
             environment: None,
+            cancellation: None,
         }
     }
 }
@@ -1221,54 +1289,11 @@ fn install_crypto_provider() -> Result<(), String> {
         })
 }
 
-/// Error codes returned across the FFI boundary.
-///
-/// Every discriminant except the legacy categories and `Internal` matches the
-/// `#[ffi_code(..)]` of the same-named struct in [`lore_base::error`], so a
-/// caller comparing a `status` against one of these names gets the same answer
-/// as a caller comparing it against the discrete type's code. The grouped
-/// allocation those codes come from is documented on that module.
-///
-/// cbindgen:prefix-with-name
-/// cbindgen:rename-all=ScreamingSnakeCase
-#[repr(i32)]
-#[derive(Eq, PartialEq)]
-pub enum LoreError {
-    /// The arguments supplied to the operation were invalid.
-    InvalidArguments = 3,
-    /// The backing store is overloaded; the caller should retry later.
-    SlowDown = 31,
-    /// No Lore service could be reached, and none could be started, so the
-    /// operation did not run.
-    ServiceUnavailable = 32,
-    /// A content-addressable object could not be found in any store.
-    AddressNotFound = 80,
-    /// A payload blob could not be found with the associated hash.
-    PayloadNotFound = 81,
-    /// A file path could not be resolved to a tracked node or found in the file system.
-    FileNotFound = 82,
-    /// A blob exceeded a size limit enforced by the caller or the protocol.
-    Oversized = 118,
-
-    // Legacy error categories (transitional, will be removed). They sit in the
-    // 100–109 range that `lore_base::error` reserves for them, so no discrete
-    // error type is ever allocated a code that collides with one of these.
-    /// A requested item was not found.
-    NotFound = 101,
-    /// An item that was being created already exists.
-    AlreadyExists = 102,
-    /// A connection could not be established or was lost.
-    Connection = 103,
-
-    /// An internal error occurred.
-    Internal = -1,
-}
-
 /// A metadata value, tagged by the kind of value it holds.
 /// cbindgen:prefix-with-name
 /// cbindgen:rename-all=ScreamingSnakeCase
 #[repr(C, u32)]
-#[derive(Clone, Debug, PartialEq, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, Debug, PartialEq, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 pub enum LoreMetadata {
     /// An address value.
     Address(Address) = LoreMetadataType::Address as u32,
@@ -1296,7 +1321,16 @@ pub enum LoreMetadata {
 ///
 /// There is deliberately no zero value: a zero-initialized field has not chosen
 /// a type and must not be passed as one.
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Serialize,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum LoreMetadataType {
     /// A content address: 48 bytes, the 32-byte hash followed by the 16-byte
@@ -1416,7 +1450,16 @@ impl ValidateText for LoreMetadata {
 /// cbindgen:rename-all=ScreamingSnakeCase
 #[repr(C)]
 /// The kind of a tracked node.
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Debug,
+    Serialize,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum LoreNodeType {
     /// A directory.
@@ -1455,7 +1498,16 @@ pub enum LoreNodeStagedAction {
 /// cbindgen:rename-all=ScreamingSnakeCase
 #[repr(C)]
 /// The change applied to a file.
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Debug,
+    Serialize,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum LoreFileAction {
     /// The file is unchanged.
@@ -1474,7 +1526,16 @@ pub enum LoreFileAction {
 /// cbindgen:rename-all=ScreamingSnakeCase
 #[repr(C)]
 /// Where a branch is located.
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Debug,
+    Serialize,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum LoreBranchLocation {
     /// A branch held locally.
@@ -1494,7 +1555,16 @@ impl Display for LoreBranchLocation {
 
 /// A branch paired with a revision on that branch.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Debug,
+    Serialize,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 pub struct LoreBranchPoint {
     /// The branch.
     pub branch: BranchId,

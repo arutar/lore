@@ -8,12 +8,10 @@ use serde::Serialize;
 
 use crate::errors::InvalidArguments;
 use crate::event;
-use crate::event::EventError;
 use crate::fs::filesystem_provider::FileInfo;
 use crate::fs::filesystem_provider::InstanceOperation;
 use crate::fs::filesystem_provider::with_operation;
 use crate::immutable;
-use crate::interface::LoreError;
 use crate::interface::LoreString;
 use crate::lore::Hash;
 use crate::repository::RepositoryContext;
@@ -24,19 +22,11 @@ pub enum HashError {
     InvalidArguments,
 }
 
-impl EventError for HashError {
-    fn translated(&self) -> LoreError {
-        LoreError::Internal
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
-}
-
 /// Data for the event reporting the hash of a single file.
 #[repr(C)]
-#[derive(Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFileHashEventData {
     /// Path of the file.

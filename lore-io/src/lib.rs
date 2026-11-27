@@ -79,14 +79,21 @@ mod stat;
 pub mod stat;
 #[cfg(feature = "test-util")]
 pub mod test_util;
+#[cfg(not(feature = "test-util"))]
+mod unbuffered;
+#[cfg(feature = "test-util")]
+pub mod unbuffered;
 #[cfg(target_os = "linux")]
 mod uring;
 #[cfg(target_family = "windows")]
 pub mod win_path;
 
+pub use buffer::AlignedBuf;
 pub use buffer::StableBuf;
 pub use buffer::StableBufList;
 pub use buffer::StableBufListMut;
+pub use buffer::UNBUFFERED_ALIGNMENT;
+pub use buffer::unbuffered_len;
 pub use buffer::uninit_buffer;
 pub use dir::DirEntry;
 pub use dir::DirStream;
@@ -114,6 +121,8 @@ pub use psync::stat_blocking;
 pub use psync::sync_dir;
 pub use stat::Stat;
 pub use stat::StatKind;
+pub use unbuffered::unbuffered_fallbacks;
+pub use unbuffered::unbuffered_refused;
 #[cfg(target_os = "linux")]
 pub use uring::UringStats;
 
@@ -124,4 +133,25 @@ pub use uring::UringStats;
 /// says the cap is not what is limiting the work.
 pub fn pool_stats() -> PoolStats {
     pool::SyscallPool::global().stats()
+}
+
+/// The deepest the process-wide syscall pool's queue has been since the previous call.
+///
+/// A burst shorter than the interval between samples reads as an empty queue in [`pool_stats`],
+/// and the high-water mark there only rises. This peak resets to the current depth on each call,
+/// so it belongs to a single reader.
+pub fn take_pool_queue_high_water() -> usize {
+    pool::SyscallPool::global().take_queue_high_water()
+}
+
+/// The most threads the process-wide syscall pool has had alive at once since the previous call.
+/// Resets on each call, so it belongs to a single reader.
+pub fn take_pool_threads_high_water() -> usize {
+    pool::SyscallPool::global().take_threads_high_water()
+}
+
+/// The longest any job has waited in the process-wide syscall pool's queue since the previous
+/// call, counting jobs still queued. Resets on each call, so it belongs to a single reader.
+pub fn take_pool_max_queue_wait() -> std::time::Duration {
+    pool::SyscallPool::global().take_max_queue_wait()
 }

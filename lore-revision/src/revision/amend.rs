@@ -11,8 +11,6 @@ use crate::commit::complete_interrupted_commit;
 use crate::commit::store_branch_latest_and_make_current;
 use crate::errors::*;
 use crate::event;
-use crate::event::EventError;
-use crate::interface::LoreError;
 use crate::lore::Hash;
 use crate::lore::execution_context;
 use crate::metadata;
@@ -23,6 +21,7 @@ use crate::state::State;
 
 #[error_set]
 pub enum AmendRevisionError {
+    Cancelled,
     LinkPinsDiverge,
     IdenticalMetadata,
     AddressNotFound,
@@ -68,16 +67,6 @@ pub enum AmendRevisionError {
     TokenNotFound,
     WriteRequired,
     MissingIdentity,
-}
-
-impl EventError for AmendRevisionError {
-    fn translated(&self) -> LoreError {
-        LoreError::Internal
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 #[derive(Clone, Debug)]

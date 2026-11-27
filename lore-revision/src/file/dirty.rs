@@ -27,8 +27,14 @@ use crate::interface::LoreNodeType;
 use crate::interface::LoreString;
 use crate::layer;
 use crate::link::LinkedStagedContent;
+use crate::link::SharedByPin;
+use crate::link::group_by;
+use crate::link::mounts_holding_changes;
+use crate::link::open_shared_linked_state;
 use crate::link::settle_linked_staged_state;
+use crate::link::sharing_mounts;
 use crate::lore::Hash;
+use crate::lore::RepositoryId;
 use crate::lore::execution_context;
 use crate::lore_debug;
 use crate::lore_trace;
@@ -68,6 +74,7 @@ use crate::util::path::RelativePath;
 
 #[error_set]
 pub enum DirtyError {
+    Cancelled,
     LinkPinsDiverge,
     AddressNotFound,
     InvalidArguments,
@@ -114,8 +121,6 @@ pub enum DirtyError {
     TokenNotFound,
     MissingIdentity,
 }
-
-impl crate::event::EventError for DirtyError {}
 
 #[derive(Default)]
 pub struct DirtyStats {
@@ -447,14 +452,16 @@ async fn add_carried(
 ) -> Result<bool, DirtyError> {
     let mut any = false;
     for added in added {
-        let Ok(parent) = state
-            .find_node_link(repository.clone(), added.path.parent().unwrap_or(""))
+        let Some(parent) = state
+            .locate_node(repository.clone(), added.path.parent().unwrap_or(""))
             .await
+            .ok()
+            .and_then(|found| found.own_node())
         else {
             continue;
         };
         if !state
-            .is_live_directory(repository, parent.node)
+            .is_live_directory(repository, parent)
             .await
             .forward::<DirtyError>("Failed to read the parent of an add carried past a commit")?
         {
@@ -471,7 +478,7 @@ async fn add_carried(
             ..Default::default()
         };
         let node_id = state
-            .node_add(repository.clone(), parent.node, node, name)
+            .node_add(repository.clone(), parent, node, name)
             .await
             .forward::<DirtyError>("Failed to add again an add carried past a commit")?;
         state
@@ -748,13 +755,31 @@ struct DirtyWalk {
     stats: Arc<DirtyStats>,
     mask: Option<Arc<Vec<String>>>,
     link_references: Vec<LinkReference>,
-    linked: parking_lot::Mutex<Vec<(LinkReference, Arc<DirtyWalk>)>>,
+    linked: Arc<LinkedWalks>,
     /// Whether a file both the working tree and the current revision hold is marked only where it
     /// differs.
     compare: bool,
     /// Where a layer's or link's walk mounts its tree, `None` for the instance's own, whose paths
     /// the walk spells as the tree holds them.
     mount: Option<Box<Mount>>,
+}
+
+/// The walks of the links a tree holds, which the walks of every mount of that tree share.
+#[derive(Default)]
+struct LinkedWalks {
+    /// The trees each linked repository's mounts share, by repository.
+    trees: SharedByPin<RepositoryId, LinkedTrees>,
+    /// The walk of each mount, by its link row.
+    mounts: parking_lot::Mutex<Vec<(LinkReference, Arc<DirtyWalk>)>>,
+}
+
+/// The trees the walks of every mount of one linked repository mark.
+#[derive(Clone)]
+struct LinkedTrees {
+    repository: Arc<RepositoryContext>,
+    state_current: Arc<State>,
+    state_staged: Arc<State>,
+    linked: Arc<LinkedWalks>,
 }
 
 /// Where a layer's or link's walk mounts its tree: the path the walk spells for the node its paths
@@ -1152,7 +1177,7 @@ async fn tracks(
 }
 
 /// The walk marking the trees of the link `reference` names, pinned at `pin` and mounted at `at`,
-/// opened once per call, and the nodes it starts from.
+/// opened once per call and mount path, and the nodes it starts from.
 async fn linked_walk(
     walk: &DirtyWalk,
     reference: LinkReference,
@@ -1161,15 +1186,22 @@ async fn linked_walk(
 ) -> Result<(Arc<DirtyWalk>, DirtyNodes), DirtyError> {
     let cached = walk
         .linked
+        .mounts
         .lock()
         .iter()
-        .find(|(linked, _)| linked.local_node() == reference.local_node())
+        .find(|(linked, walk)| {
+            linked.local_node() == reference.local_node()
+                && walk
+                    .mount
+                    .as_ref()
+                    .is_some_and(|mount| mount.at.as_str() == at)
+        })
         .map(|(_, linked)| linked.clone());
     let linked = if let Some(linked) = cached {
         linked
     } else {
         let linked = Arc::new(Box::pin(open_linked_walk(walk, pin, at)).await?);
-        walk.linked.lock().push((reference, linked.clone()));
+        walk.linked.mounts.lock().push((reference, linked.clone()));
         linked
     };
 
@@ -1187,24 +1219,49 @@ async fn open_linked_walk(
     pin: NodeLink,
     at: &str,
 ) -> Result<DirtyWalk, DirtyError> {
-    let (repository, state_staged) = pin
-        .open(&walk.repository)
-        .await
-        .forward::<DirtyError>("Failed to deserialize linked staged state")?;
-    let committed = state_staged.committed_revision();
-    let state_current = if committed == pin.revision {
-        state_staged.clone()
-    } else {
-        State::deserialize(repository.clone(), committed)
-            .await
-            .forward::<DirtyError>("Failed to deserialize linked state")?
-    };
+    let trees = walk
+        .linked
+        .trees
+        .get_or_open(
+            (pin.repository, pin.revision),
+            |trees| {
+                [
+                    trees.state_staged.revision(),
+                    trees.state_staged.committed_revision(),
+                ]
+            },
+            || async {
+                let staged = open_shared_linked_state(
+                    &walk.repository,
+                    &walk.state_staged,
+                    pin.repository,
+                    pin.revision,
+                )
+                .await
+                .forward::<DirtyError>("Failed to deserialize linked staged state")?;
+                open_linked_trees(walk, pin.repository, staged).await
+            },
+            || async {
+                let (_, staged) = pin
+                    .open(&walk.repository)
+                    .await
+                    .forward::<DirtyError>("Failed to deserialize linked staged state")?;
+                open_linked_trees(walk, pin.repository, staged).await
+            },
+        )
+        .await?;
+    let LinkedTrees {
+        repository,
+        state_current,
+        state_staged,
+        linked,
+    } = trees;
     let source = state_staged
         .node_path_below(repository.clone(), pin.node, ROOT_NODE)
         .await
         .forward::<DirtyError>("Failed to read the path a link mounts")?
         .unwrap_or_default();
-    let mut linked = DirtyWalk::new(
+    let mut walk_linked = DirtyWalk::new(
         walk.operation()?.clone(),
         repository,
         state_current,
@@ -1213,36 +1270,78 @@ async fn open_linked_walk(
         None,
     )
     .await?;
-    linked.compare = walk.compare;
-    linked.mount = Some(Box::new(Mount {
+    walk_linked.compare = walk.compare;
+    walk_linked.linked = linked;
+    walk_linked.mount = Some(Box::new(Mount {
         at: RelativePath::new_from_clean_parts(at, ""),
         source,
     }));
-    Ok(linked)
+    Ok(walk_linked)
 }
 
-/// Pin each link the walk marked inside to its linked staged state, innermost first.
+/// The trees the mounts of `linked` marking `state_staged` mark, with the revision it is staged on.
+async fn open_linked_trees(
+    walk: &DirtyWalk,
+    linked: RepositoryId,
+    state_staged: Arc<State>,
+) -> Result<LinkedTrees, DirtyError> {
+    let repository = walk.repository.to_link_context(linked).await;
+    let committed = state_staged.committed_revision();
+    let state_current = if committed == state_staged.revision() {
+        state_staged.clone()
+    } else {
+        State::deserialize(repository.clone(), committed)
+            .await
+            .forward::<DirtyError>("Failed to deserialize linked state")?
+    };
+    Ok(LinkedTrees {
+        repository,
+        state_current,
+        state_staged,
+        linked: Arc::default(),
+    })
+}
+
+/// Pin the mounts of each repository the walk marked inside to its linked staged state, innermost
+/// first.
 async fn repin_dirty_links(walk: &DirtyWalk) -> Result<(), DirtyError> {
-    let linked = std::mem::take(&mut *walk.linked.lock());
-    if linked.is_empty() {
+    let mounts = std::mem::take(&mut *walk.linked.mounts.lock());
+    if mounts.is_empty() {
         return Ok(());
     }
     let token = walk
         .repository
         .try_write_token()
         .expect("dirty requires write access");
-    for (reference, linked) in linked {
-        Box::pin(repin_dirty_links(&linked)).await?;
+    for (_, mounts) in group_by(mounts, |(reference, linked)| {
+        (
+            reference.repository,
+            Arc::as_ptr(&linked.state_staged) as usize,
+        )
+    }) {
+        let (reference, linked) = &mounts[0];
+        // Every mount's walk marks the one tree its repository's mounts share.
+        Box::pin(repin_dirty_links(linked)).await?;
 
         if !linked.state_staged.is_dirty() {
             continue;
         }
 
+        let holding = mounts_holding_changes(
+            (&walk.repository, &walk.state_staged),
+            (&linked.repository, &linked.state_staged),
+            &mounts
+                .iter()
+                .map(|(reference, _)| reference.local_node())
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .forward::<DirtyError>("Failed to read the mounts the walk marked")?;
         // A walk only adds markers, so a state it mutated holds one.
         settle_linked_staged_state(
             &walk.state_staged,
             walk.repository.clone(),
-            reference.local_node(),
+            sharing_mounts(&linked.state_staged, &holding),
             reference.branch,
             &(linked.repository.clone(), linked.state_staged.clone()),
             LinkedStagedContent::Dirty,
@@ -1325,7 +1424,7 @@ async fn replace_file_on_chain(
         "",
     );
     lore_trace!("Dirty delete of a file a directory replaced: {file_path}");
-    dirty_delete_node(walk, file, &file_path, None, &mut String::new()).await?;
+    dirty_delete_node(walk, file, &file_path, false, &mut String::new()).await?;
     let directory = dirty_add_directory(walk, parent, file_path.name(), file_path.as_str()).await?;
     ensure_dirty_parent_dirs(
         &walk.repository,
@@ -1832,9 +1931,9 @@ async fn file_matches_current(
 /// holds it, the node keeps its move, for the commit to return it once the place frees
 /// ([`State::node_return_unstaged_move`]). `name` is a buffer the walk keeps across nodes.
 ///
-/// A directory below, and with `absent` the node itself, that the view does not create
-/// ([`FilterStates::creates_directory`]) stands in the working tree only for what is
-/// created below it, so it is marked only where something below it is.
+/// A directory below, and with `absent` the node itself, that the view excludes
+/// ([`FilterStates::creates_directory`]) stands in the working tree only for what is placed below
+/// it, so it is marked only where something below it is.
 async fn dirty_delete(
     walk: &DirtyWalk,
     node_id: NodeID,
@@ -1843,34 +1942,11 @@ async fn dirty_delete(
     name: &mut String,
     absent: bool,
 ) -> Result<(), DirtyError> {
-    let creates = absent.then(|| Creation::of(states));
-    if let (_, Some(below)) = dirty_delete_node(walk, node_id, path, creates, name).await? {
+    let uncreated = absent && !states.creates_directory();
+    if let (_, Some(below)) = dirty_delete_node(walk, node_id, path, uncreated, name).await? {
         dirty_delete_below(walk, below, path, states, name).await?;
     }
     Ok(())
-}
-
-/// Whether the view creates a directory ([`FilterStates::creates_directory`]) where the repository
-/// holds it empty, and where it holds children: what [`dirty_delete_node`] keeps of the view's
-/// states at a node the working tree lacks.
-#[derive(Clone, Copy)]
-struct Creation {
-    empty: bool,
-    holding: bool,
-}
-
-impl Creation {
-    fn of(states: FilterStates) -> Self {
-        Self {
-            empty: states.creates_directory(true),
-            holding: states.creates_directory(false),
-        }
-    }
-
-    /// Whether the view creates the directory, which the repository holds `empty` or not.
-    fn of_directory(self, empty: bool) -> bool {
-        if empty { self.empty } else { self.holding }
-    }
 }
 
 /// A directory [`dirty_delete_node`] marked deleted, or left to mark once something below it is,
@@ -1886,14 +1962,14 @@ struct DeletedDirectory {
 /// [`dirty_delete`] of `node_id`, which stands at `path`, without its children: answers whether the
 /// node is marked, or was already, and the directory to walk below where it holds children to mark.
 ///
-/// With `absent`, what the view creates of a node the working tree lacks, a directory the view does
-/// not create is not marked: one holding children is answered deferred, for its walk to mark once
-/// it marks something below it.
+/// With `uncreated`, the working tree lacks the node and the view excludes it
+/// ([`FilterStates::creates_directory`]): such a directory is not marked, and one holding children
+/// is answered deferred, for its walk to mark once it marks something below it.
 async fn dirty_delete_node(
     walk: &DirtyWalk,
     node_id: NodeID,
     path: &RelativePath,
-    absent: Option<Creation>,
+    uncreated: bool,
     name: &mut String,
 ) -> Result<(bool, Option<DeletedDirectory>), DirtyError> {
     let DirtyWalk {
@@ -1934,10 +2010,7 @@ async fn dirty_delete_node(
         Box::pin(discard_dirty_add(walk, added, false, name)).await?;
         return Ok((false, None));
     }
-    if !moved
-        && is_directory
-        && absent.is_some_and(|creates| !creates.of_directory(first_child.is_none()))
-    {
+    if !moved && is_directory && uncreated {
         return Ok((
             false,
             first_child.map(|first_child| DeletedDirectory {
@@ -2051,7 +2124,7 @@ fn dirty_delete_below<'a>(
                 walk,
                 child_node_id,
                 &child_path,
-                Some(Creation::of(child_states)),
+                !child_states.creates_directory(),
                 name,
             )
             .await?

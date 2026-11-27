@@ -31,7 +31,8 @@ from link_helpers import (
     remote_branch_entries,
     remount,
 )
-from lore_parsers import parse_jsonl, parse_status_json
+from lore_parsers import parse_complete_json, parse_jsonl, parse_status_json
+from lore_server import allocate_free_port, generate_server_config, lore_local_server
 from test_utils import view_file, working_tree_files
 
 from lore import Lore
@@ -511,11 +512,17 @@ def test_link_branch_create_reports_each_mount_of_same_repo(new_lore_repo):
     parent.write_commit_push("Initial parent", {"parent.txt": "parent content\n"})
 
     link_repo: Lore = new_lore_repo()
-    link_repo.write_commit_push("Initial link", {"linked.txt": "linked content\n"})
+    link_repo.write_commit_push(
+        "Initial link",
+        {
+            "first/linked.txt": "linked content\n",
+            "second/linked.txt": "linked content\n",
+        },
+    )
 
     mounts = ["vendor/first", "vendor/second"]
     for mount in mounts:
-        parent.link_add(mount, link_repo.get_id(), "/")
+        parent.link_add(mount, link_repo.get_id(), "/" + mount.rsplit("/", 1)[1])
         parent.commit(f"Add link at {mount}")
         parent.push()
 
@@ -1176,22 +1183,64 @@ def make_parent_reaching_shared_twice(new_lore_repo) -> tuple[Lore, Lore]:
 
 
 @pytest.mark.smoke
-def test_link_push_of_diverged_revisions_of_one_branch_pushes_nothing(new_lore_repo):
-    """Edits made through two mounts of one linked branch, each on the revision
-    its mount pins, are diverged revisions of that branch: the push fails as a
-    diverged link before it pushes either."""
+@pytest.mark.parametrize("link", [None, "second/shared"])
+def test_link_commit_onto_a_linked_branch_moved_since_its_pin_is_refused(
+    new_lore_repo, link
+):
+    """An edit made through a mount pinning a revision its linked branch has moved on from fails
+    the commit, of the parent or of the link alone, as advanced, leaving the branch at the revision
+    the other mount committed, which a push publishes. Forced, the commit stores its revision over
+    the branch's latest, a diverged revision of it, which a push refuses."""
     parent, shared = make_parent_reaching_shared_twice(new_lore_repo)
-    pushed = shared.branch_info().remote_latest
-    for name in ("first", "second"):
-        mounted_file = f"{name}/shared/{name}-edit.txt"
-        parent.write_files({mounted_file: f"edited through {name}\n"})
-        parent.stage(mounted_file)
-        parent.commit(f"Edit the shared repository through {name}")
+    parent.write_files({"first/shared/first-edit.txt": "edited through first\n"})
+    parent.stage("first/shared/first-edit.txt")
+    parent.commit("Edit the shared repository through first")
+    committed = link_pin_at(parent, "first/shared")
+    parent.write_files({"second/shared/second-edit.txt": "edited through second\n"})
+    parent.stage("second/shared/second-edit.txt")
 
+    with pytest.raises(LoreException) as refused:
+        parent.commit("Edit the shared repository through second", link=link)
+
+    assert refused.value.returncode == 41, "the commit exits with BranchAdvanced"
+    parent.push()
+    shared.sync()
+    assert shared.branch_info().local_latest == committed
+
+    parent.commit("Edit the shared repository through second", link=link, force=True)
+    assert link_pin_at(parent, "second/shared") != committed
     with pytest.raises(LinkDivergedError):
         parent.push()
 
-    assert shared.branch_info().remote_latest == pushed
+
+@pytest.mark.smoke
+def test_link_merge_brings_a_mount_up_to_its_linked_branch(new_lore_repo):
+    """A merge of its branch into a mount whose linked branch moved on from its pin, through
+    another mount, commits the merge, and an edit made under the mount then commits on top of it,
+    which a push publishes."""
+    parent, shared = make_parent_reaching_shared_twice(new_lore_repo)
+    parent.write_files({"first/shared/first-edit.txt": "edited through first\n"})
+    parent.stage("first/shared/first-edit.txt")
+    parent.commit("Edit the shared repository through first")
+    parent.push()
+    parent.write_files({"second/shared/second-edit.txt": "edited through second\n"})
+
+    parent.branch_merge_start(
+        "main", link="second/shared", message="Merge main into second"
+    )
+    parent.stage("second/shared/second-edit.txt")
+    parent.commit("Edit the shared repository through second")
+    parent.push()
+
+    assert_link_holds(
+        parent.clone(),
+        "second/shared",
+        {
+            "shared.txt": "shared content\n",
+            "first-edit.txt": "edited through first\n",
+            "second-edit.txt": "edited through second\n",
+        },
+    )
 
 
 @pytest.mark.smoke
@@ -1369,6 +1418,84 @@ def test_link_branch_archive_include_links(new_lore_repo):
         sorted(link_repo.branch_list(remote=True).remote_branches) == branches_before
     ), (
         f"Expected link branches {branches_before}, got: {link_repo.branch_list(remote=True)}"
+    )
+
+
+@pytest.mark.smoke
+def test_link_branch_archive_warns_of_refusing_link(new_lore_repo):
+    """A link refusing the archive is a warning naming its repository: the archive succeeds."""
+    repo, link_repo = make_parent_with_link(new_lore_repo)
+
+    repo.branch_create("feature")
+    repo.push()
+    repo.branch_switch("main")
+
+    link_repo.branch_protect("feature")
+
+    output = repo.branch_archive("feature", include_links=True, json=True)
+
+    complete = parse_complete_json(output)
+    assert complete is not None and complete["status"] == 0, (
+        f"Expected the archive to succeed, got: {output}"
+    )
+    warnings = [
+        log["message"] for log in parse_jsonl(output, "log") if log["level"] == "warn"
+    ]
+    assert any(link_repo.get_id() in message for message in warnings), (
+        f"Expected a warning naming the linked repository, got: {output}"
+    )
+    assert link_repo.branch_list(remote=True).has_remote_branch("feature"), (
+        f"Expected the protected link branch to survive, got: {link_repo.branch_list(remote=True)}"
+    )
+
+
+@pytest.fixture
+def stoppable_remote_url(request, tmp_path_factory, lore_server_executable_path):
+    """The URL of a server of the test's own, and a function that stops it."""
+    shared_port = allocate_free_port()
+    ports = {
+        "quic": shared_port,
+        "grpc": shared_port,
+        "http": allocate_free_port(),
+        "internal": allocate_free_port(),
+    }
+    server_root, server_env = generate_server_config(request, tmp_path_factory, ports)
+    server = lore_local_server(server_root, server_env, lore_server_executable_path)
+    next(server)
+    yield f"lore://127.0.0.1:{ports['quic']}/", lambda: next(server, None)
+    next(server, None)
+
+
+@pytest.mark.smoke
+def test_link_branch_archive_warns_of_unreachable_link_remote(
+    new_lore_repo, stoppable_remote_url
+):
+    """A link whose remote can't be reached is a warning naming its repository, beside the
+    failure of the outer remote archive."""
+    remote_url, stop_remote = stoppable_remote_url
+    repo = new_lore_repo(remote_url=remote_url)
+    repo.write_commit_push("Baseline", {DEFAULT_PARENT_FILE: "baseline\n"})
+    link_repo = new_lore_repo(remote_url=remote_url)
+    link_repo.write_commit_push("Initial linked content", {"linked.txt": "linked\n"})
+    repo.link_add(DEFAULT_LINK_MOUNT, link_repo.get_id(), "/")
+    repo.commit("Add link")
+    repo.push()
+    repo.branch_create("feature")
+    repo.push()
+    repo.branch_switch("main")
+
+    stop_remote()
+    output = repo.branch_archive("feature", include_links=True, json=True, check=False)
+
+    complete = parse_complete_json(output)
+    assert complete is not None and complete["status"] != 0, (
+        f"Expected the outer remote archive to fail, got: {output}"
+    )
+    warnings = [
+        log["message"] for log in parse_jsonl(output, "log") if log["level"] == "warn"
+    ]
+    assert any(link_repo.get_id() in message for message in warnings), (
+        f"Expected a warning naming the linked repository, got: {output}"
     )
 
 
@@ -1578,10 +1705,12 @@ def test_link_branch_archive_repository_linked_twice(new_lore_repo):
     link_repo: Lore = new_lore_repo(repo.name + "_link")
 
     repo.write_commit_push(None, {"main.txt": b"main content"})
-    link_repo.write_commit_push(None, {"link.txt": b"link content"})
+    link_repo.write_commit_push(
+        None, {"first/link.txt": b"link content", "second/link.txt": b"link content"}
+    )
 
-    repo.link_add("first", link_repo.get_id(), "/")
-    repo.link_add("second", link_repo.get_id(), "/")
+    repo.link_add("first", link_repo.get_id(), "/first")
+    repo.link_add("second", link_repo.get_id(), "/second")
     repo.commit("add links")
     repo.push()
 

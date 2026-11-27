@@ -43,7 +43,16 @@ use crate::util::path_messages;
 
 /// Arguments for committing staged changes into a new revision.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(commit_local)]
 pub struct LoreRevisionCommitArgs {
     /// Commit message
@@ -73,7 +82,6 @@ pub struct LoreRevisionCommitArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -192,7 +200,16 @@ pub async fn commit_with_metadata(
 
 /// Arguments for amending the most recent revision's commit message.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(amend_local)]
 pub struct LoreRevisionAmendArgs {
     /// New commit message
@@ -210,7 +227,6 @@ pub struct LoreRevisionAmendArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -250,7 +266,16 @@ fn amend_local(
 
 /// Arguments for retrieving metadata and file information for a revision.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(info_local)]
 pub struct LoreRevisionInfoArgs {
     /// Revision to get info for; empty for current
@@ -272,7 +297,6 @@ pub struct LoreRevisionInfoArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -308,7 +332,9 @@ fn info_local(
 
 /// Arguments for clearing all metadata from the current revision.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(metadata_clear_local)]
 pub struct LoreRevisionMetadataClearArgs {}
 
@@ -323,7 +349,6 @@ pub struct LoreRevisionMetadataClearArgs {}
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -358,7 +383,9 @@ fn metadata_clear_local(
 
 /// Arguments for retrieving a single metadata value by key from a revision.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(metadata_get_local)]
 pub struct LoreRevisionMetadataGetArgs {
     /// Metadata key to look up
@@ -378,7 +405,6 @@ pub struct LoreRevisionMetadataGetArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -412,7 +438,9 @@ async fn metadata_get_impl(
 
 /// Arguments for listing all metadata key/value pairs of a revision.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(metadata_list_local)]
 pub struct LoreRevisionMetadataListArgs {
     /// Revision to list metadata for; empty for current
@@ -430,7 +458,6 @@ pub struct LoreRevisionMetadataListArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -470,7 +497,9 @@ fn metadata_list_local(
 
 /// Arguments for setting metadata key/value pairs on the current revision.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(metadata_set_local)]
 pub struct LoreRevisionMetadataSetArgs {
     /// Metadata keys (parallel with `values` and `formats`)
@@ -492,7 +521,6 @@ pub struct LoreRevisionMetadataSetArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 pub fn metadata_set(
@@ -554,7 +582,16 @@ async fn metadata_set_impl(
 
 /// Arguments for retrieving the revision history of a branch or revision.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(history_local)]
 pub struct LoreRevisionHistoryArgs {
     /// Start from this revision; empty for current
@@ -581,7 +618,6 @@ pub struct LoreRevisionHistoryArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -618,7 +654,16 @@ fn history_local(
 
 /// Arguments for restoring the current branch to a previously synced revision.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(restore_local)]
 pub struct LoreRevisionRestoreArgs {
     /// Commit message for the restored revision
@@ -636,7 +681,6 @@ pub struct LoreRevisionRestoreArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -691,7 +735,16 @@ fn restore_local(
 
 /// Arguments for synchronizing the working directory to a target revision.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(sync_local)]
 pub struct LoreRevisionSyncArgs {
     /// Revision to synchronize to; empty for branch tip
@@ -725,7 +778,6 @@ pub struct LoreRevisionSyncArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -820,7 +872,16 @@ fn sync_local(
 
 /// Arguments for bisecting the revision range between two revisions.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(bisect_local)]
 pub struct LoreRevisionBisectArgs {
     /// Starting (known-good) revision of the bisect range
@@ -841,7 +902,6 @@ pub struct LoreRevisionBisectArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -891,7 +951,16 @@ fn bisect_local(
 
 /// Arguments for finding revisions by metadata or revision number.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(find_local)]
 pub struct LoreRevisionFindArgs {
     /// Metadata key to search for; non-empty selects key/value search
@@ -913,7 +982,6 @@ pub struct LoreRevisionFindArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -959,7 +1027,9 @@ async fn find_impl(
 
 /// Arguments for computing file-level differences between two revisions.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(diff_local)]
 pub struct LoreRevisionDiffArgs {
     /// Source revision to diff from
@@ -981,7 +1051,6 @@ pub struct LoreRevisionDiffArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1048,7 +1117,9 @@ async fn diff_impl(
 
 /// Arguments for cherry-picking a revision onto the current branch.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(cherry_pick_local)]
 pub struct LoreRevisionCherryPickArgs {
     /// Revision to cherry pick
@@ -1075,7 +1146,6 @@ pub struct LoreRevisionCherryPickArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1146,7 +1216,9 @@ fn cherry_pick_local(
 
 /// Arguments for aborting a cherry-pick operation in progress.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(cherry_pick_abort_local)]
 pub struct LoreRevisionCherryPickAbortArgs {}
 
@@ -1174,7 +1246,9 @@ fn cherry_pick_abort_local(
 
 /// Arguments for marking cherry-pick paths as unresolved again.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(cherry_pick_unresolve_local)]
 pub struct LoreRevisionCherryPickUnresolveArgs {
     /// Repository-relative paths to mark unresolved
@@ -1207,7 +1281,9 @@ fn cherry_pick_unresolve_local(
 
 /// Arguments for restarting cherry-pick conflict resolution for paths.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(cherry_pick_restart_local)]
 pub struct LoreRevisionCherryPickRestartArgs {
     /// Repository-relative paths to re-materialize for resolution
@@ -1240,7 +1316,9 @@ fn cherry_pick_restart_local(
 
 /// Arguments for marking cherry-pick conflicts as resolved for paths.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(cherry_pick_resolve_local)]
 pub struct LoreRevisionCherryPickResolveArgs {
     /// Repository-relative paths to mark resolved
@@ -1273,7 +1351,9 @@ fn cherry_pick_resolve_local(
 
 /// Arguments for resolving cherry-pick conflicts by keeping the "mine" version.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(cherry_pick_resolve_mine_local)]
 pub struct LoreRevisionCherryPickResolveMineArgs {
     /// Repository-relative paths to resolve in favor of "mine"
@@ -1308,7 +1388,9 @@ fn cherry_pick_resolve_mine_local(
 
 /// Arguments for resolving cherry-pick conflicts by keeping the "theirs" version.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(cherry_pick_resolve_theirs_local)]
 pub struct LoreRevisionCherryPickResolveTheirsArgs {
     /// Repository-relative paths to resolve in favor of "theirs"
@@ -1343,7 +1425,9 @@ fn cherry_pick_resolve_theirs_local(
 
 /// Arguments for reverting the working directory to a specified revision.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(revert_local)]
 pub struct LoreRevisionRevertArgs {
     /// Revision to revert
@@ -1365,7 +1449,6 @@ pub struct LoreRevisionRevertArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1429,7 +1512,9 @@ pub fn revert_local(
 
 /// Arguments for aborting a revert operation in progress.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(revert_abort_local)]
 pub struct LoreRevisionRevertAbortArgs {}
 
@@ -1444,7 +1529,6 @@ pub struct LoreRevisionRevertAbortArgs {}
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1479,7 +1563,9 @@ fn revert_abort_local(
 
 /// Arguments for marking revert paths as unresolved again.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(revert_unresolve_local)]
 pub struct LoreRevisionRevertUnresolveArgs {
     /// Repository-relative paths to mark unresolved
@@ -1497,7 +1583,6 @@ pub struct LoreRevisionRevertUnresolveArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1533,7 +1618,9 @@ fn revert_unresolve_local(
 
 /// Arguments for restarting revert conflict resolution for paths.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(revert_restart_local)]
 pub struct LoreRevisionRevertRestartArgs {
     /// Repository-relative paths to re-materialize for resolution
@@ -1551,7 +1638,6 @@ pub struct LoreRevisionRevertRestartArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1588,7 +1674,9 @@ fn revert_restart_local(
 
 /// Arguments for marking revert conflicts as resolved for paths.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(revert_resolve_local)]
 pub struct LoreRevisionRevertResolveArgs {
     /// Repository-relative paths to mark resolved
@@ -1606,7 +1694,6 @@ pub struct LoreRevisionRevertResolveArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1642,7 +1729,9 @@ fn revert_resolve_local(
 
 /// Arguments for resolving revert conflicts by keeping the "mine" version.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(revert_resolve_mine_local)]
 pub struct LoreRevisionRevertResolveMineArgs {
     /// Repository-relative paths to resolve in favor of "mine"
@@ -1660,7 +1749,6 @@ pub struct LoreRevisionRevertResolveMineArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1698,7 +1786,9 @@ fn revert_resolve_mine_local(
 
 /// Arguments for resolving revert conflicts by keeping the "theirs" version.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(revert_resolve_theirs_local)]
 pub struct LoreRevisionRevertResolveTheirsArgs {
     /// Repository-relative paths to resolve in favor of "theirs"
@@ -1716,7 +1806,6 @@ pub struct LoreRevisionRevertResolveTheirsArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///

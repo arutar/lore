@@ -461,6 +461,37 @@ pub async fn test_scan(
     .await
 }
 
+/// The instance's staged tree after a scan walk that stages ([`test_scan_with_intent`]) over it,
+/// held in memory and not stored: the walk `lore stage --scan` does not take.
+#[allow(dead_code)]
+pub async fn test_staged_by_intent(
+    repository: &std::sync::Arc<lore_revision::repository::RepositoryContext>,
+) -> std::sync::Arc<lore_revision::state::State> {
+    let (current, staged, _) =
+        lore_revision::state::State::deserialize_current_and_staged(repository.clone())
+            .await
+            .expect("Failed to deserialize the current and staged states");
+    let staged = match staged {
+        Some(staged) => staged,
+        None => lore_revision::state::State::deserialize(repository.clone(), current.revision())
+            .await
+            .expect("Failed to deserialize the staged state"),
+    };
+    test_scan_with_intent(
+        repository.clone(),
+        staged.clone(),
+        current,
+        lore_revision::fs::filesystem_provider::FilesystemDiffIntent::Stage(
+            lore_revision::fs::filesystem_provider::StageIntent {
+                node_flags: lore_revision::node::NodeFlags::NoFlags,
+                file_id: None,
+            },
+        ),
+    )
+    .await;
+    staged
+}
+
 /// [`test_scan`] under the given intent, for a walk that stages rather than marks.
 #[allow(dead_code)]
 pub async fn test_scan_with_intent(
@@ -734,6 +765,80 @@ pub fn test_execution_with(
             "test-user".to_string(),
         ),
     )
+}
+
+/// Runs `body` in a client execution of its own with `globals`, answering what it answers and each
+/// event it sent. Routes the log of the process to the execution of the logging task, holding
+/// [`LOG_CAPTURE`] until every event has been recorded and the log callback is cleared again.
+#[allow(dead_code)]
+pub async fn recorded<F: std::future::Future>(
+    globals: lore_revision::interface::LoreGlobalArgs,
+    body: F,
+) -> (F::Output, Vec<lore_revision::interface::LoreEvent>) {
+    fn log_to_context(level: lore_base::log::LoreLogLevel, _: &str, message: &str) {
+        if let Some(execution) = lore_revision::lore::try_execution_context() {
+            execution
+                .dispatcher
+                .send(lore_revision::interface::LoreEvent::Log(
+                    lore_revision::relay::EventDispatcher::make_log(level, message.to_string()),
+                ));
+        }
+    }
+    let capture = LOG_CAPTURE.lock().await;
+    lore_base::log::set_log_callback(Some(log_to_context));
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recording = events.clone();
+    let execution = std::sync::Arc::new(
+        lore_revision::interface::ExecutionContext::new_client_with_user_id(
+            globals,
+            lore_revision::relay::EventDispatcher::new(Some(Box::new(
+                move |event: &lore_revision::interface::LoreEvent| {
+                    recording
+                        .lock()
+                        .expect("Failed to record an event")
+                        .push(event.clone());
+                },
+            ))),
+            "test-user".to_string(),
+        ),
+    );
+    let output = lore_base::runtime::LORE_CONTEXT
+        .scope(execution.clone(), body)
+        .await;
+    execution.dispatcher.drain().await;
+    lore_base::log::set_log_callback(None);
+    drop(capture);
+    let events = std::mem::take(&mut *events.lock().expect("Failed to read the events"));
+    (output, events)
+}
+
+/// [`recorded`] with the default global arguments, answering the message of each warning it
+/// logged. Maps the future of [`recorded`] rather than awaiting it, so it adds no state machine
+/// around `body`.
+#[allow(dead_code)]
+pub fn warned<F: std::future::Future>(
+    body: F,
+) -> impl std::future::Future<Output = (F::Output, Vec<String>)> {
+    futures::FutureExt::map(
+        recorded(lore_revision::interface::LoreGlobalArgs::default(), body),
+        |(output, events)| (output, warning_messages(&events)),
+    )
+}
+
+/// The message of each warning among `events`, in the order they were sent.
+#[allow(dead_code)]
+pub fn warning_messages(events: &[lore_revision::interface::LoreEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            lore_revision::interface::LoreEvent::Log(log)
+                if log.level == lore_base::log::LoreLogLevel::Warn =>
+            {
+                Some(log.message.to_string())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The action letter against the path for each change, as a walk's consumers read it.
@@ -1364,6 +1469,85 @@ pub mod in_memory {
         let state = State::new();
         for name in names {
             add(&state, linked.clone(), ROOT_NODE, file(name), name).await;
+        }
+        commit(&linked, &state, Hash::default(), branch_id()).await
+    }
+
+    /// What [`linked_revision_storing`] places at a path.
+    pub enum Linked<'a> {
+        /// A file holding these bytes, which the store holds.
+        File(&'a [u8]),
+        /// A link to the root of the revision of the repository.
+        Link(RepositoryId, Hash),
+    }
+
+    /// A revision of the repository `link_repository` holding each of `entries` at its path, with
+    /// the directories leading to it. The store holds each file's content, so a read finds it, and
+    /// the revision's link list holds each link.
+    pub async fn linked_revision_storing(
+        repository: &Arc<RepositoryContext>,
+        link_repository: RepositoryId,
+        entries: &[(&str, Linked<'_>)],
+    ) -> Hash {
+        let linked = repository.to_link_context(link_repository).await;
+        let state = State::new();
+        for (path, entry) in entries {
+            let (directories, name) = path.rsplit_once('/').unwrap_or(("", path));
+            let mut parent = ROOT_NODE;
+            for step in directories.split('/').filter(|step| !step.is_empty()) {
+                parent = match state
+                    .find_subnode(linked.clone(), parent, hash_string(step))
+                    .await
+                {
+                    Ok(found) => found,
+                    Err(_) => add(&state, linked.clone(), parent, directory(step), step).await,
+                };
+            }
+            let node = match entry {
+                Linked::File(content) => {
+                    let address = Address {
+                        hash: lore_storage::hash::hash_slice(content),
+                        context: Context::from(link_repository),
+                    };
+                    linked
+                        .immutable_store()
+                        .put(
+                            linked.id,
+                            address,
+                            lore_storage::Fragment {
+                                flags:
+                                    lore_storage::fragment_flags::FragmentFlags::PayloadStoredLocal
+                                        .bits(),
+                                size_payload: content.len() as u32,
+                                size_content: content.len() as u64,
+                            },
+                            Some(bytes::Bytes::copy_from_slice(content)),
+                            false,
+                        )
+                        .await
+                        .expect("storing the file's content must succeed");
+                    Node {
+                        size: content.len() as u64,
+                        address,
+                        ..file(name)
+                    }
+                }
+                Linked::Link(nested, pin) => link_node(name, *nested, *pin),
+            };
+            let node_id = add(&state, linked.clone(), parent, node, name).await;
+            if let Linked::Link(nested, pin) = entry {
+                state
+                    .link_add(
+                        linked.clone(),
+                        *nested,
+                        BranchId::default(),
+                        *pin,
+                        node_id,
+                        lore_revision::link::LinkFlags::NoFlags,
+                    )
+                    .await
+                    .expect("registering the link must succeed");
+            }
         }
         commit(&linked, &state, Hash::default(), branch_id()).await
     }

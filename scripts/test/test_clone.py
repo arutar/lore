@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,27 @@ def test_clone_status_behind_remote_not_divergent(new_lore_repo):
         f"Status must NOT report local ahead — clone_a has no local commits "
         f"beyond what the remote has: {entry}"
     )
+
+
+@pytest.mark.smoke
+@pytest.mark.own_vfs(
+    "reads the [store] config of an instance with a store of its own, which a virtual clone, "
+    "over a shared store, does not have"
+)
+def test_clone_writes_the_store_limits_it_is_given(new_lore_repo):
+    """`--max-capacity` and `--max-size` are the new instance's store limits."""
+    repo: Lore = new_lore_repo()
+    with repo.open_file("seed.txt", "w+") as f:
+        f.write("seed\n")
+    repo.stage(scan=True, offline=True)
+    repo.commit("Seed", offline=True)
+    repo.push()
+
+    clone = repo.clone(max_capacity=50_000_000, max_size=1 << 40)
+
+    config = tomllib.loads((Path(clone.dot_path()) / "config.toml").read_text(encoding="utf-8"))
+    assert config["store"]["max_capacity"] == 50_000_000
+    assert config["store"]["max_size"] == 1 << 40
 
 
 @pytest.mark.smoke
@@ -140,10 +162,14 @@ def test_clone_direct_file_write(new_lore_repo):
     Verify that clone with --direct-file-write produces correct files on disk.
 
     --direct-file-write skips the default atomic write strategy (write to temp
-    file then rename) and writes directly to the destination path. The result
-    must be identical to a normal clone.
+    file then rename) and writes directly to the destination path, on Windows
+    past the file cache. The result must be identical to a normal clone, a file
+    of many fragments included. The flag applies to the clone alone: the new
+    instance's `[file] direct_write` stays as it is, and a later sync writes as
+    that says.
     """
     repo: Lore = new_lore_repo()
+    large = bytes((index * 7 + index // 4096) % 251 for index in range(3 * 1024 * 1024 + 777))
 
     repo.write_commit_push(
         "Initial commit",
@@ -151,10 +177,22 @@ def test_clone_direct_file_write(new_lore_repo):
             "text.txt": "hello world\n",
             "subdir/nested.txt": "nested content\n",
             "binary.bin": b"\x00\x01\x02\xff" * 256,
+            "large.bin": large,
         },
     )
 
     clone = repo.clone(direct_file_write=True)
+
+    with clone.open_file("large.bin", "rb") as f:
+        assert f.read() == large, "fragmented file content mismatch"
+    with clone.open_file(".lore/config.toml") as f:
+        config = tomllib.loads(f.read())
+    assert config["file"]["direct_write"] is False, "the flag is not written to the config"
+
+    repo.write_commit_push("Change the large file", {"large.bin": large[::-1]})
+    clone.sync()
+    with clone.open_file("large.bin", "rb") as f:
+        assert f.read() == large[::-1], "a later sync writes the change"
 
     # Verify text files
     with clone.open_file("text.txt") as f:

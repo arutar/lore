@@ -41,7 +41,6 @@ mod open_tests {
     #[derive(Debug, Clone, PartialEq)]
     enum Captured {
         Opened { handle_id: u64 },
-        Error,
         Complete(i32),
         Other,
     }
@@ -54,7 +53,6 @@ mod open_tests {
                 LoreEvent::StorageOpened(data) => Captured::Opened {
                     handle_id: data.handle_id,
                 },
-                LoreEvent::Error(_) => Captured::Error,
                 LoreEvent::Complete(data) => Captured::Complete(data.status),
                 _ => Captured::Other,
             };
@@ -166,10 +164,6 @@ mod open_tests {
         assert_ne!(status, 0);
         let events = sink.lock().unwrap().clone();
         assert!(
-            !events.contains(&Captured::Error),
-            "no mid-stream Error event on terminal failure, got {events:?}",
-        );
-        assert!(
             events
                 .iter()
                 .any(|e| matches!(e, Captured::Complete(s) if *s != 0)),
@@ -197,10 +191,6 @@ mod open_tests {
         .await;
         assert_ne!(status, 0);
         let events = sink.lock().unwrap().clone();
-        assert!(
-            !events.contains(&Captured::Error),
-            "no mid-stream Error event on terminal failure, got {events:?}",
-        );
         assert!(
             events
                 .iter()
@@ -477,10 +467,6 @@ mod open_tests {
         assert_ne!(status, 0, "second close should fail");
         let events = sink2.lock().unwrap().clone();
         assert!(
-            !events.contains(&Captured::Error),
-            "no mid-stream Error event on terminal failure, got {events:?}",
-        );
-        assert!(
             events
                 .iter()
                 .any(|e| matches!(e, Captured::Complete(s) if *s != 0))
@@ -494,10 +480,6 @@ mod open_tests {
         let status = close_handle(lore::storage::handle::LoreStore::INVALID, cb).await;
         assert_ne!(status, 0);
         let events = sink.lock().unwrap().clone();
-        assert!(
-            !events.contains(&Captured::Error),
-            "no mid-stream Error event on terminal failure, got {events:?}",
-        );
         assert!(
             events
                 .iter()
@@ -899,10 +881,6 @@ mod open_tests {
         assert_ne!(status, 0);
         let events = sink.lock().unwrap().clone();
         assert!(
-            !events.contains(&Captured::Error),
-            "no mid-stream Error event on terminal failure, got {events:?}",
-        );
-        assert!(
             events
                 .iter()
                 .any(|e| matches!(e, Captured::Complete(s) if *s != 0))
@@ -937,7 +915,6 @@ mod open_tests {
             /// that a failing item is diagnosable from its event alone.
             message: String,
         },
-        Error,
         Complete(i32),
         Other,
     }
@@ -974,7 +951,6 @@ mod open_tests {
                     error_code: d.error.error_code,
                     message: d.error.message.as_str().to_string(),
                 },
-                LoreEvent::Error(_) => GetCaptured::Error,
                 LoreEvent::Complete(d) => GetCaptured::Complete(d.status),
                 _ => GetCaptured::Other,
             };
@@ -1276,10 +1252,6 @@ mod open_tests {
         .await;
         assert_ne!(status, 0);
         let events = sink.lock().unwrap().clone();
-        assert!(
-            !events.contains(&GetCaptured::Error),
-            "no Error event must fire on the migrated terminal arm, got {events:?}",
-        );
         assert!(
             events
                 .iter()
@@ -2202,10 +2174,6 @@ mod open_tests {
         assert_ne!(status, 0);
 
         let events = sink.lock().unwrap().clone();
-        assert!(
-            !events.iter().any(|e| matches!(e, LoreEvent::Error(_))),
-            "no Error event must fire on the migrated terminal arm",
-        );
         let complete = events
             .iter()
             .find_map(|e| match e {
@@ -2265,10 +2233,6 @@ mod open_tests {
         assert_eq!(status, lore_base::error::AddressNotFound::FFI_CODE);
 
         let events = sink.lock().unwrap().clone();
-        assert!(
-            !events.iter().any(|e| matches!(e, LoreEvent::Error(_))),
-            "no Error event must fire on the migrated terminal arm",
-        );
         let complete = events
             .iter()
             .find_map(|e| match e {
@@ -2397,7 +2361,6 @@ mod open_tests {
         let (status, events) = flush_handle(handle).await;
         assert_eq!(status, 0);
         assert!(events.contains(&Captured::Complete(0)));
-        assert!(!events.contains(&Captured::Error));
     }
 
     #[tokio::test]
@@ -2478,10 +2441,6 @@ mod open_tests {
         assert_ne!(status, 0);
         let events = sink.lock().unwrap().clone();
         assert!(
-            !events.contains(&Captured::Error),
-            "no Error event must fire on the migrated terminal arm, got {events:?}",
-        );
-        assert!(
             events
                 .iter()
                 .any(|e| matches!(e, Captured::Complete(s) if *s != 0))
@@ -2498,7 +2457,6 @@ mod open_tests {
             fragment: lore_base::types::Fragment,
             error_code: i32,
         },
-        Error,
         CallComplete(i32),
         Other,
     }
@@ -2514,7 +2472,6 @@ mod open_tests {
                     fragment: d.fragment,
                     error_code: d.error.error_code,
                 },
-                LoreEvent::Error(_) => GetMetadataCaptured::Error,
                 LoreEvent::Complete(d) => GetMetadataCaptured::CallComplete(d.status),
                 _ => GetMetadataCaptured::Other,
             };
@@ -2686,7 +2643,6 @@ mod open_tests {
             remote_skipped: u8,
             error_code: i32,
         },
-        Error,
         CallComplete(i32),
         Other,
     }
@@ -2705,7 +2661,6 @@ mod open_tests {
                     remote_skipped: d.remote_skipped,
                     error_code: d.error.error_code,
                 },
-                LoreEvent::Error(_) => ObliterateCaptured::Error,
                 LoreEvent::Complete(d) => ObliterateCaptured::CallComplete(d.status),
                 _ => ObliterateCaptured::Other,
             };
@@ -2940,7 +2895,6 @@ mod open_tests {
             target_context: lore_base::types::Context,
             error_code: i32,
         },
-        Error,
         CallComplete(i32),
         Other,
     }
@@ -2958,7 +2912,6 @@ mod open_tests {
                     target_context: d.target_context,
                     error_code: d.error.error_code,
                 },
-                LoreEvent::Error(_) => CopyCaptured::Error,
                 LoreEvent::Complete(d) => CopyCaptured::CallComplete(d.status),
                 _ => CopyCaptured::Other,
             };
@@ -6312,10 +6265,6 @@ mod open_tests {
         assert_ne!(status, 0, "open with local=1 && remote=1 must fail");
         let events = sink.lock().unwrap().clone();
         assert!(
-            !events.iter().any(|e| matches!(e, Captured::Error)),
-            "no mid-stream Error event on terminal failure, got {events:?}",
-        );
-        assert!(
             events
                 .iter()
                 .any(|e| matches!(e, Captured::Complete(s) if *s != 0)),
@@ -6397,10 +6346,6 @@ mod open_tests {
         .await;
         assert_ne!(status, 0, "open with remote=1 + no remote_config must fail");
         let events = sink.lock().unwrap().clone();
-        assert!(
-            !events.iter().any(|e| matches!(e, Captured::Error)),
-            "no mid-stream Error event on terminal failure, got {events:?}",
-        );
         assert!(
             events
                 .iter()
@@ -6662,5 +6607,125 @@ mod open_tests {
 
         let (_, close_cb) = make_sink();
         assert_eq!(close_handle(handle, close_cb).await, 0);
+    }
+
+    /// The length and modified time of every bucket and level file of the store's index under
+    /// `repo_path`, the files a flush writes.
+    fn index_files(repo_path: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+        let mut files = Vec::new();
+        let mut pending = vec![repo_path.join(".lore").join("immutable").join("index")];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let metadata = entry.metadata().expect("an index entry's metadata");
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if metadata.is_dir() {
+                    if name != "pack" {
+                        pending.push(entry.path());
+                    }
+                } else if name.starts_with("index_") || name == "level" {
+                    files.push((
+                        entry.path(),
+                        metadata.len(),
+                        metadata.modified().expect("a modified time"),
+                    ));
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    /// Open with `no_background_flush=1`: a put held only locally schedules no delayed flush, so
+    /// the store's index files stay as they were past the flush delay, and close writes them.
+    /// Without it the delayed flush writes them while the handle is open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_without_background_flush_writes_the_index_at_close() {
+        use std::time::Duration;
+        use std::time::Instant;
+
+        use lore_base::types::Context;
+        use lore_base::types::Partition;
+
+        for deferred in [true, false] {
+            let repo_dir = tempdir("no-background-flush");
+            let repo_path = repo_dir.path();
+            create_repo(repo_path).await;
+
+            let (open_sink, open_cb) = make_sink();
+            let mut g = globals();
+            g.no_background_flush = u8::from(deferred);
+            let status = open::open(
+                g,
+                LoreStorageOpenArgs {
+                    repository_path: LoreString::from(repo_path.display().to_string().as_str()),
+                    in_memory: 0,
+                    ..Default::default()
+                },
+                open_cb,
+            )
+            .await;
+            assert_eq!(status, 0);
+            let id = take_opened(&open_sink.lock().unwrap()).expect("Opened");
+            let handle = lore::storage::handle::LoreStore { handle_id: id };
+            let before = index_files(repo_path);
+
+            let payload = b"a payload the background flush would index".to_vec();
+            let item = lore::storage::put::LoreStoragePutItem {
+                id: 0,
+                partition: Partition::from([0xd1u8; 16]),
+                context: Context::from([0x5au8; 16]),
+                data: lore_revision::event::LoreBytes {
+                    ptr: payload.as_ptr().cast(),
+                    len: payload.len(),
+                },
+                remote_write: 0,
+                local_cache: 0,
+                remote_query: 0,
+                fixed_size_chunk: 0,
+            };
+            let (_sink, cb) = make_sink();
+            let status = lore::storage::put::put(
+                globals(),
+                lore::storage::put::LoreStoragePutArgs {
+                    handle,
+                    items: lore_revision::interface::LoreArray::from_vec(vec![item]),
+                },
+                cb,
+            )
+            .await;
+            assert_eq!(status, 0);
+
+            let delay = Duration::from_secs(
+                lore_storage::local::immutable_store::DEFAULT_FLUSH_DELAY_SECONDS + 2,
+            );
+            if deferred {
+                tokio::time::sleep(delay).await;
+                assert_eq!(
+                    index_files(repo_path),
+                    before,
+                    "no background flush wrote the index while the handle was open"
+                );
+            } else {
+                let deadline = Instant::now() + delay * 2;
+                while index_files(repo_path) == before {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the delayed flush writes the index while the handle is open"
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+
+            let written = index_files(repo_path);
+            let (_, close_cb) = make_sink();
+            assert_eq!(close_handle(handle, close_cb).await, 0);
+            if deferred {
+                assert_ne!(index_files(repo_path), written, "the close wrote the index");
+            }
+        }
     }
 }

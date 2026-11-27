@@ -991,3 +991,224 @@ async fn a_walk_from_a_staged_link_pinned_alike_enters_nothing_below_it() {
         })
         .await;
 }
+
+/// A committed revision of `repository` holding `files` and the empty `directories`, each added
+/// with its parent directories.
+async fn committed_tree(
+    repository: &Arc<RepositoryContext>,
+    files: &[&str],
+    directories: &[&str],
+) -> Arc<State> {
+    let state = State::new();
+    let mut added: Vec<(String, NodeID)> = Vec::new();
+    for (path, is_file) in files
+        .iter()
+        .map(|path| (*path, true))
+        .chain(directories.iter().map(|path| (*path, false)))
+    {
+        let mut parent = ROOT_NODE;
+        let components: Vec<&str> = path.split('/').collect();
+        for (depth, name) in components.iter().enumerate() {
+            let prefix = components[..=depth].join("/");
+            if let Some((_, node)) = added.iter().find(|(added, _)| *added == prefix) {
+                parent = *node;
+                continue;
+            }
+            let node = if is_file && depth + 1 == components.len() {
+                in_memory::file(name)
+            } else {
+                in_memory::directory(name)
+            };
+            parent = in_memory::add(&state, repository.clone(), parent, node, name).await;
+            added.push((prefix, parent));
+        }
+    }
+    let revision =
+        in_memory::commit(repository, &state, Hash::default(), in_memory::branch_id()).await;
+    in_memory::revision_state(repository, revision).await
+}
+
+/// A repository over `immutable` and `mutable` whose view holds `rules`, a rule starting with `!`
+/// re-including.
+fn repository_under_view(
+    immutable: &Arc<dyn lore_storage::ImmutableStore>,
+    mutable: &Arc<dyn lore_storage::MutableStore>,
+    rules: &[&str],
+) -> Arc<RepositoryContext> {
+    let mut filter = Filter::default();
+    for rule in rules {
+        match rule.strip_prefix('!') {
+            Some(included) => filter.view.add_inclusion(included).unwrap(),
+            None => filter.view.add_exclusion(rule).unwrap(),
+        }
+    }
+    Arc::new(
+        RepositoryContext::new(
+            crate::helper::default_repository_creation_args(immutable.clone(), mutable.clone())
+                .with_id(RepositoryId::from(uuid::Uuid::now_v7()))
+                .with_filter(Arc::new(filter)),
+        )
+        .with_write_token(in_memory::token()),
+    )
+}
+
+/// The deletes a walk between the roots of `from` and `to` emits with `extra`, by path and
+/// whether each carries [`change::Flags::KeptBeside`], sorted.
+async fn deletes_marked(
+    repository: &Arc<RepositoryContext>,
+    from: &Arc<State>,
+    to: &Arc<State>,
+    extra: DiffFlags,
+) -> Vec<(String, bool)> {
+    let root = |state: &Arc<State>| NodeChangeState {
+        mapping: NodeMapping {
+            repository: repository.clone(),
+            state: state.clone(),
+            path: RelativePath::new(),
+            node: ROOT_NODE,
+        },
+        observed: None,
+        flags: NodeFlags::NoFlags,
+        address: Address::default(),
+        mode: 0,
+    };
+    let (from, to) = (root(from), root(to));
+    let mut walk = ChangeStream::spawn(async move |changes| {
+        diff_subtree_flagged(
+            from,
+            to,
+            RelativePath::new(),
+            None,
+            extra,
+            &changes,
+            FilterMode::Full,
+        )
+        .await
+    });
+    let mut deletes = Vec::new();
+    while let Some(change) = walk.next().await {
+        if change.action == change::FileAction::Delete {
+            deletes.push((
+                change.path().as_str().to_string(),
+                change.flags.contains(change::Flags::KeptBeside),
+            ));
+        }
+    }
+    walk.finish().await.expect("a walk of the two states");
+    deletes.sort();
+    deletes
+}
+
+/// Under one view, a walk reports no add or delete of a directory whose emptiness the revision
+/// changes, placing directories or not: the view keeps a directory or excludes it whatever it
+/// holds, as under `*.bat`, which keeps `a/b`, and under `/*/` and `!/*/**/*.txt`, which
+/// excludes it.
+#[tokio::test]
+async fn a_walk_under_one_view_reports_no_directory_whose_emptiness_changes() {
+    let (immutable, mutable, execution) = test_store_create().await.expect("creating the stores");
+    LORE_CONTEXT
+        .scope(execution, async move {
+            let held = (&["a/b/y.bat", "top.txt"][..], &[][..]);
+            let emptied = (&["top.txt"][..], &["a/b"][..]);
+            let kept_below = (&["a/b/sub/x.txt", "top.txt"][..], &[][..]);
+            let cases = [
+                (&["*.bat"][..], held, emptied),
+                (&["*.bat"][..], emptied, held),
+                (&["/*/", "!/*/**/*.txt"][..], held, emptied),
+                (&["/*/", "!/*/**/*.txt"][..], emptied, held),
+                (&["/*/", "!/*/**/*.txt"][..], emptied, kept_below),
+                (&[][..], held, emptied),
+            ];
+            for (index, (rules, from, to)) in cases.into_iter().enumerate() {
+                let repository = repository_under_view(&immutable, &mutable, rules);
+                let from = committed_tree(&repository, from.0, from.1).await;
+                let to = committed_tree(&repository, to.0, to.1).await;
+                for flags in [DiffFlags::PlacesDirectories, DiffFlags::empty()] {
+                    let reported =
+                        walk_flagged(&repository, &from, &to, flags, FilterMode::Full).await;
+                    assert!(
+                        reported.iter().all(|(_, path)| path != "a/b"),
+                        "case {index}, {flags:?}: {reported:?}"
+                    );
+                }
+            }
+        })
+        .await;
+}
+
+/// A walk placing directories marks a delete in a directory the view excludes that still holds a
+/// file the view keeps, and no delete in one holding only what the view excludes. A walk not
+/// placing directories marks none.
+#[tokio::test]
+async fn a_walk_placing_directories_marks_a_delete_beside_a_kept_file() {
+    let (immutable, mutable, execution) = test_store_create().await.expect("creating the stores");
+    LORE_CONTEXT
+        .scope(execution, async move {
+            let repository = repository_under_view(&immutable, &mutable, &["/*/", "!/*/**/*.txt"]);
+            let from = committed_tree(
+                &repository,
+                &["a/b/x.txt", "a/b/z.txt", "c/x.txt", "c/y.bat"],
+                &[],
+            )
+            .await;
+            let to = committed_tree(&repository, &["a/b/z.txt", "c/y.bat"], &[]).await;
+            for (extra, marked) in [
+                (DiffFlags::PlacesDirectories, &["a/b/x.txt"][..]),
+                (DiffFlags::empty(), &[][..]),
+            ] {
+                let expected: Vec<(String, bool)> = ["a/b/x.txt", "c/x.txt"]
+                    .iter()
+                    .map(|path| (path.to_string(), marked.contains(path)))
+                    .collect();
+                assert_eq!(
+                    deletes_marked(&repository, &from, &to, extra).await,
+                    expected,
+                    "{extra:?}"
+                );
+            }
+        })
+        .await;
+}
+
+/// A walk placing directories reads no kept file for a delete at the root, which no realize
+/// removes, nor for one in a directory the view keeps, which stays on disk.
+#[tokio::test]
+async fn a_walk_placing_directories_reads_no_kept_file_where_the_directory_stays() {
+    let (immutable, mutable, execution) = test_store_create().await.expect("creating the stores");
+    LORE_CONTEXT
+        .scope(execution, async move {
+            let repository =
+                repository_under_view(&immutable, &mutable, &["/*/", "!/*/**/*.txt", "!/n/"]);
+            let from = committed_tree(
+                &repository,
+                &["n/x.txt", "n/z.txt", "r.txt", "top.txt"],
+                &[],
+            )
+            .await;
+            let to = committed_tree(&repository, &["n/z.txt", "top.txt"], &[]).await;
+            assert_eq!(
+                deletes_marked(&repository, &from, &to, DiffFlags::PlacesDirectories).await,
+                [("n/x.txt".to_string(), false), ("r.txt".to_string(), false)]
+            );
+        })
+        .await;
+}
+
+/// A walk placing directories marks a delete in a directory the view excludes that still holds a
+/// directory the view keeps, as one holding a file it keeps.
+#[tokio::test]
+async fn a_walk_placing_directories_marks_a_delete_beside_a_placed_directory() {
+    let (immutable, mutable, execution) = test_store_create().await.expect("creating the stores");
+    LORE_CONTEXT
+        .scope(execution, async move {
+            let repository =
+                repository_under_view(&immutable, &mutable, &["/*/", "!/*/**/*.txt", "!/a/b/c/"]);
+            let from = committed_tree(&repository, &["a/b/x.txt", "a/b/c/k.bat"], &[]).await;
+            let to = committed_tree(&repository, &["a/b/c/k.bat"], &[]).await;
+            assert_eq!(
+                deletes_marked(&repository, &from, &to, DiffFlags::PlacesDirectories).await,
+                [("a/b/x.txt".to_string(), true)]
+            );
+        })
+        .await;
+}

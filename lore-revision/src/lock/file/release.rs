@@ -12,14 +12,12 @@ use crate::auth;
 use crate::branch;
 use crate::errors::*;
 use crate::event;
-use crate::event::EventError;
 use crate::interface::LoreArray;
-use crate::interface::LoreError;
 use crate::interface::LoreString;
 use crate::lock;
-use crate::lock::util::LOCK_BATCH_SIZE;
 use crate::lock::util::assemble_resource_for_path;
 use crate::lock::util::fold_batch_results;
+use crate::lock::util::lock_batch_size;
 use crate::lock::util::lock_path_node;
 use crate::lock::util::lock_tree;
 use crate::lore::execution_context;
@@ -39,6 +37,7 @@ pub struct ReleaseOptions {
 
 #[error_set]
 pub enum ReleaseError {
+    Cancelled,
     LinkPinsDiverge,
     Disconnected,
     InvalidArguments,
@@ -86,19 +85,11 @@ pub enum ReleaseError {
     MissingIdentity,
 }
 
-impl EventError for ReleaseError {
-    fn translated(&self) -> LoreError {
-        LoreError::Internal
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
-}
-
 /// Data for an event that marks the start of a lock release report.
 #[repr(C)]
-#[derive(Clone, Default, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, Default, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreLockFileReleaseBeginEventData {
     /// Number of release entries that follow.
@@ -109,7 +100,7 @@ pub struct LoreLockFileReleaseBeginEventData {
 
 /// Data for an event reporting a path whose lock is being released.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreLockFileReleaseEventData {
     /// The path whose lock is being released.
@@ -245,7 +236,7 @@ pub async fn release(
 
     let resources_count = resources.len();
     let resources_values = Vec::from_iter(resources);
-    let batch_iterator = resources_values.chunks(LOCK_BATCH_SIZE);
+    let batch_iterator = resources_values.chunks(lock_batch_size(&remote.environment));
     let num_batches = batch_iterator.len();
 
     let mut batches: JoinSet<Result<Vec<lock::LockResource>, ReleaseError>> = JoinSet::new();

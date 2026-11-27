@@ -20,7 +20,7 @@ use crate::state::State;
 
 /// Header information for a revision history listing.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRevisionHistoryEventData {
     /// Repository identifier the history belongs to.
@@ -37,7 +37,7 @@ impl LoreRevisionHistoryEventData {
 
 /// A single entry in a revision history listing.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRevisionHistoryEntryEventData {
     /// Revision hash signature.
@@ -61,6 +61,7 @@ impl LoreRevisionHistoryEntryEventData {
 
 #[error_set]
 pub enum RevisionHistoryError {
+    Cancelled,
     LinkPinsDiverge,
     AddressNotFound,
     Disconnected,
@@ -107,8 +108,6 @@ pub enum RevisionHistoryError {
     TokenNotFound,
     MissingIdentity,
 }
-
-impl crate::event::EventError for RevisionHistoryError {}
 
 #[derive(Clone, Debug)]
 pub struct HistoryOptions {

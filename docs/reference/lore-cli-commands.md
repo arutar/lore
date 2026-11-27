@@ -249,6 +249,8 @@ renders as a trailing separator, which the whitespace hook rejects — write the
 * `--search-nearest` — Set to search for nearest match when matching revisions
 * `--no-gc` — Prevent automatic incremental garbage collection for this command; it otherwise runs in the background on
   writes. `lore repository gc` always runs a full pass regardless
+* `--no-background-flush` — Leave the local stores' background index writes, eviction's included, until the command
+  ends. In the Lore service, the background writes of every other command on the same store wait as well
 * `--sync-data` — Force sync data to storage media during flush
 * `--fast-flush` — Have the command's flushes write the local stores' index in place rather than replacing each of its
   files through a temporary file. Faster where creating files is slow, but if the process stops or a write fails while a
@@ -401,8 +403,9 @@ cannot. A bare or virtual instance writes no files and reads them from the remot
 * `--bare` — Clone without files, only fetch latest revision tree. Don't commit after merging, reverting or
   cherry-picking in such an instance: the commit can delete a directory the instance never had on disk, with everything
   in it
-* `--direct-file-write` — Write directly to the destination file instead of write to a temporary file and move into
-  place
+* `--direct-file-write` — On Windows, write files of one fragment past the file cache. A clone writes every file
+  directly, with no temporary file, with or without this option. Applies to this clone only: the new instance's
+  `[file] direct_write` setting is left as it is, and later commands follow that setting
 * `--vfs <VFS>` — Virtual File System type. When not 'none', creates a VFS as the repository directory, over a shared store as if --use-shared-store were given
 
   Default value: `none`
@@ -433,6 +436,9 @@ cannot. A bare or virtual instance writes no files and reads them from the remot
 * `--dependency-depth-limit <depth>` — Maximum dependency traversal depth (0 means unlimited)
 
   Default value: `0`
+
+* `--max-capacity <fragments>` — Fragments the new instance's store holds before eviction removes some, defaults to 2000000. The periodic eviction pass treats a value below 1048576 as 1048576. Ignored over a shared store and with --no-tracking
+* `--max-size <bytes>` — Bytes the new instance's store holds before compaction reclaims space, defaults to 10 GiB. Ignored over a shared store and with --no-tracking
 
 ## `lore repository delete`
 
@@ -593,10 +599,11 @@ Instance management
 
 ###### **Subcommands:**
 
-* `list` — List all registered instances for this repository
-* `prune` — Remove stale instance entries: paths that no longer exist, paths that hold no revision, and paths that now
-  hold a different instance. An SWFS instance is kept while its `.lore` remains in the external root, even when it's not
-  mounted, and so is an instance whose external directory can't be checked, as while the external root is unavailable
+* `list` — List the registered instances of this repository that the local store can read
+* `prune` — Remove stale instance registrations: paths that no longer exist, paths that hold no revision, paths that now
+  hold a different instance, and registrations whose data is missing from the local store or malformed. An SWFS instance
+  is kept while its `.lore` remains in the external root, even when it's not mounted, and so is an instance whose
+  external directory can't be checked, as while the external root is unavailable
 * `delete` — Delete the current instance: unmount (if a virtual instance), deregister from mutable store, and delete
   associated directories
 * `move` — Move the current instance to a new path
@@ -612,15 +619,16 @@ Instance management
 
 ## `lore repository instance list`
 
-List all registered instances for this repository
+List the registered instances of this repository that the local store can read
 
 **Usage:** `lore repository instance list`
 
 ## `lore repository instance prune`
 
-Remove stale instance entries: paths that no longer exist, paths that hold no revision, and paths that now hold a
-different instance. An SWFS instance is kept while its `.lore` remains in the external root, even when it's not mounted,
-and so is an instance whose external directory can't be checked, as while the external root is unavailable
+Remove stale instance registrations: paths that no longer exist, paths that hold no revision, paths that now hold a
+different instance, and registrations whose data is missing from the local store or malformed. An SWFS instance is kept
+while its `.lore` remains in the external root, even when it's not mounted, and so is an instance whose external
+directory can't be checked, as while the external root is unavailable
 
 **Usage:** `lore repository instance prune`
 
@@ -2156,12 +2164,12 @@ Link commands
 
 Link to the given point in the repository and subpath from the given repository
 
-**Usage:** `lore link add [OPTIONS] <link_path> <link_url> <source_path>`
+**Usage:** `lore link add [OPTIONS] <link_path> <repository> <source_path>`
 
 ###### **Arguments:**
 
 * `<link_path>` — Path in the current repository where the repository should be linked in
-* `<link_url>` — Repository URL
+* `<repository>` — Name, ID or URL of a repository on this repository's remote
 * `<source_path>` — Path in the link repository that should be linked in
 
 ###### **Options:**
@@ -2278,8 +2286,9 @@ cannot. A bare or virtual instance writes no files and reads them from the remot
 * `--bare` — Clone without files, only fetch latest revision tree. Don't commit after merging, reverting or
   cherry-picking in such an instance: the commit can delete a directory the instance never had on disk, with everything
   in it
-* `--direct-file-write` — Write directly to the destination file instead of write to a temporary file and move into
-  place
+* `--direct-file-write` — On Windows, write files of one fragment past the file cache. A clone writes every file
+  directly, with no temporary file, with or without this option. Applies to this clone only: the new instance's
+  `[file] direct_write` setting is left as it is, and later commands follow that setting
 * `--vfs <VFS>` — Virtual File System type. When not 'none', creates a VFS as the repository directory, over a shared store as if --use-shared-store were given
 
   Default value: `none`
@@ -2310,6 +2319,9 @@ cannot. A bare or virtual instance writes no files and reads them from the remot
 * `--dependency-depth-limit <depth>` — Maximum dependency traversal depth (0 means unlimited)
 
   Default value: `0`
+
+* `--max-capacity <fragments>` — Fragments the new instance's store holds before eviction removes some, defaults to 2000000. The periodic eviction pass treats a value below 1048576 as 1048576. Ignored over a shared store and with --no-tracking
+* `--max-size <bytes>` — Bytes the new instance's store holds before compaction reclaims space, defaults to 10 GiB. Ignored over a shared store and with --no-tracking
 
 ## `lore stage`
 
@@ -2810,7 +2822,8 @@ Show information about the registry of shared stores
 
 ###### **Options:**
 
-* `--include-instances <INCLUDE_INSTANCES>` — Look up all instances each shared store is used by
+* `--include-instances <INCLUDE_INSTANCES>` — Look up the instances using each shared store. A store another process
+  still holds after a 3-second wait is listed without them, with a warning
 
   Possible values: `true`, `false`
 

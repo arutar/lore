@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Epic Games, Inc.
 // SPDX-License-Identifier: MIT
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
@@ -166,6 +167,7 @@ pub struct RepositoryCreateArgs {
     shared_store_path: Option<String>,
 }
 
+#[lore_macro::test_pub]
 #[derive(Args)]
 pub struct RepositoryCloneArgs {
     /// URL of repository
@@ -192,7 +194,10 @@ pub struct RepositoryCloneArgs {
     #[clap(long, action)]
     bare: bool,
 
-    /// Write directly to the destination file instead of write to a temporary file and move into place
+    /// On Windows, write files of one fragment past the file cache. A clone writes every file
+    /// directly, with no temporary file, with or without this option. Applies to this clone only:
+    /// the new instance's `[file] direct_write` setting is left as it is, and later commands follow
+    /// that setting
     #[clap(long, action)]
     direct_file_write: bool,
 
@@ -240,6 +245,14 @@ pub struct RepositoryCloneArgs {
     /// Maximum dependency traversal depth (0 means unlimited)
     #[clap(long, value_name = "depth", default_value = "0")]
     dependency_depth_limit: u32,
+
+    /// Fragments the new instance's store holds before eviction removes some, defaults to 2000000. The periodic eviction pass treats a value below 1048576 as 1048576. Ignored over a shared store and with --no-tracking
+    #[clap(long, value_name = "fragments")]
+    max_capacity: Option<NonZeroU64>,
+
+    /// Bytes the new instance's store holds before compaction reclaims space, defaults to 10 GiB. Ignored over a shared store and with --no-tracking
+    #[clap(long, value_name = "bytes")]
+    max_size: Option<NonZeroU64>,
 }
 
 #[derive(Args)]
@@ -377,7 +390,7 @@ pub enum RepositoryCommands {
     /// staging and committing write to, so both work without the remote, and fails if it cannot. A
     /// bare or virtual instance writes no files and reads them from the remote when a command needs
     /// them.
-    Clone(RepositoryCloneArgs),
+    Clone(Box<RepositoryCloneArgs>),
 
     /// Delete a repository
     Delete(RepositoryDeleteArgs),
@@ -417,12 +430,13 @@ pub struct RepositoryInstanceArgs {
 
 #[derive(Subcommand)]
 pub enum RepositoryInstanceCommands {
-    /// List all registered instances for this repository
+    /// List the registered instances of this repository that the local store can read
     List,
-    /// Remove stale instance entries: paths that no longer exist, paths that hold no revision, and
-    /// paths that now hold a different instance. An SWFS instance is kept while its `.lore` remains
-    /// in the external root, even when it's not mounted, and so is an instance whose external
-    /// directory can't be checked, as while the external root is unavailable.
+    /// Remove stale instance registrations: paths that no longer exist, paths that hold no
+    /// revision, paths that now hold a different instance, and registrations whose data is missing
+    /// from the local store or malformed. An SWFS instance is kept while its `.lore` remains in the
+    /// external root, even when it's not mounted, and so is an instance whose external directory
+    /// can't be checked, as while the external root is unavailable.
     Prune,
     /// Delete the current instance: unmount (if a virtual instance), deregister from mutable store, and delete associated directories
     Delete,
@@ -1137,6 +1151,8 @@ pub fn handle_repository_clone(globals: LoreGlobalArgs, args: &RepositoryCloneAr
         ),
         dependency_recursive: args.dependency_recursive.into(),
         dependency_depth_limit: args.dependency_depth_limit,
+        max_capacity: args.max_capacity.map_or(0, NonZeroU64::get),
+        max_size: args.max_size.map_or(0, NonZeroU64::get),
     };
 
     let start = std::time::Instant::now();
@@ -1874,12 +1890,19 @@ fn handle_repository_instance_prune(globals: LoreGlobalArgs) -> u8 {
             }
             LoreEvent::RepositoryInstance(data) => {
                 pruned_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                println!(
-                    "  Pruned {} {}{}",
-                    data.instance_id,
-                    data.path,
-                    instance_stale_suffix(data.stale)
-                );
+                if data.stale == 4 {
+                    println!(
+                        "  Pruned a registration whose data is missing from the local store or \
+                         malformed"
+                    );
+                } else {
+                    println!(
+                        "  Pruned {} {}{}",
+                        data.instance_id,
+                        data.path,
+                        instance_stale_suffix(data.stale)
+                    );
+                }
             }
             LoreEvent::Maintenance(data) => {
                 util::handle_maintenance_event(data);

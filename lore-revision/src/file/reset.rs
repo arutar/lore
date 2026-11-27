@@ -20,7 +20,6 @@ use crate::MAX_CONCURRENT_TREE_TASKS;
 use crate::branch;
 use crate::errors::*;
 use crate::event;
-use crate::event::EventError;
 use crate::file::stage::route_layer_paths;
 use crate::file::unstage;
 use crate::file::unstage::UnstageOptions;
@@ -33,10 +32,10 @@ use crate::fs::filesystem_provider::InstanceOperation;
 use crate::fs::filesystem_provider::InstanceOperationImpl;
 use crate::fs::filesystem_provider::create_empty_directory;
 use crate::fs::filesystem_provider::with_operation;
+use crate::fs::realize::keeps_entry;
 use crate::hash::hash_string;
 use crate::hash::hash_string_bytes;
 use crate::interface::LoreArray;
-use crate::interface::LoreError;
 use crate::interface::LoreFileAction;
 use crate::interface::LoreString;
 use crate::layer;
@@ -66,6 +65,7 @@ use crate::revision::sync::SyncRealizeStats;
 use crate::runtime::execution_context;
 use crate::state;
 use crate::state::Clear;
+use crate::state::FoundNode;
 use crate::state::State;
 use crate::state::os_diff::ListedEntry;
 use crate::state::os_diff::ListedSpellings;
@@ -74,7 +74,7 @@ use crate::util::path::RelativePath;
 
 /// Data for the event emitted when a reset operation begins.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFileResetBeginEventData {
     /// Number of paths requested for reset.
@@ -83,7 +83,7 @@ pub struct LoreFileResetBeginEventData {
 
 /// Running counts of items processed during a reset operation.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFileResetCountData {
     /// Number of directories that were reset.
@@ -98,7 +98,7 @@ pub struct LoreFileResetCountData {
 
 /// Data for the progress event emitted periodically during a reset operation.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFileResetProgressEventData {
     /// Current counts of items processed.
@@ -107,7 +107,7 @@ pub struct LoreFileResetProgressEventData {
 
 /// Data for the event emitted when a reset operation completes.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFileResetEndEventData {
     /// Final counts of items processed.
@@ -116,7 +116,7 @@ pub struct LoreFileResetEndEventData {
 
 /// Data for the event emitted for each file affected by a reset operation.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreFileResetFileEventData {
     /// Path of the file.
@@ -129,6 +129,7 @@ pub struct LoreFileResetFileEventData {
 
 #[error_set]
 pub enum ResetError {
+    Cancelled,
     LinkPinsDiverge,
     InvalidArguments,
     InvalidPath,
@@ -174,24 +175,6 @@ pub enum ResetError {
     SharedStoreNotFound,
     TokenNotFound,
     MissingIdentity,
-}
-
-impl EventError for ResetError {
-    fn translated(&self) -> LoreError {
-        match self {
-            ResetError::InvalidArguments(_) | ResetError::InvalidPath(_) => {
-                LoreError::InvalidArguments
-            }
-            ResetError::RevisionNotFound(_)
-            | ResetError::BranchNotFound(_)
-            | ResetError::NotFound(_) => LoreError::NotFound,
-            _ => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 const RESET_DIRECTORY_MAX: usize = 10_000;
@@ -676,7 +659,6 @@ struct ResetFileWorkItem {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -915,7 +897,6 @@ async fn store_staged_tree(
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1221,16 +1202,12 @@ async fn walk_paths_returning_moves(
                 moved.push((change.from.mapping.node, at));
             }
         }
-        if let Ok(link) = state_staged
-            .find_node_link(repository.clone(), path.as_str())
+        if let Ok(found) = state_staged
+            .locate_node(repository.clone(), path.as_str())
             .await
-            && let Ok(Beside::Moved(beside)) = beside_deleted(
-                state_staged,
-                repository,
-                link.node,
-                hash_string(path.name()),
-            )
-            .await
+            && let Some(node) = found.own_node()
+            && let Ok(Beside::Moved(beside)) =
+                beside_deleted(state_staged, repository, node, hash_string(path.name())).await
         {
             moved.push((beside, at));
         }
@@ -1348,7 +1325,7 @@ async fn return_dirty_move(
     for state_target in targets {
         if state_target.revision() != state_current.revision()
             && state_target
-                .find_node_link(repository.clone(), from.as_str())
+                .locate_node(repository.clone(), from.as_str())
                 .await
                 .is_ok()
         {
@@ -1534,14 +1511,14 @@ async fn resolve_last_merged_target(
     relative_path: &RelativePath,
 ) -> Result<Arc<State>, ResetError> {
     let mut state_start = state_current;
-    let node_link = absent_unless_refused::<_, _, ResetError>(
+    let found = absent_unless_refused::<_, _, ResetError>(
         state_start
-            .find_node_link(repository.clone(), relative_path.as_str())
+            .locate_node(repository.clone(), relative_path.as_str())
             .await,
         "finding the node",
     )?
     .unwrap_or_default();
-    if !node_link.is_valid() {
+    if !found.is_valid() {
         lore_debug!("Find state where node exist: {relative_path}");
         let revision = state_start.revision();
         if revision != branch_point {
@@ -1705,14 +1682,14 @@ async fn find_start_state(
             .await
             .forward::<ResetError>("Failed to deserialize revision state")?;
 
-        let node_link = absent_unless_refused::<_, _, ResetError>(
+        let found = absent_unless_refused::<_, _, ResetError>(
             state_parent
-                .find_node_link(repository.clone(), relative_path.as_str())
+                .locate_node(repository.clone(), relative_path.as_str())
                 .await,
             "finding the node",
         )?
         .unwrap_or_default();
-        if node_link.is_valid() {
+        if found.is_valid() {
             return Ok(state_parent);
         }
 
@@ -1745,20 +1722,18 @@ async fn find_merge_state(
             state.parent_self(),
             state.parent_other()
         );
-        let node_link = state
-            .find_node_link(repository.clone(), relative_path.as_str())
+        let node_id = match state
+            .locate_node(repository.clone(), relative_path.as_str())
             .await
-            .map_err(|err| {
-                forward_refusal_or(err, "finding the node", |err| {
-                    ResetError::internal_with_context(err, "Failed to find node")
-                })
-            });
-
-        if let Ok(node_link) = &node_link
-            && node_link.crosses_link(&repository, &state)
         {
-            return Err(last_merged_inside_link(relative_path));
-        }
+            Ok(found) => match found.own_node() {
+                Some(node_id) => Ok(node_id),
+                None => return Err(last_merged_inside_link(relative_path)),
+            },
+            Err(err) => Err(forward_refusal_or(err, "finding the node", |err| {
+                ResetError::internal_with_context(err, "Failed to find node")
+            })),
+        };
 
         if !state.parent_other().is_zero()
             && let Some(state_merged) = absent_unless_refused::<_, _, ResetError>(
@@ -1773,9 +1748,7 @@ async fn find_merge_state(
             return Ok(state);
         }
 
-        let node_link = node_link?;
-
-        let node_id = node_link.node;
+        let node_id = node_id?;
 
         // File metadata
         let metadata_node_id = node::node_to_file_metadata(node_id);
@@ -1936,24 +1909,25 @@ fn reset_walk_named_path(
         let parent_states = repository.filter.parent_exclusion_states(&relative_path);
 
         let found = state_target
-            .find_relative_held(repository.clone(), ROOT_NODE, state_path.as_str())
+            .locate_held_node_below(repository.clone(), ROOT_NODE, state_path.as_str())
             .await;
 
         match found {
-            Ok((node_link, (target_repository, target_state_current))) => {
+            Ok(held) => {
+                let (node_id, (target_repository, target_state_current)) = held.into_parts();
                 let node = target_state_current
-                    .node(target_repository.clone(), node_link.node)
+                    .node(target_repository.clone(), node_id)
                     .await
                     .forward::<ResetError>("Failed to find node")?;
 
                 let (current_state_staged, staged_base, place) =
                     if !Arc::ptr_eq(&target_state_current, &state_target) {
                         refuse_staged(&state_staged, &repository, &state_path).await?;
-                        let place = Some((node_link.node, node.parent));
+                        let place = Some((node_id, node.parent));
                         (target_state_current.clone(), None, place)
                     } else {
                         let place = match &staged_base {
-                            None => Some((node_link.node, node.parent)),
+                            None => Some((node_id, node.parent)),
                             Some(staged_base) => {
                                 base_node_at(&staged_base.state, &repository, &state_path).await?
                             }
@@ -1980,7 +1954,7 @@ fn reset_walk_named_path(
                     relative_path.name().to_string()
                 } else {
                     target_state_current
-                        .node_name_clone(target_repository.clone(), node_link.node)
+                        .node_name_clone(target_repository.clone(), node_id)
                         .await
                         .forward::<ResetError>("Failed to get node name")?
                 };
@@ -2023,7 +1997,7 @@ fn reset_walk_named_path(
                     },
                     relative_path,
                     node_name,
-                    node_link.node,
+                    node_id,
                     staged,
                     node,
                     parent_states,
@@ -2050,21 +2024,20 @@ fn reset_walk_named_path(
                 // refused, since its node is numbered in the linked tree, not in `state_staged`.
                 let mut delete_path = options.purge;
                 if let Ok(staged_link) = state_staged
-                    .find_node_link(repository.clone(), state_path.as_str())
+                    .locate_node(repository.clone(), state_path.as_str())
                     .await
                 {
-                    if staged_link.crosses_link(&repository, &state_staged) {
+                    let Some(staged_id) = staged_link.own_node() else {
                         return Err(NotSupported {
-                        operation: format!(
-                            "Resetting {relative_path} inside a link, which the target revision \
-                             does not hold"
-                        ),
-                    }
-                    .into());
-                    }
+                            operation: format!(
+                                "Resetting a file added inside a link at {relative_path}"
+                            ),
+                        }
+                        .into());
+                    };
                     // The flags alone, so the record is not held across the awaits below.
                     let (dirty_add, dirty_move, link, directory) = state_staged
-                        .node(repository.clone(), staged_link.node)
+                        .node(repository.clone(), staged_id)
                         .await
                         .forward::<ResetError>("Failed to find staged node")
                         .map(|node| {
@@ -2079,7 +2052,7 @@ fn reset_walk_named_path(
                     if dry_run_unstaged_link(link) {
                         return Ok(());
                     }
-                    refuse_staged_node(&state_staged, &repository, staged_link.node).await?;
+                    refuse_staged_node(&state_staged, &repository, staged_id).await?;
 
                     if dirty_move && !dirty_add {
                         lore_trace!(
@@ -2096,7 +2069,7 @@ fn reset_walk_named_path(
                         stats.discards.queue(
                             state_staged.clone(),
                             repository.clone(),
-                            vec![staged_link.node],
+                            vec![staged_id],
                         );
                     } else if !delete_path {
                         let (_, excluded) = repository.filter.child_emit_unless_forced(
@@ -2149,24 +2122,19 @@ async fn base_node_at(
 /// staged tree's own links ([`refuse_staged_node`]): inside a link, the staged revision can number
 /// its nodes other than the target's pin.
 async fn refuse_staged(
-    state_staged: &State,
+    state_staged: &Arc<State>,
     repository: &Arc<RepositoryContext>,
     state_path: &RelativePath,
 ) -> Result<(), ResetError> {
-    let (staged_link, held) = match state_staged
-        .find_relative(repository.clone(), ROOT_NODE, state_path.as_str())
+    let held = match state_staged
+        .locate_held_node_below(repository.clone(), ROOT_NODE, state_path.as_str())
         .await
     {
-        Ok(found) => found,
+        Ok(held) => held,
         Err(err) if err.is_node_not_found() => return Ok(()),
         Err(err) => return Err(err).forward::<ResetError>("Failed to find staged node"),
     };
-    match held {
-        Some((repository, state)) => {
-            refuse_staged_node(&state, &repository, staged_link.node).await
-        }
-        None => refuse_staged_node(state_staged, repository, staged_link.node).await,
-    }
+    refuse_staged_node(held.state(), held.repository(), held.id()).await
 }
 
 /// Whether the reset passes over a staged node it meets, a link where `link`: in a dry run,
@@ -2866,7 +2834,7 @@ async fn files_over_mounts<'a>(
 /// itself included, as a working tree path: each name below `relative_path` spelled as the target
 /// spells it. `None` where a name on the way is missing before a file is reached, where the view
 /// excludes a node on the way, asked as the walk asks it, or where `single_node` stops the way at
-/// the path. A link on the way is crossed, as [`State::find_relative`] crosses one.
+/// the path. A link on the way is crossed, as [`State::locate_node_below`] crosses one.
 async fn file_on_the_way(
     repository: &Arc<RepositoryContext>,
     state_target: &Arc<State>,
@@ -2877,15 +2845,14 @@ async fn file_on_the_way(
 ) -> Result<Option<RelativePath>, ResetError> {
     let force = execution_context().globals().force();
     let mut states = repository.filter.parent_exclusion_states(relative_path);
-    let (found, (mut repository, mut state)) = match state_target
-        .find_relative_held(repository.clone(), ROOT_NODE, state_path.as_str())
+    let (mut node_id, (mut repository, mut state)) = match state_target
+        .locate_held_node_below(repository.clone(), ROOT_NODE, state_path.as_str())
         .await
     {
-        Ok(found) => found,
+        Ok(held) => held.into_parts(),
         Err(err) if err.is_node_not_found() => return Ok(None),
         Err(err) => return Err(err).forward::<ResetError>("Failed to find node"),
     };
-    let mut node_id = found.node;
     let mut path = relative_path.clone();
     let depth = if relative_path.is_empty() {
         0
@@ -2925,8 +2892,12 @@ async fn file_on_the_way(
             node_id = linked.node;
             states = repository.filter.mount_states(&path);
         }
-        node_id = match state.find_relative(repository.clone(), node_id, name).await {
-            Ok((found, _)) => found.node,
+        node_id = match state
+            .locate_node_below(repository.clone(), node_id, name)
+            .await
+            .and_then(FoundNode::into_own_node)
+        {
+            Ok(found) => found,
             Err(err) if err.is_node_not_found() => return Ok(None),
             Err(err) => return Err(err).forward::<ResetError>("Failed to find node"),
         };
@@ -3222,20 +3193,39 @@ async fn reset_walk_link(
 
     let link = node.linked_node();
     let linked_repository = repository.to_link_context(link.repository).await;
-    let linked_state_current = state::State::deserialize(linked_repository.clone(), link.revision)
-        .await
-        .forward::<ResetError>("Failed to deserialize revision state")?;
-
-    let linked_state_staged = match state_staged
-        .find_node_link(repository.clone(), relative_path.as_str())
+    let staged_pin = match state_staged
+        .locate_node(repository.clone(), relative_path.as_str())
         .await
     {
-        Ok(staged_link) if staged_link.repository == link.repository => {
-            state::State::deserialize(linked_repository.clone(), staged_link.revision)
-                .await
-                .forward::<ResetError>("Failed to deserialize revision state")?
+        Ok(staged) if staged.identity().repository == link.repository => {
+            Some(staged.identity().revision)
         }
-        _ => linked_state_current.clone(),
+        _ => None,
+    };
+    let Some(linked_state_current) = crate::link::skip_denied(
+        (link.repository, relative_path.as_str()),
+        state::State::deserialize(linked_repository.clone(), link.revision),
+    )
+    .await
+    .forward::<ResetError>("Failed to deserialize revision state")?
+    else {
+        return Ok(());
+    };
+
+    let linked_state_staged = match staged_pin {
+        Some(pin) => {
+            let Some(staged) = crate::link::skip_denied(
+                (link.repository, relative_path.as_str()),
+                state::State::deserialize(linked_repository.clone(), pin),
+            )
+            .await
+            .forward::<ResetError>("Failed to deserialize revision state")?
+            else {
+                return Ok(());
+            };
+            staged
+        }
+        None => linked_state_current.clone(),
     };
 
     stats.directory_reset_count.fetch_add(1, Ordering::Relaxed);
@@ -3280,9 +3270,12 @@ async fn reset_walk_link(
 /// Walk the children of a directory node, dispatching each to `reset_walk_node`. Subdirectory
 /// walks are gated by the `directory_inflight` counter: spawn when under `RESET_DIRECTORY_MAX`, run
 /// inline (degrade to sync) once over. A file standing at the directory's path is deleted first. A
-/// directory the view creates ([`FilterStates::creates_directory`]) is created here where the
-/// working tree lacks it, and purge (when enabled) runs for every directory once its child walks
-/// have completed. The purge is boxed, so a walk that does not purge holds no room for it.
+/// directory the working tree lacks that the view keeps is created here once its child walks have
+/// completed, where none of its entries is a file or directory the view keeps ([`keeps_entry`]),
+/// or, in a forced reset, which writes every entry, none is a file or directory, and otherwise
+/// with what the walk creates below it. Purge (when enabled) runs for every directory
+/// once its child walks have completed. The purge is boxed, so a walk that does not purge holds no
+/// room for it.
 ///
 /// A child the working tree holds in another spelling, of its kind, is walked from the entry
 /// paired with it, and every other child from its name in the revision. The directory's entries
@@ -3346,12 +3339,14 @@ fn reset_walk_directory(
         )
         .await?;
 
+        let mut creates = absent && states.creates_directory();
+        let force = execution_context().globals().force();
         let mut child_node_iter = node.child();
 
-        if absent && states.creates_directory(child_node_iter.is_none()) {
-            create_empty_directory::<ResetError>(&operation, &directory_path).await?;
-        }
         if child_node_iter.is_none() {
+            if creates {
+                create_empty_directory::<ResetError>(&operation, &directory_path).await?;
+            }
             if !options.purge {
                 return Ok(());
             }
@@ -3429,6 +3424,10 @@ fn reset_walk_directory(
             let child_node_path = spellings
                 .child_path(&operation, &directory_path, &child_node_name, &child_node)
                 .await;
+            if creates && !child_node.is_link() {
+                creates = !(force
+                    || keeps_entry(&repository.filter, states, &child_node_path, &child_node));
+            }
             if options.purge {
                 held.push(HeldChild {
                     folded: child_node.name_hash,
@@ -3555,6 +3554,9 @@ fn reset_walk_directory(
         }
         if let Some(err) = failure {
             return Err(err);
+        }
+        if creates {
+            create_empty_directory::<ResetError>(&operation, &directory_path).await?;
         }
         stats
             .discards

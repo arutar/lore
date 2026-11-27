@@ -34,6 +34,9 @@ use lore_revision::repository::prefetch::prefetch_changed_node_blocks;
 use lore_revision::state;
 use lore_revision::state::State;
 use lore_revision::state::allow_all_repositories;
+use lore_revision::util::request_tracker::CollectStep;
+use lore_revision::util::request_tracker::CollectSteps;
+use lore_revision::util::request_tracker::StepState;
 use lore_revision::util::request_tracker::StoreRequestTracker;
 use lore_storage::StoreError;
 use lore_storage::StoreMatch;
@@ -64,8 +67,10 @@ use tracing::warn;
 use crate::authnz::repository_authorizer::Action;
 use crate::authnz::repository_authorizer::RepositoryAuthorizer;
 use crate::cache::revision::store_history_step;
+use crate::grpc::FilterCancelledExt;
 use crate::grpc::FilterSlowDownExt;
 use crate::grpc::ServerResultExt;
+use crate::grpc::check_request_cancelled;
 use crate::grpc::extract_correlation_id;
 use crate::grpc::get_repository;
 use crate::grpc::get_user_id;
@@ -136,6 +141,14 @@ static VERIFY_COLLECT_DURATION: LazyLock<Histogram<f64>> =
 
 static VERIFY_EXIST_DURATION: LazyLock<Histogram<f64>> =
     LazyLock::new(|| push_duration_histogram("verify_exist_duration"));
+
+// The time from the start of the verification's tree walk to the end of each of its steps, which
+// run beside one another.
+static VERIFY_COLLECT_STEP_FINISHED: LazyLock<Histogram<f64>> =
+    LazyLock::new(|| push_duration_histogram("verify_collect_step_finished_after"));
+
+static VERIFY_COLLECT_RUNNING_STEP: LazyLock<Counter<u64>> =
+    LazyLock::new(|| BranchPushInstrumentProvider.counter("verify_collect_running_step"));
 
 static FAST_FORWARD_MERGE_CHANGES: LazyLock<Histogram<u64>> = LazyLock::new(|| {
     BranchPushInstrumentProvider.length_histogram(
@@ -264,6 +277,27 @@ const _: () = {
     }
 };
 
+/// The error a push, or its verification, returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PushFailure {
+    /// It returned without an error.
+    None,
+    /// It returned an error status other than `CANCELLED`.
+    Error,
+    /// It returned `CANCELLED`.
+    Cancelled,
+}
+
+impl PushFailure {
+    fn of<T>(result: &Result<T, Status>) -> Self {
+        match result {
+            Ok(_) => PushFailure::None,
+            Err(status) if status.code() == tonic::Code::Cancelled => PushFailure::Cancelled,
+            Err(_) => PushFailure::Error,
+        }
+    }
+}
+
 /// How a push timed by [`PushReport`] ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PushOutcome {
@@ -276,9 +310,9 @@ pub enum PushOutcome {
     /// authorization or for a zero revision, or it panicked. A request without a valid repository
     /// header is rejected before its report exists and is not recorded.
     Error,
-    /// The handler future was dropped before it returned, such as by the handler timeout or a
-    /// server shutting down. A client that disconnects does not drop it: the handler runs on to
-    /// completion on the core runtime.
+    /// The push stopped because nobody waited for it any more: the client went away or the
+    /// handler timeout elapsed. Also a handler future dropped before it returned, such as by a
+    /// server shutting down.
     Cancelled,
 }
 
@@ -286,14 +320,14 @@ impl PushOutcome {
     /// How something that returned, or was dropped before it returned, ended. A push declined
     /// and answered with an error status is declined.
     #[lore_macro::test_pub]
-    fn of(finished: bool, declined: bool, errored: bool) -> Self {
-        match (finished, declined, errored) {
+    fn of(finished: bool, declined: bool, failure: PushFailure) -> Self {
+        match (finished, declined, failure) {
             // Dropped while unwinding: it failed, rather than being cut off from outside.
             (false, _, _) if std::thread::panicking() => PushOutcome::Error,
-            (false, _, _) => PushOutcome::Cancelled,
+            (false, _, _) | (true, false, PushFailure::Cancelled) => PushOutcome::Cancelled,
             (true, true, _) => PushOutcome::Declined,
-            (true, false, true) => PushOutcome::Error,
-            (true, false, false) => PushOutcome::Completed,
+            (true, false, PushFailure::Error) => PushOutcome::Error,
+            (true, false, PushFailure::None) => PushOutcome::Completed,
         }
     }
 
@@ -333,8 +367,8 @@ pub struct PushReport {
     exist_started: Option<Instant>,
     /// When the verification returned, with success or an error.
     verified_at: Option<Instant>,
-    verification_failed: bool,
-    errored: bool,
+    verification_failure: PushFailure,
+    failure: PushFailure,
     /// Whether the push left the head where it was for the client to resolve.
     declined: bool,
     /// The prefetch run beside the verification's tree walk.
@@ -365,6 +399,8 @@ pub struct PushSummary {
     /// The time the verification's existence checks took, counted up to the snapshot while they
     /// run. `None` if they never started.
     pub verify_exist: Option<Duration>,
+    /// When each step of the verification's tree walk finished. `None` if it never started.
+    pub verify_collect_steps: Option<CollectSteps>,
     /// What the prefetch beside the verification's walk did. A fetch still running at the snapshot
     /// is counted only once it ends.
     pub verify_prefetch: PrefetchCounts,
@@ -402,8 +438,8 @@ impl PushReport {
             collect_started: None,
             exist_started: None,
             verified_at: None,
-            verification_failed: false,
-            errored: false,
+            verification_failure: PushFailure::None,
+            failure: PushFailure::None,
             declined: false,
             verify_prefetch: Arc::default(),
             merge_prefetch: Arc::default(),
@@ -429,15 +465,15 @@ impl PushReport {
     /// Runs `body` in `execution` with the report, and marks the push completed or errored by
     /// what `body` returns. A future dropped before then drops the report unfinished, which
     /// records the push as cancelled.
-    pub async fn run<T, E>(
+    pub async fn run<T>(
         mut self,
         execution: Arc<ExecutionContext>,
-        body: impl AsyncFnOnce(&mut PushReport) -> Result<T, E>,
-    ) -> Result<T, E> {
+        body: impl AsyncFnOnce(&mut PushReport) -> Result<T, Status>,
+    ) -> Result<T, Status> {
         LORE_CONTEXT
             .scope(execution, async move {
                 let result = body(&mut self).await;
-                self.errored = result.is_err();
+                self.failure = PushFailure::of(&result);
                 self.finish();
                 result
             })
@@ -461,7 +497,7 @@ impl PushReport {
             add_phase_time(&mut phase_durations, self.phase, now - self.phase_started);
             now
         };
-        let outcome = PushOutcome::of(self.finished_at.is_some(), self.declined, self.errored);
+        let outcome = PushOutcome::of(self.finished_at.is_some(), self.declined, self.failure);
         let verify_end = self.verified_at.unwrap_or(end);
         let verify_collect = self
             .collect_started
@@ -480,6 +516,7 @@ impl PushReport {
             peak_metadata_reads_in_flight: self.store_requests.peak_metadata_reads_in_flight(),
             verify_collect,
             verify_exist,
+            verify_collect_steps: self.store_requests.collect_steps(),
             verify_prefetch: self.verify_prefetch.counts(),
             merge_prefetch: self.merge_prefetch.counts(),
         }
@@ -553,6 +590,7 @@ impl Drop for PushReport {
                 verify_ms = millis(PushPhase::Verify),
                 verify_collect_ms = summary.verify_collect.map(|d| d.as_millis()),
                 verify_exist_ms = summary.verify_exist.map(|d| d.as_millis()),
+                verify_collect_steps = summary.verify_collect_steps.map(tracing::field::display),
                 fast_forward_merge_ms = millis(PushPhase::FastForwardMerge),
                 commit_ms = millis(PushPhase::Commit),
                 respond_ms = millis(PushPhase::Respond),
@@ -618,7 +656,7 @@ impl PushReport {
     /// Records the verification's timings, labelled with how the verification itself ended, and
     /// its store requests.
     fn record_verification(&self, summary: &PushSummary, handler: &KeyValue) {
-        let outcome = PushOutcome::of(self.verified_at.is_some(), false, self.verification_failed);
+        let outcome = PushOutcome::of(self.verified_at.is_some(), false, self.verification_failure);
         let completed_with_nothing_collected =
             outcome == PushOutcome::Completed && self.collected_addresses.unwrap_or(0) == 0;
         let attributes = [handler.clone(), KeyValue::new("outcome", outcome.label())];
@@ -629,6 +667,9 @@ impl PushReport {
         if !(completed_with_nothing_collected && summary.num_lookups == 0) {
             if let Some(collect) = summary.verify_collect {
                 VERIFY_COLLECT_DURATION.record(collect.as_secs_f64() * 1000., &attributes);
+            }
+            if let Some(steps) = &summary.verify_collect_steps {
+                record_collect_steps(steps, &attributes);
             }
             // A verification that completed without collecting an address asked the store nothing.
             if let Some(exist) = summary.verify_exist
@@ -656,6 +697,27 @@ impl PushReport {
         }
         if let Some(concurrent_query_batches) = self.concurrent_query_batches {
             CONCURRENT_QUERY_BATCHES.record(concurrent_query_batches, &[]);
+        }
+    }
+}
+
+/// Records when each step of the verification's tree walk finished, and counts those still running
+/// when it ended, which name where a walk that was cut off spent its time.
+fn record_collect_steps(steps: &CollectSteps, handler_and_outcome: &[KeyValue; 2]) {
+    let [handler, outcome] = handler_and_outcome.clone();
+    for step in CollectStep::ALL {
+        let attributes = [
+            KeyValue::new("step", step.label()),
+            handler.clone(),
+            outcome.clone(),
+        ];
+        match steps.state(step) {
+            StepState::Finished(finished) => {
+                VERIFY_COLLECT_STEP_FINISHED.record(finished.as_secs_f64() * 1000., &attributes);
+            }
+            StepState::Running => VERIFY_COLLECT_RUNNING_STEP.add(1, &attributes),
+            // A step the walk never reached took none of its time.
+            StepState::Waiting => (),
         }
     }
 }
@@ -1315,6 +1377,7 @@ async fn prepare_push(
         return Ok(PreparedPush::Done(HeadUpdate::declined(loaded.head)));
     };
 
+    check_request_cancelled()?;
     // Both a plain push and a fast-forward merge verify the incoming revision against its own
     // parents, which do not depend on the head. Without this check a client could reference
     // fragments that were never fully uploaded.
@@ -1353,7 +1416,7 @@ async fn verify_incoming_fragments(
     )
     .await;
     report.verified_at = Some(Instant::now());
-    report.verification_failed = verified.is_err();
+    report.verification_failure = PushFailure::of(&verified);
     verified?;
 
     Ok(VerifiedParents { parent, other })
@@ -1376,6 +1439,7 @@ async fn store_new_head(
     report: &mut PushReport,
 ) -> Result<HeadUpdate, Status> {
     report.enter(PushPhase::Commit);
+    check_request_cancelled()?;
     let HeadAndIncoming {
         head: mut current,
         incoming,
@@ -1399,6 +1463,10 @@ async fn store_new_head(
     }
 
     loop {
+        // Every pass starts with the latest revision unmoved by this push: the first, or a retry
+        // after the latest revision moved underneath it. Once a store lands, the loop returns
+        // without checking again.
+        check_request_cancelled()?;
         report.store_latest_attempts += 1;
         let previous_head = if let Some(receipt) = &report.operation {
             receipt
@@ -1499,6 +1567,9 @@ async fn try_fast_forward_merge(
 
     loop {
         report.enter(PushPhase::FastForwardMerge);
+        // As in the plain push, a pass reaches here only while the latest revision is unmoved by
+        // this push.
+        check_request_cancelled()?;
 
         // Three-way diff: base=original merge target, source=incoming merge, target=current head
         debug!(
@@ -1526,11 +1597,14 @@ async fn try_fast_forward_merge(
             }));
             beside_prefetch(diff, prefetch.as_pin_mut()).await
         };
-        let mut diff_result = diffed.filter_slow_down()?.warn_map_err(|err| {
-            Status::internal(format!(
-                "Failed to compute diff3 for fast-forward merge: {err}"
-            ))
-        })?;
+        let mut diff_result = diffed
+            .filter_slow_down()?
+            .filter_cancelled()?
+            .warn_map_err(|err| {
+                Status::internal(format!(
+                    "Failed to compute diff3 for fast-forward merge: {err}"
+                ))
+            })?;
         debug!(
             changes = diff_result.changes.len(),
             conflicts = diff_result.conflicts.len(),
@@ -1545,9 +1619,15 @@ async fn try_fast_forward_merge(
             report.fast_forward_merge_changes = None;
             return Ok(HeadUpdate::declined(current_head));
         }
-        // Recorded before the merge is applied, so a push cancelled while applying or storing it
+        // Recorded before the merge is applied, so a push that stops or fails short of storing it
         // still reports the size of the merge it was working on.
         report.fast_forward_merge_changes = Some(diff_result.changes.len() as u64);
+        #[cfg(feature = "test-util")]
+        crate::test_util::push_step(crate::test_util::PushStep::MergeDiffed).await;
+        // Applying the merge writes its tree, so a dropped push stops here rather than write a
+        // merge. A pass that loses the swap stops at the loop's next check, leaving the merge it
+        // wrote unreferenced, as a push stopped after uploading leaves its fragments.
+        check_request_cancelled()?;
 
         // Deserialize the current head state to use as base for the new merge revision
         let state_current = State::deserialize(repository.clone(), current_head)
@@ -1771,6 +1851,7 @@ async fn collect_new_addresses(
         )
             .instrument(span!(Level::DEBUG, "collect_new_addresses"))
             .await
+            .filter_cancelled()?
             .warn_map_err(|err| {
                 if let Some(converted_error) = err.as_address_not_found() {
                     return address_not_found_status(
@@ -1791,6 +1872,7 @@ async fn collect_new_addresses(
         Ok(())
     };
 
+    store_requests.expect_collections(1 + u64::from(other_parent_state.is_some()));
     let mut collect_tasks = JoinSet::default();
     lore_spawn!(
         collect_tasks,
@@ -1904,6 +1986,8 @@ async fn verify_fragments(
 
     let mut tasks = JoinSet::new();
     while !new_fragments.is_empty() || !tasks.is_empty() {
+        // Each wave is joined in full before the next, so no query is in flight here.
+        check_request_cancelled()?;
         let num_addresses = new_fragments.len();
         let batch_span = span!(
             Level::DEBUG,

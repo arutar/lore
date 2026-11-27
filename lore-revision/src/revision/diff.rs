@@ -24,7 +24,7 @@ use crate::util::path::RelativePath;
 
 /// Details of a single file that differs between two revisions.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRevisionDiffFileEventData {
     /// Path of the file, relative to the root of the working tree.
@@ -64,6 +64,7 @@ impl LoreRevisionDiffFileEventData {
 
 #[error_set]
 pub enum DiffError {
+    Cancelled,
     LinkPinsDiverge,
     AddressNotFound,
     InvalidNodeHierarchy,
@@ -110,8 +111,6 @@ pub enum DiffError {
     TokenNotFound,
     MissingIdentity,
 }
-
-impl crate::event::EventError for DiffError {}
 
 /// A request scoped *inside* a link asks for that subtree, so the link's own
 /// entry is left out.

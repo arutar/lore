@@ -2,25 +2,9 @@
 // SPDX-License-Identifier: MIT
 use lore_error_set::prelude::*;
 
-use crate::event::EventError;
-use crate::interface::LoreError;
-
 #[error_set]
 pub enum UnhandledError {
     InvalidArguments,
-}
-
-impl EventError for UnhandledError {
-    fn translated(&self) -> LoreError {
-        match self {
-            UnhandledError::InvalidArguments(_) => LoreError::InvalidArguments,
-            UnhandledError::Internal(_) => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 // Re-export all FFI error types from lore-error (the single source of truth)
@@ -29,6 +13,7 @@ pub(crate) use lore_base::error::AlreadyLinked;
 pub(crate) use lore_base::error::BranchAdvanced;
 pub(crate) use lore_base::error::BranchAlreadyExists;
 pub(crate) use lore_base::error::BranchNotFound;
+pub(crate) use lore_base::error::Cancelled;
 pub(crate) use lore_base::error::Conflict;
 pub(crate) use lore_base::error::DeleteCurrent;
 pub(crate) use lore_base::error::DeleteDefault;
@@ -66,6 +51,7 @@ pub(crate) use lore_base::error::Oversized;
 pub(crate) use lore_base::error::PayloadNotFound;
 pub(crate) use lore_base::error::RepositoryAlreadyExists;
 pub(crate) use lore_base::error::RepositoryNotFound;
+pub(crate) use lore_base::error::RepositoryRenameIncomplete;
 pub(crate) use lore_base::error::RevisionNotFound;
 pub(crate) use lore_base::error::SharedStoreNotFound;
 pub(crate) use lore_base::error::SlowDown;
@@ -76,6 +62,7 @@ pub(crate) use lore_base::error::is_refusal;
 
 #[error_set]
 pub enum StateErrors {
+    Cancelled,
     NodeNotFound,
     LinkNotFound,
     LinkPinsDiverge,
@@ -121,16 +108,6 @@ pub enum StateErrors {
     SharedStoreNotFound,
     TokenNotFound,
     MissingIdentity,
-}
-
-impl EventError for StateErrors {
-    fn translated(&self) -> LoreError {
-        LoreError::Internal
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 /// Reduces a fallible result to an optional value, holding back the failures

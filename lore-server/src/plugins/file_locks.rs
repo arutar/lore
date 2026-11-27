@@ -156,7 +156,7 @@ impl FileLockStore {
         })
         .map_err(|err| LockError::internal(format!("Can't encode the locks: {err}")))?;
         let path = self.path.clone();
-        lore_base::lore_spawn_blocking_nocontext!(move || write_atomically(&path, &bytes))
+        lore_base::lore_spawn_blocking!(move || write_atomically(&path, &bytes))
             .await
             .map_err(|err| LockError::internal(format!("Writing the lock file stopped: {err}")))?
             .map_err(|err| {

@@ -39,6 +39,7 @@ use lore_revision::branch;
 use lore_revision::immutable;
 use lore_revision::repository::RepositoryContext;
 use lore_revision::util::request_tracker::StoreRequestTracker;
+use lore_storage::ReadConsistency;
 use lore_storage::mutable_store::ConditionalWrite;
 use prost::Message;
 use rpc::branch_push_operation::Phase;
@@ -880,7 +881,7 @@ async fn registered_push(
 async fn sweep(repo: Arc<RepositoryContext>, retention: Duration) -> Result<u64, Status> {
     let cutoff = now_ms()?.saturating_sub(ms(retention));
     let mut entries = store(&repo)?
-        .list(repo.id, KeyType::PushJournal)
+        .list(repo.id, KeyType::PushJournal, ReadConsistency::Strong)
         .await
         .map_err(internal)?;
     let mut removed = 0;

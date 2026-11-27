@@ -44,6 +44,7 @@ use crate::hash::hash_string;
 use crate::infer::ConflictMarkers;
 use crate::lore::Address;
 use crate::lore::Context;
+use crate::lore::Hash;
 use crate::lore_debug;
 use crate::lore_trace;
 use crate::lore_warn;
@@ -783,6 +784,18 @@ pub trait InstanceOperation: Send + Sync {
         path: &RelativePath,
     ) -> impl Future<Output = Result<FileInfo, FsError>> + Send;
 
+    /// What [`file_info`](Self::file_info) reports where the working tree spells the path as
+    /// `path` does, and [`FileInfo::NotExist`] where it spells it otherwise. It stands beside
+    /// `file_info` so that a provider holding its own index, which answers a path in any case,
+    /// answers both in the one lookup a stage takes per target. The default is `file_info`, which
+    /// answers so only where the file system tells case apart.
+    fn file_info_as_spelled(
+        &self,
+        path: &RelativePath,
+    ) -> impl Future<Output = Result<FileInfo, FsError>> + Send {
+        self.file_info(path)
+    }
+
     /// What [`file_info`](Self::file_info) reports, read from the working tree rather than
     /// from the tree the path is tracked in.
     ///
@@ -962,7 +975,10 @@ pub trait InstanceOperation: Send + Sync {
 
     /// Moves what the file system holds at `from` to `to`, unifying the two where `to` is
     /// occupied rather than refusing: a file takes the place of the file there, and a directory
-    /// hands each of its children over under these same rules before it goes.
+    /// hands each of its children over before it goes, a child directory under these same rules.
+    /// A child file replaces no file the destination holds: one holding the same content is
+    /// removed, and one holding other content fails the move. A file moved to another spelling
+    /// of its own name, where the working tree holds a file under each, is settled the same way.
     ///
     /// A `from` and `to` of different kinds, one a file and one a directory, is refused, there
     /// being no move that leaves one of them.
@@ -995,7 +1011,8 @@ pub trait InstanceOperation: Send + Sync {
     /// Delete a file or empty directory.
     fn remove(&self, path: &RelativePath) -> impl Future<Output = Result<(), FsError>> + Send;
 
-    /// Delete the directory at `path`, which fails where `path` holds entries or is no directory.
+    /// Delete the directory at `path`, which fails where `path` holds entries or is no directory,
+    /// with [`FileNotFound`] where nothing stands at `path`.
     fn remove_empty_directory(
         &self,
         path: &RelativePath,
@@ -1411,6 +1428,86 @@ impl InstanceOperationImpl {
         self.holds_state
     }
 
+    /// Serves `link`, a link node of the instance's own tree, at `path`, in place of what stands
+    /// there, or takes away the link standing at `path` where `None`, where the provider holds
+    /// its state in a `State` ([`FilesystemProvider::holds_state`]): such a provider serves a link
+    /// from its node, so a command changing a link changes what it serves (ADR-00036). A link
+    /// placed over a local change is refused unless `force`, which discards the change. A path
+    /// through a link takes nothing, as the link's pin serves it. Nothing for other providers,
+    /// which write a link's files, nor in a dry run. Counts as a change.
+    #[cfg_attr(not(target_os = "linux"), allow(clippy::unused_async))]
+    pub async fn place_link(
+        &self,
+        path: &RelativePath,
+        link: Option<&Node>,
+        force: bool,
+    ) -> Result<(), FsError> {
+        if self.dry_run {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        if let StaticDispatchInstanceOperation::Fuse(this) = &self.dispatch
+            && self.holds_state
+        {
+            self.record_change();
+            // Boxed: kept out of the future of every caller, a change's realize among them.
+            // Type-erased: a caller's `Send` check of it overflows the recursion limit.
+            let placed: crate::BoxFuture<'_, Result<(), FsError>> =
+                Box::pin(this.place_link(path, link, force));
+            return placed.await;
+        }
+        let _ = (path, link, force);
+        Ok(())
+    }
+
+    /// Serves at `path` a copy of the node `side` names, with every node below it, where nothing
+    /// stands there and the provider holds its state in a `State`
+    /// ([`FilesystemProvider::holds_state`]): what a reset puts back of the current revision where
+    /// a link staged in its place goes, which other providers create on disk. A path through a
+    /// link takes nothing. Nothing for other providers, nor in a dry run. Counts as a change.
+    #[cfg_attr(not(target_os = "linux"), allow(clippy::unused_async))]
+    pub async fn place_copy(
+        &self,
+        path: &RelativePath,
+        side: &crate::state::NodeMapping,
+    ) -> Result<(), FsError> {
+        if self.dry_run {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        if let StaticDispatchInstanceOperation::Fuse(this) = &self.dispatch
+            && self.holds_state
+        {
+            self.record_change();
+            return this.place_copy(path, side).await;
+        }
+        let _ = (path, side);
+        Ok(())
+    }
+
+    /// [`Self::place_link`] of the link standing at `path` moved to the revision `pin`, mounting
+    /// its node `source`; nothing where no link stands there.
+    #[cfg_attr(not(target_os = "linux"), allow(clippy::unused_async))]
+    pub async fn repin_link(
+        &self,
+        path: &RelativePath,
+        pin: Hash,
+        source: NodeID,
+    ) -> Result<(), FsError> {
+        if self.dry_run {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        if let StaticDispatchInstanceOperation::Fuse(this) = &self.dispatch
+            && self.holds_state
+        {
+            self.record_change();
+            return this.repin_link(path, pin, source).await;
+        }
+        let _ = (path, pin, source);
+        Ok(())
+    }
+
     /// Starts warming what `plan` names into the local store in the background, for a provider
     /// that answers reads from a `State` snapshot; returns at once. Other providers hold every
     /// file already and ignore it.
@@ -1585,6 +1682,27 @@ impl InstanceOperationImpl {
         }
     }
 
+    /// Renames `from` to `to`, another spelling of its name, as [`InstanceOperation::rename`]
+    /// does. A dry run moves nothing: over the OS file system it checks what the rename checks
+    /// and has the operation's later reads of `to` answer from where the content stays
+    /// ([`OsOperation::respell_unmoved`](super::os::OsOperation::respell_unmoved)), so that it
+    /// fails where the rename fails and reads what the rename leaves. A dry run over another
+    /// provider answers as for a rename, checking nothing.
+    ///
+    /// The dry run's check is boxed as the cold path it is.
+    pub async fn rename_to_spelling(
+        &self,
+        from: &RelativePath,
+        to: &RelativePath,
+    ) -> Result<(), FsError> {
+        if self.dry_run
+            && let StaticDispatchInstanceOperation::Os(this) = &self.dispatch
+        {
+            return Box::pin(this.respell_unmoved(from, to)).await;
+        }
+        self.rename(from, to).await
+    }
+
     /// Renames `from` to `to` as [`InstanceOperation::rename`] does. Where the rename is refused,
     /// the working tree holds `from` and the directory `to` lands in is missing, creates it and the
     /// missing directories above it and renames again, removing those it created where that rename
@@ -1746,6 +1864,17 @@ impl InstanceOperation for InstanceOperationImpl {
             StaticDispatchInstanceOperation::Swfs(this) => this.file_info(path).await,
             #[cfg(target_os = "linux")]
             StaticDispatchInstanceOperation::Fuse(this) => this.file_info(path).await,
+        }
+    }
+
+    async fn file_info_as_spelled(&self, path: &RelativePath) -> Result<FileInfo, FsError> {
+        match &self.dispatch {
+            #[cfg(feature = "test-util")]
+            StaticDispatchInstanceOperation::Test(this) => this.file_info_as_spelled(path).await,
+            StaticDispatchInstanceOperation::Os(this) => this.file_info_as_spelled(path).await,
+            StaticDispatchInstanceOperation::Swfs(this) => this.file_info_as_spelled(path).await,
+            #[cfg(target_os = "linux")]
+            StaticDispatchInstanceOperation::Fuse(this) => this.file_info_as_spelled(path).await,
         }
     }
 
@@ -2273,6 +2402,8 @@ pub mod test_util {
         pub directory_reads: Arc<AtomicUsize>,
         /// How many directory creates were asked for.
         pub directory_creates: Arc<AtomicUsize>,
+        /// Paths each removal of an empty directory was asked for.
+        pub empty_directory_removals: Arc<Mutex<Vec<String>>>,
         /// How many renames were asked for.
         pub rename_count: Arc<AtomicUsize>,
         /// The error that refuses each rename, by the number of renames asked for before it, or
@@ -2541,8 +2672,10 @@ pub mod test_util {
             }
         }
 
-        /// Removes under the directory the provider reads from, and panics where it reads from none.
+        /// Records the path and removes under the directory the provider reads from, and panics
+        /// where it reads from none.
         async fn remove_empty_directory(&self, path: &RelativePath) -> Result<(), FsError> {
+            self.empty_directory_removals.lock().push(path.to_string());
             match &self.reads {
                 Some(reads) => reads.remove_empty_directory(path).await,
                 None => panic!("Test operation unimplemented except finalize"),

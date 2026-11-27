@@ -141,6 +141,7 @@ async fn fixture(
         None,
         Duration::from_secs(10),
         std::num::NonZeroUsize::MIN,
+        super::branch_list::unshared_reads(),
     )
     .with_push_operations(settings);
     let repo = Arc::new(RepositoryContext::new_server_context(
@@ -556,7 +557,11 @@ async fn push_whose_journal_was_lost_starts_again_under_the_same_id() {
         let store = fixture.repo.try_mutable_store_arc().unwrap();
         let mut entries = store
             .clone()
-            .list(fixture.repository, KeyType::PushJournal)
+            .list(
+                fixture.repository,
+                KeyType::PushJournal,
+                lore_storage::ReadConsistency::Strong,
+            )
             .await
             .unwrap();
         while let Some((key, value)) = entries.next().await {

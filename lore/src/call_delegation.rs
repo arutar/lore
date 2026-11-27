@@ -10,7 +10,6 @@ use lore_base::error::ShutDown;
 use lore_base::text::TextNotUtf8;
 use lore_base::text::ValidateText;
 use lore_error_set::prelude::*;
-use lore_revision::event::EventError;
 use lore_revision::event::LoreCompleteEventData;
 use lore_revision::event::LoreEndEventData;
 use lore_revision::event::LoreErrorDetail;
@@ -26,10 +25,12 @@ use crate::remote::call::Relayed;
 use crate::remote::call::ServiceCallError;
 use crate::remote::call::run_service_call;
 use crate::remote::command::LoreCommand;
+use crate::remote::service_process::Reached;
 use crate::remote::service_process::ServiceProcessError;
 use crate::remote::service_process::ServiceStart;
 use crate::remote::service_process::connect_or_spawn_service;
 use crate::remote::service_process::connect_to_running_service;
+use crate::remote::service_process::reach_running_service;
 use crate::remote::service_process::running_as_service;
 use crate::remote::service_process::service_in_use;
 use crate::remote::service_process::service_in_use_blocking;
@@ -41,19 +42,15 @@ pub(crate) enum ArgumentError {
     InvalidArguments,
 }
 
-impl EventError for ArgumentError {}
-
 /// Rejection of a call that arrived after `lore_shutdown()`.
 #[error_set]
 pub(crate) enum ShutdownError {
     ShutDown,
 }
 
-impl EventError for ShutdownError {}
-
 /// Emits Complete and End events if called after shutdown. Shutdown is terminal
 /// and terminates the runtime. Therefore we cannot use the normal
-/// `crate::runtime().block_on(reject_call(...))` mechanism to emit the error events.
+/// `crate::runtime().block_on(reject_call(...))` mechanism to emit the events.
 fn reject_after_shutdown(callback: LoreEventCallbackConfig) -> i32 {
     let error = ShutdownError::from(ShutDown);
     let status = error.ffi_code();
@@ -583,12 +580,18 @@ pub(crate) fn invoke_locally(
 /// captures stay reserved while the branch's future holds the arguments moved out of them.
 ///
 /// Not an `async fn`, which would hold a second copy of its arguments.
+///
+/// `Fut` is not bound by `Send`. The compiler proves such a bound by walking the handler's whole
+/// future, once in each caller and again for that caller's `impl Future` return type, which more
+/// than doubles the time and memory it takes to type-check this crate.
+/// `InvokableLoreArgs::invoke_local` already requires every handler's future to be `Send`, and
+/// the future returned here is `Send` wherever the handler's is.
 #[lore_macro::test_pub]
 #[allow(clippy::manual_async_fn)]
 pub(crate) fn dispatch_call<
     ArgsType: LoreArgs,
     Handler: Fn(LoreGlobalArgs, ArgsType, LoreEventCallback) -> Fut,
-    Fut: Future<Output = i32> + Send + 'static,
+    Fut: Future<Output = i32> + 'static,
 >(
     globals: LoreGlobalArgs,
     args: ArgsType,
@@ -609,5 +612,46 @@ pub(crate) fn dispatch_call<
             let handler = pin!(handler(globals, args, callback));
             handler.await
         }
+    }
+}
+
+/// Runs the call of `args` on the Lore service where one runs in another process, and with
+/// `handler` here otherwise, never starting one: for a call that may run in any process and would
+/// wait here for what a running service holds. Runs it here as well where the move reply has
+/// handed it back, from this relay or an earlier one.
+///
+/// Pins each branch's future, and leaves `Fut` unbound by `Send`, for the reasons [`dispatch_call`]
+/// gives.
+///
+/// Not an `async fn`, which would hold a second copy of its arguments.
+#[allow(clippy::manual_async_fn)]
+pub(crate) fn on_running_service_or_here<
+    ArgsType: LoreArgs,
+    Handler: Fn(LoreGlobalArgs, ArgsType, LoreEventCallback) -> Fut,
+    Fut: Future<Output = i32> + 'static,
+>(
+    globals: LoreGlobalArgs,
+    args: ArgsType,
+    callback: LoreEventCallback,
+    handler: Handler,
+) -> impl Future<Output = i32> {
+    async move {
+        if !running_as_service()
+            && !crate::call::runs_during_external_root_move()
+            && let Ok(Reached::Connected(connection)) = reach_running_service().await
+        {
+            let relayed = {
+                let relay = pin!(run_service_call(
+                    Some(connection),
+                    globals,
+                    args.to_command(),
+                    callback
+                ));
+                relay.await
+            };
+            return relayed_status(relayed).await;
+        }
+        let handler = pin!(handler(globals, args, callback));
+        handler.await
     }
 }

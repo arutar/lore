@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: MIT
 #[cfg(all(test, feature = "integration_tests"))]
 mod aws_store_tests {
-    use std::collections::HashMap;
     use std::error::Error;
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use aws_sdk_dynamodb::primitives::Blob;
-    use aws_sdk_dynamodb::types::AttributeValue;
     use bytes::Bytes;
+    use lore_aws::aws::item::AttributeValue;
+    use lore_aws::aws::item::ByteStr;
+    use lore_aws::aws::item::Item;
     use lore_aws::store::immutable_store::AwsImmutableStore;
     use lore_aws::store::immutable_store::AwsImmutableStoreSettings;
     use lore_aws::store::immutable_store::DynamoDbImmutableStoreSettings;
@@ -37,6 +37,7 @@ mod aws_store_tests {
     use lore_storage::FRAGMENT_COMPRESS_SIZE_LIMIT;
     use lore_storage::ImmutableStore;
     use lore_storage::MutableStore;
+    use lore_storage::ReadConsistency;
     use lore_storage::StoreError;
     use lore_storage::StoreGetData;
     use lore_storage::StoreMatch;
@@ -246,24 +247,23 @@ mod aws_store_tests {
                     .expect("rewriting the object without metadata should succeed");
 
                 // And the row that era wrote: the whole fragment flattened, with no state attribute.
-                let row = HashMap::from([
-                    (
-                        "hash".to_string(),
-                        AttributeValue::B(Blob::new(address.hash.data().to_vec())),
-                    ),
-                    (
-                        "flags".to_string(),
-                        AttributeValue::N(fragment.flags.to_string()),
-                    ),
-                    (
-                        "size_payload".to_string(),
-                        AttributeValue::N(fragment.size_payload.to_string()),
-                    ),
-                    (
-                        "size_content".to_string(),
-                        AttributeValue::N(fragment.size_content.to_string()),
-                    ),
-                ]);
+                let mut row = Item::new();
+                row.insert(
+                    ByteStr::from_static("hash"),
+                    AttributeValue::blob(address.hash.data()),
+                );
+                row.insert(
+                    ByteStr::from_static("flags"),
+                    AttributeValue::number(fragment.flags),
+                );
+                row.insert(
+                    ByteStr::from_static("size_payload"),
+                    AttributeValue::number(fragment.size_payload),
+                );
+                row.insert(
+                    ByteStr::from_static("size_content"),
+                    AttributeValue::number(fragment.size_content),
+                );
                 raw_dynamo
                     .put_item(&Arc::<str>::from(FRAGMENT_METADATA_TABLE_NAME), row)
                     .await
@@ -553,7 +553,6 @@ mod aws_store_tests {
 
                 let mutable_settings = AwsMutableStoreSettings::new(
                     DynamoDbMutableStoreSettings::new(MUTABLE_STORE_TABLE_NAME.to_string()),
-                    false,
                 );
 
                 let aws_immutable_store =
@@ -570,11 +569,7 @@ mod aws_store_tests {
                 let immutable_store = builder.build().expect("Failed to build composite store");
                 let immutable_store = Arc::new(immutable_store);
 
-                let mutable_store = AwsMutableStore::new(
-                    dynamo_mutable,
-                    &mutable_settings,
-                    immutable_store.clone(),
-                );
+                let mutable_store = AwsMutableStore::new(dynamo_mutable, &mutable_settings);
                 let mutable_store = Arc::new(mutable_store);
 
                 Ok((
@@ -1372,7 +1367,7 @@ mod aws_store_tests {
 
                 let stream = mutable_store
                     .clone()
-                    .list(repository, KeyType::BranchId)
+                    .list(repository, KeyType::BranchId, ReadConsistency::Strong)
                     .await?;
 
                 let mut channel = stream.channel();
@@ -1407,7 +1402,7 @@ mod aws_store_tests {
             .scope(execution.clone(), async move {
                 let stream = mutable_store
                     .clone()
-                    .list(repository, KeyType::BranchId)
+                    .list(repository, KeyType::BranchId, ReadConsistency::Strong)
                     .await?;
 
                 let mut channel = stream.channel();
@@ -1450,7 +1445,7 @@ mod aws_store_tests {
 
                 let mut branch_channel = mutable_store
                     .clone()
-                    .list(repository, KeyType::BranchId)
+                    .list(repository, KeyType::BranchId, ReadConsistency::Strong)
                     .await?
                     .channel();
                 let mut branch_results = Vec::new();
@@ -1463,7 +1458,7 @@ mod aws_store_tests {
 
                 let mut metadata_channel = mutable_store
                     .clone()
-                    .list(repository, KeyType::BranchMetadata)
+                    .list(repository, KeyType::BranchMetadata, ReadConsistency::Strong)
                     .await?
                     .channel();
                 let mut metadata_results = Vec::new();
@@ -1504,7 +1499,7 @@ mod aws_store_tests {
 
                 let mut channel = mutable_store
                     .clone()
-                    .list(repository, KeyType::BranchId)
+                    .list(repository, KeyType::BranchId, ReadConsistency::Strong)
                     .await?
                     .channel();
                 let mut results = Vec::new();
@@ -1575,15 +1570,10 @@ mod aws_store_tests {
         LORE_CONTEXT
             .scope(execution, async move {
                 let dynamo = dynamodb_setup(vec![MUTABLE_STORE_TABLE_NAME]).await?;
-                let settings = AwsMutableStoreSettings::new(
-                    DynamoDbMutableStoreSettings::new(MUTABLE_STORE_TABLE_NAME.to_string()),
-                    false,
-                );
-                let store = Arc::new(AwsMutableStore::new(
-                    dynamo.clone(),
-                    &settings,
-                    Arc::new(LocalStore::default()),
+                let settings = AwsMutableStoreSettings::new(DynamoDbMutableStoreSettings::new(
+                    MUTABLE_STORE_TABLE_NAME.to_string(),
                 ));
+                let store = Arc::new(AwsMutableStore::new(dynamo.clone(), &settings));
                 Ok((store, dynamo, execution_context()))
             })
             .await
@@ -1617,11 +1607,11 @@ mod aws_store_tests {
     /// The mutable store's compare-and-swap against the conditions `DynamoDB` evaluates, each
     /// checked on the item the store leaves.
     mod swaps_on_dynamodb {
-        use std::collections::HashMap;
         use std::sync::Arc;
 
-        use aws_sdk_dynamodb::primitives::Blob;
-        use aws_sdk_dynamodb::types::AttributeValue;
+        use lore_aws::aws::item::AttributeValue;
+        use lore_aws::aws::item::ByteStr;
+        use lore_aws::aws::item::Item;
         use lore_aws::dynamodb::DynamoDb;
         use lore_aws::store::mutable_store::AwsMutableStore;
         use lore_aws::store::mutable_store::MUTABLE_STORE_DYNAMO_PARTITION_KEY_ATTRIBUTE;
@@ -1645,15 +1635,15 @@ mod aws_store_tests {
         const KEY_TYPE: KeyType = KeyType::BranchId;
 
         /// The key of the item the store keeps for `key` in `repository`.
-        fn item_key(repository: RepositoryId, key: Hash) -> HashMap<String, AttributeValue> {
-            HashMap::from([
+        fn item_key(repository: RepositoryId, key: Hash) -> Item {
+            Item::from([
                 (
-                    MUTABLE_STORE_DYNAMO_PARTITION_KEY_ATTRIBUTE.to_string(),
-                    AttributeValue::B(Blob::new(Context::from(repository).as_bytes())),
+                    ByteStr::from_static(MUTABLE_STORE_DYNAMO_PARTITION_KEY_ATTRIBUTE),
+                    AttributeValue::blob(Context::from(repository).as_bytes()),
                 ),
                 (
-                    MUTABLE_STORE_DYNAMO_SORT_KEY_ATTRIBUTE.to_string(),
-                    AttributeValue::B(Blob::new(typed_key(key, KEY_TYPE).as_bytes())),
+                    ByteStr::from_static(MUTABLE_STORE_DYNAMO_SORT_KEY_ATTRIBUTE),
+                    AttributeValue::blob(typed_key(key, KEY_TYPE).as_bytes()),
                 ),
             ])
         }
@@ -1671,11 +1661,14 @@ mod aws_store_tests {
                     true,
                 )
                 .await?;
-            let Some(item) = output.item() else {
+            let Some(item) = output.item else {
                 return Ok(None);
             };
-            match item.get(MUTABLE_STORE_VALUE_ATTRIBUTE) {
-                Some(AttributeValue::B(value)) => Ok(Some(Hash::from(value.as_ref()))),
+            match item
+                .get(MUTABLE_STORE_VALUE_ATTRIBUTE)
+                .map(|value| (value, value.as_blob()))
+            {
+                Some((_, Some(value))) => Ok(Some(Hash::from(value))),
                 other => Err(format!("an item with the value {other:?}").into()),
             }
         }
@@ -1688,8 +1681,8 @@ mod aws_store_tests {
         ) -> Result<(), Box<dyn std::error::Error>> {
             let mut zero = item_key(repository, key);
             zero.insert(
-                MUTABLE_STORE_VALUE_ATTRIBUTE.to_string(),
-                AttributeValue::B(Blob::new(Hash::default().as_bytes())),
+                ByteStr::from_static(MUTABLE_STORE_VALUE_ATTRIBUTE),
+                AttributeValue::blob(Hash::default().as_bytes()),
             );
             dynamo
                 .put_item(&Arc::from(MUTABLE_STORE_TABLE_NAME), zero)

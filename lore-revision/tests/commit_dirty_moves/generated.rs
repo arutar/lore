@@ -34,6 +34,9 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use lore_revision::node::Node;
 use lore_revision::node::NodeFlags;
@@ -197,12 +200,17 @@ impl Model {
     }
 
     /// Whether a stage of `path`, a path a move took a node to, finds a change at or below it to
-    /// stage: a new file, a file edited and marked dirty, or a removal marked dirty. A move marked
-    /// dirty alone is none, so the stage leaves it as it is.
+    /// stage: a new file, a file edited and marked dirty, a file a move marked dirty and no stage
+    /// took, or a removal marked dirty.
     fn changes_at_or_below(&self, path: &str) -> bool {
         self.subtree(path).iter().any(|held| {
             let entry = &self.paths[held];
-            !entry.directory && (entry.origin.is_none() || self.edited.contains(held))
+            !entry.directory
+                && (entry
+                    .origin
+                    .as_deref()
+                    .is_none_or(|origin| origin != held && !entry.staged)
+                    || self.edited.contains(held))
         }) || !self.dirty_deleted_below(path).is_empty()
     }
 
@@ -1185,12 +1193,13 @@ const OWN_CHANGE: u16 =
     NodeFlags::ActionBits.bits() | (NodeFlags::MergeBits.bits() & !NodeFlags::StagedMerge.bits());
 
 /// The directories of `before`, the staged tree the commit takes, that the commit deletes with
-/// everything below them as the working tree no longer holds them: each staged for what lies
-/// below it alone at or below one of `model`'s [`Model::unmarked`], but for one holding a committed
-/// node not staged, there or going back there with a move the commit leaves out, and each above
-/// such a one, which the commit keeps, as it deletes nothing that was not staged. Where the
-/// directory above those is one the working tree no longer holds staged with a change of its own
-/// ([`gone_with_a_change`]), they go with it instead.
+/// everything below them as the working tree no longer holds them, each at or below one of
+/// `model`'s [`Model::unmarked`]: a directory staged for what lies below it alone, and one of those
+/// unmarked that is not staged, which the commit stages so for its rehash ([`Model::settle_bare`]).
+/// The commit keeps one holding a committed node not staged, there or going back there with a move
+/// the commit leaves out, and each above such a one, as it deletes nothing that was not staged.
+/// Where the directory above those is one the working tree no longer holds staged with a change of
+/// its own ([`gone_with_a_change`]), they go with it instead.
 fn gone_directories(
     model: &Model,
     base: &BTreeMap<NodeID, Placed>,
@@ -1205,8 +1214,11 @@ fn gone_directories(
         .iter()
         .filter(|(id, at)| {
             at.node.is_directory()
-                && at.node.is_staged()
-                && at.node.flags & OWN_CHANGE == 0
+                && (if at.node.is_staged() {
+                    at.node.flags & OWN_CHANGE == 0
+                } else {
+                    unmarked.contains(id)
+                })
                 && within(before, **id, &unmarked)
         })
         .map(|(id, _)| *id)
@@ -1412,11 +1424,31 @@ fn assert_marked(
     }
 }
 
-/// Runs sequences `first` to `first + SEQUENCES_PER_TEST`, each as [`sequence_of`] runs it.
-async fn sequences_from(first: u64) {
-    for seed in first..first + SEQUENCES_PER_TEST {
-        sequence_of(seed).await;
-    }
+/// Runs sequences `first` to `first + SEQUENCES_PER_TEST`, each as [`sequence_of`] runs it, on as
+/// many threads as the machine has cores. Each thread runs its sequences one at a time on a
+/// current-thread runtime of its own, so each sequence runs as it would alone.
+fn sequences_from(first: u64) {
+    let next = AtomicU64::new(first);
+    let threads = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("a runtime for the sequences")
+                    .block_on(async {
+                        loop {
+                            let seed = next.fetch_add(1, Ordering::Relaxed);
+                            if seed >= first + SEQUENCES_PER_TEST {
+                                break;
+                            }
+                            sequence_of(seed).await;
+                        }
+                    });
+            });
+        }
+    });
 }
 
 /// Runs the sequence `seed` draws in every [`Order`], and asserts that the orders leave one
@@ -1483,22 +1515,22 @@ async fn generated_sequences_removing_a_directory_a_staged_move_left() {
     sequence_of(8543).await;
 }
 
-#[tokio::test]
-async fn generated_sequences_0() {
-    sequences_from(0).await;
+#[test]
+fn generated_sequences_0() {
+    sequences_from(0);
 }
 
-#[tokio::test]
-async fn generated_sequences_1() {
-    sequences_from(SEQUENCES_PER_TEST).await;
+#[test]
+fn generated_sequences_1() {
+    sequences_from(SEQUENCES_PER_TEST);
 }
 
-#[tokio::test]
-async fn generated_sequences_2() {
-    sequences_from(2 * SEQUENCES_PER_TEST).await;
+#[test]
+fn generated_sequences_2() {
+    sequences_from(2 * SEQUENCES_PER_TEST);
 }
 
-#[tokio::test]
-async fn generated_sequences_3() {
-    sequences_from(3 * SEQUENCES_PER_TEST).await;
+#[test]
+fn generated_sequences_3() {
+    sequences_from(3 * SEQUENCES_PER_TEST);
 }

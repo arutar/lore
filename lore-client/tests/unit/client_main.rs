@@ -5,7 +5,8 @@ use lore_client::cli::LoreCli;
 use lore_client::cli::LoreCommands;
 use lore_client::client_main::runs_the_service;
 
-fn command_of(args: &[&str]) -> LoreCommands {
+/// The command `args` parse to.
+pub(crate) fn command_of(args: &[&str]) -> LoreCommands {
     LoreCli::try_parse_from(args)
         .expect("the arguments must parse")
         .command
@@ -54,6 +55,25 @@ fn trusting_the_remote_and_fast_flush_reach_the_globals() {
         assert_eq!(
             globals.flush_options().fast_flush,
             fast_flush,
+            "{}",
+            args.join(" ")
+        );
+    }
+}
+
+/// `--no-background-flush` reaches the command's globals, and is off without it.
+#[test]
+fn no_background_flush_reaches_the_globals() {
+    for (args, deferred) in [
+        (vec!["lore", "status"], false),
+        (vec!["lore", "status", "--no-background-flush"], true),
+    ] {
+        let cli = LoreCli::try_parse_from(&args).expect("the arguments must parse");
+        let globals =
+            lore_client::cli::lore_globals_from_args(&cli).expect("the globals must resolve");
+        assert_eq!(
+            globals.no_background_flush(),
+            deferred,
             "{}",
             args.join(" ")
         );

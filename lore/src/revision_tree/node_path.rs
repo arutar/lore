@@ -7,11 +7,9 @@
 use lore_base::error::InvalidArguments;
 use lore_error_set::prelude::*;
 use lore_macro::LoreArgs;
-use lore_revision::event::EventError;
 use lore_revision::event::LoreErrorCode;
 use lore_revision::event::LoreEvent;
 use lore_revision::event::revision_tree::LoreRevisionTreeNodePathEventData;
-use lore_revision::interface::LoreError;
 use lore_revision::interface::LoreString;
 use lore_revision::node::NodeID;
 use lore_revision::node::NodeIDExt;
@@ -25,7 +23,17 @@ use crate::revision_tree::handle::LoreRevisionTree;
 
 /// Arguments for `lore_revision_tree_node_path`.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(node_path_impl)]
 pub struct LoreRevisionTreeNodePathArgs {
     /// Per-call correlation id echoed back in events
@@ -39,19 +47,6 @@ pub struct LoreRevisionTreeNodePathArgs {
 #[error_set]
 enum NodePathError {
     InvalidArguments,
-}
-
-impl EventError for NodePathError {
-    fn translated(&self) -> LoreError {
-        match self {
-            NodePathError::InvalidArguments(_) => LoreError::InvalidArguments,
-            NodePathError::Internal(_) => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 fn invalid(reason: &str) -> NodePathError {

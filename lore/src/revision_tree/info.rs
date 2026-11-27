@@ -8,11 +8,9 @@
 use lore_base::error::InvalidArguments;
 use lore_error_set::prelude::*;
 use lore_macro::LoreArgs;
-use lore_revision::event::EventError;
 use lore_revision::event::LoreErrorCode;
 use lore_revision::event::LoreEvent;
 use lore_revision::event::revision_tree::LoreRevisionTreeInfoEventData;
-use lore_revision::interface::LoreError;
 use lore_revision::interface::LoreString;
 use lore_revision::metadata::CREATED_BY;
 use lore_revision::metadata::Metadata;
@@ -25,7 +23,17 @@ use crate::revision_tree::handle::LoreRevisionTree;
 
 /// Arguments for `lore_revision_tree_info`.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(info_impl)]
 pub struct LoreRevisionTreeInfoArgs {
     /// Per-call correlation id echoed back in events
@@ -37,19 +45,6 @@ pub struct LoreRevisionTreeInfoArgs {
 #[error_set]
 enum InfoError {
     InvalidArguments,
-}
-
-impl EventError for InfoError {
-    fn translated(&self) -> LoreError {
-        match self {
-            InfoError::InvalidArguments(_) => LoreError::InvalidArguments,
-            InfoError::Internal(_) => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 /// Emit the id-carrying terminal for a failed `info`: zeroed fields plus the
@@ -71,8 +66,8 @@ fn emit_info_error(id: u64, error_code: LoreErrorCode) {
 /// timestamp, author identity, and metadata key count, with
 /// `error_code = NONE`, before `Complete {status: 0}`. A revision with no
 /// Metadata fragment reports zeroed metadata fields (not an error); a
-/// present-but-unreadable fragment completes with `error_code = INTERNAL`. The
-/// verb materializes no bytes to disk.
+/// present-but-unreadable fragment reports the read's own `error_code` and
+/// completes with `INTERNAL`. The verb materializes no bytes to disk.
 pub fn info(
     globals: LoreGlobalArgs,
     args: LoreRevisionTreeInfoArgs,
@@ -111,7 +106,7 @@ async fn info_impl(
                 {
                     Ok(metadata) => metadata,
                     Err(error) => {
-                        emit_info_error(id, LoreErrorCode::Internal);
+                        emit_info_error(id, LoreErrorCode::from_ffi_code(error.ffi_code()));
                         return Err(InfoError::internal_with_context(
                             error,
                             "Metadata::deserialize",

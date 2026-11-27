@@ -23,7 +23,6 @@ use crate::change::FileAction;
 use crate::change::NodeChange;
 use crate::errors::*;
 use crate::event;
-use crate::event::EventError;
 use crate::file::stage::LayerRoute;
 use crate::file::stage::classify_stage_path;
 use crate::filter::FilterMode;
@@ -34,7 +33,6 @@ use crate::fs::filesystem_provider::FilesystemDiffTree;
 use crate::fs::filesystem_provider::InstanceOperation;
 use crate::fs::filesystem_provider::InstanceOperationImpl;
 use crate::fs::filesystem_provider::with_operation_if;
-use crate::interface::LoreError;
 use crate::interface::LoreFileAction;
 use crate::interface::LoreNodeType;
 use crate::interface::LoreString;
@@ -42,6 +40,7 @@ use crate::layer;
 use crate::link::LinkedStagedContent;
 use crate::link::LinkedState;
 use crate::link::settle_linked_staged_state;
+use crate::link::sharing_mounts;
 use crate::lore::BranchId;
 use crate::lore::Hash;
 use crate::lore::RepositoryId;
@@ -51,12 +50,15 @@ use crate::lore_drain_tasks;
 use crate::lore_limit_drain_tasks;
 use crate::lore_trace;
 use crate::metadata::Metadata;
+use crate::node::NodeFlags;
 use crate::node::NodeID;
 use crate::node::NodeIDExt;
 use crate::node::ROOT_NODE;
 use crate::path::emit_path_ignore;
 use crate::state;
 use crate::state::Clear;
+use crate::state::HeldNode;
+use crate::state::LinkReference;
 use crate::state::State;
 use crate::util::fan_out;
 use crate::util::path::RelativePath;
@@ -65,7 +67,9 @@ use crate::util::serde::u8_as_bool;
 /// Revision status of a repository, describing the current, local, and remote
 /// positions of the active branch.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, Debug, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Serialize, Debug, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRepositoryStatusRevisionEventData {
     /// Repository identifier
@@ -156,7 +160,9 @@ impl LoreRepositoryStatusRevisionEventData {
 
 /// Status of a single file or node reported by a repository status operation.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, Debug, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Serialize, Debug, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRepositoryStatusFileEventData {
     /// Path of the file, relative to the root of the working tree.
@@ -246,7 +252,9 @@ impl LoreRepositoryStatusFileEventData {
 
 /// Counts of directories and files in the repository tree.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, Debug, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Serialize, Debug, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRepositoryStatusCountEventData {
     /// Number of directories in the tree, view-filtered (staged state if
@@ -262,7 +270,9 @@ pub struct LoreRepositoryStatusCountEventData {
 /// the changes detected against the filesystem; for `--check-dirty` they are
 /// the nodes that remained dirty after the filesystem verification.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, Debug, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Serialize, Debug, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRepositoryStatusSummaryEventData {
     /// Number of files added.
@@ -352,6 +362,7 @@ impl StatusSummaryStats {
 
 #[error_set]
 pub enum StatusError {
+    Cancelled,
     LinkPinsDiverge,
     NodeNotFound,
     LinkNotFound,
@@ -397,30 +408,6 @@ pub enum StatusError {
     SharedStoreNotFound,
     TokenNotFound,
     MissingIdentity,
-}
-
-impl EventError for StatusError {
-    fn translated(&self) -> LoreError {
-        match self {
-            StatusError::Disconnected(_) => LoreError::Connection,
-            StatusError::SlowDown(_) => LoreError::SlowDown,
-            StatusError::Oversized(_) => LoreError::Oversized,
-            StatusError::FileNotFound(_) => LoreError::FileNotFound,
-            StatusError::NotFound(_)
-            | StatusError::LayerNotFound(_)
-            | StatusError::RevisionNotFound(_) => LoreError::NotFound,
-            StatusError::AddressNotFound(_) => LoreError::AddressNotFound,
-            StatusError::PayloadNotFound(_) => LoreError::PayloadNotFound,
-            StatusError::InvalidArguments(_) | StatusError::InvalidPath(_) => {
-                LoreError::InvalidArguments
-            }
-            _ => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -515,6 +502,9 @@ pub(crate) struct ScanReport {
     /// Whether a deleted directory is reported as one entry, as a plain status reports the marks
     /// a scan left, rather than with every entry below it, as `--scan` reports them.
     whole_deleted_directories: bool,
+    /// The revision the tree is staged on, where the report covers the whole tree, which a
+    /// directory marked dirty as moved is reported as moved from ([`directory_move`]).
+    moves_from: Option<Arc<State>>,
 }
 
 /// Reports every change a path's scan finds, answering with how many were reported and the first
@@ -556,8 +546,20 @@ async fn report_scan_changes(
             }
         }
         reported += 1;
-        if let Err(err) = report_scan_change(operation, repository, &report.summary, &change).await
-        {
+        let result = match report.moves_from.as_ref() {
+            Some(current) if adds_a_dirty_moved_directory(&change) => {
+                Box::pin(report_scan_directory_move(
+                    operation,
+                    repository,
+                    &report.summary,
+                    current,
+                    &change,
+                ))
+                .await
+            }
+            _ => report_scan_change(operation, repository, &report.summary, &change).await,
+        };
+        if let Err(err) = result {
             failure.get_or_insert(err);
         }
     }
@@ -585,6 +587,79 @@ async fn report_scan_change(
     ))
     .send();
     Ok(())
+}
+
+/// [`report_scan_change`] of `change`, an add of a directory marked dirty as moved, as the move
+/// from the path `current` holds it at ([`directory_move`]), or as it is where `current` holds it
+/// nowhere else. Boxed by its caller, which takes it only for such a change.
+async fn report_scan_directory_move(
+    operation: &InstanceOperationImpl,
+    repository: &Arc<RepositoryContext>,
+    summary: &StatusSummaryStats,
+    current: &Arc<State>,
+    change: &NodeChange,
+) -> Result<(), StatusError> {
+    let moved = directory_move(repository, current, change).await?;
+    report_scan_change(
+        operation,
+        repository,
+        summary,
+        moved.as_ref().unwrap_or(change),
+    )
+    .await
+}
+
+/// Whether `change` adds a directory that is marked dirty as moved and not staged, which
+/// [`directory_move`] reports as the move it is: the diff pairs a move by its file's identity,
+/// which a directory lacks.
+fn adds_a_dirty_moved_directory(change: &NodeChange) -> bool {
+    let flags = change.to.flags;
+    change.action == FileAction::Add
+        && flags.is_directory()
+        && flags.contains(NodeFlags::DirtyMove)
+        && !flags.contains(NodeFlags::Staged)
+}
+
+/// `change`, which adds a directory marked dirty as moved ([`adds_a_dirty_moved_directory`]), as
+/// the move from the path `current`, the revision the tree is staged on, holds the directory at.
+/// `None` where `current` holds no directory of that node in `repository`, or holds it at the
+/// change's own path.
+async fn directory_move(
+    repository: &Arc<RepositoryContext>,
+    current: &Arc<State>,
+    change: &NodeChange,
+) -> Result<Option<NodeChange>, StatusError> {
+    let to = &change.to.mapping;
+    if to.repository.id != repository.id {
+        return Ok(None);
+    }
+    let committed = match current.node(repository.clone(), to.node).await {
+        Ok(committed) => committed,
+        Err(error) if error.is_node_not_found() => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .forward::<StatusError>("Failed to read the committed node of a moved directory");
+        }
+    };
+    if !committed.is_directory() || committed.is_discarded() {
+        return Ok(None);
+    }
+    let source = current
+        .node_path(repository.clone(), to.node)
+        .await
+        .forward::<StatusError>("Failed to read the committed path of a moved directory")?;
+    if source.is_empty() || source.eq_ignore_ascii_case(to.path.as_str()) {
+        return Ok(None);
+    }
+    let mut moved = change.clone();
+    moved.action = FileAction::Move;
+    moved.from = change
+        .from
+        .invalid(RelativePath::new_from_clean_parts(&source, ""));
+    moved.from.mapping.state = current.clone();
+    moved.from.mapping.node = to.node;
+    moved.from.flags = change.to.flags & !NodeFlags::DirtyBits;
+    Ok(Some(moved))
 }
 
 /// Verify whether a dirty file change reflects a real on-disk modification,
@@ -727,6 +802,8 @@ struct StagedDiff {
     show_scan: bool,
     check_dirty: Option<Arc<InstanceOperationImpl>>,
     cleared_links: Arc<parking_lot::Mutex<Vec<LinkedState>>>,
+    /// As [`ScanReport::moves_from`].
+    moves_from: Option<Arc<State>>,
 }
 
 /// Report every change the diff against the staged state answers for.
@@ -746,6 +823,15 @@ async fn report_staged_changes(
     let summary = diff.summary.as_ref();
     for change in changes {
         if !reported_by_state_diff(change, diff.show_scan) {
+            continue;
+        }
+        if let Some(current) = diff.moves_from.as_ref()
+            && adds_a_dirty_moved_directory(change)
+            && Box::pin(report_staged_directory_move(
+                repository, current, change, summary,
+            ))
+            .await?
+        {
             continue;
         }
 
@@ -770,18 +856,44 @@ async fn report_staged_changes(
             cleared_dirty = true;
         }
 
-        if change.flags.is_dirty() && !cleared_dirty {
-            summary.classify(change);
-        }
-
-        let size = file_size_from_node_change_id(change).await?;
-        let mut data = LoreRepositoryStatusFileEventData::from_node_change(change, size);
-        if cleared_dirty {
-            data.flag_dirty = 0;
-        }
-        event::LoreEvent::RepositoryStatusFile(data).send();
+        emit_staged_change(change, summary, cleared_dirty).await?;
     }
     Ok(())
+}
+
+/// Counts `change` into `summary` where it is dirty, unless `cleared_dirty`, and sends it as a
+/// status file event, without its dirty flag where `cleared_dirty`.
+async fn emit_staged_change(
+    change: &NodeChange,
+    summary: &StatusSummaryStats,
+    cleared_dirty: bool,
+) -> Result<(), StatusError> {
+    if change.flags.is_dirty() && !cleared_dirty {
+        summary.classify(change);
+    }
+    let size = file_size_from_node_change_id(change).await?;
+    let mut data = LoreRepositoryStatusFileEventData::from_node_change(change, size);
+    if cleared_dirty {
+        data.flag_dirty = 0;
+    }
+    event::LoreEvent::RepositoryStatusFile(data).send();
+    Ok(())
+}
+
+/// Reports `change`, an add of a directory marked dirty as moved, as the move from the path
+/// `current` holds it at ([`directory_move`]), and answers whether it did. Boxed by its caller,
+/// which takes it only for such a change.
+async fn report_staged_directory_move(
+    repository: &Arc<RepositoryContext>,
+    current: &Arc<State>,
+    change: &NodeChange,
+    summary: &StatusSummaryStats,
+) -> Result<bool, StatusError> {
+    let Some(moved) = directory_move(repository, current, change).await? else {
+        return Ok(false);
+    };
+    emit_staged_change(&moved, summary, false).await?;
+    Ok(true)
 }
 
 /// Whether a layer's staged state still holds anything worth pinning: a dirty marker or a staged
@@ -797,28 +909,29 @@ async fn report_staged_changes(
 async fn layer_holds_staging(layer: &layer::Layer, layer_state: &layer::LayerState) -> bool {
     let Ok((source, (repository, state))) = layer_state
         .state_staged
-        .find_relative_held(
+        .locate_held_node_below(
             layer_state.repository.clone(),
             ROOT_NODE,
             &layer.source_path,
         )
         .await
+        .map(HeldNode::into_parts)
     else {
         return true;
     };
-    if !source.node.is_valid_or_root_node_id() {
+    if !source.is_valid_or_root_node_id() {
         return true;
     }
 
     if state
-        .node_has_dirty_children(repository.clone(), source.node)
+        .node_has_dirty_children(repository.clone(), source)
         .await
         .unwrap_or(true)
     {
         return true;
     }
 
-    let staged = state::count_staged_files(repository, state, source.node).await;
+    let staged = state::count_staged_files(repository, state, source).await;
     staged.count > 0 || !staged.complete
 }
 
@@ -843,12 +956,14 @@ async fn settle_cleared_links(
         .link_list(repository.clone())
         .await
         .forward::<StatusError>("listing links to settle")?;
-    for link in links {
+    let mut settled = Vec::new();
+    for &link in &links {
         if pending.is_empty() {
             break;
         }
         let node = link.local_node();
-        if !repository.can_read_link(link.repository)
+        if settled.contains(&node)
+            || !repository.can_read_link(link.repository)
             || !state
                 .node(repository.clone(), node)
                 .await
@@ -858,13 +973,11 @@ async fn settle_cleared_links(
             continue;
         }
 
-        let cleared = pending
-            .iter()
-            .position(|(linked, linked_state)| {
-                linked.id == link.repository && linked_state.revision() == link.signature
-            })
-            .map(|index| pending.swap_remove(index));
+        let cleared = take_cleared(pending, link);
         let is_cleared = cleared.is_some();
+        if is_cleared && shares_mounted_node(repository, state, &links, link).await? {
+            continue;
+        }
         let linked = if let Some(linked) = cleared {
             linked
         } else {
@@ -889,20 +1002,74 @@ async fn settle_cleared_links(
         }
 
         let content = LinkedStagedContent::of(linked_state, linked_repository).await;
-        settle_linked_staged_state(
-            state,
-            repository.clone(),
-            node,
-            link.branch,
-            &linked,
-            content,
-            token,
-        )
-        .await
-        .forward::<StatusError>("repinning settled link")?;
+        settled.extend(
+            settle_linked_staged_state(
+                state,
+                repository.clone(),
+                sharing_mounts(linked_state, &[node]),
+                link.branch,
+                &linked,
+                content,
+                token,
+            )
+            .await
+            .forward::<StatusError>("repinning settled link")?,
+        );
         changed = true;
     }
     Ok(changed)
+}
+
+/// The state of `link`'s revision whose markers `--check-dirty` cleared, taken from `pending`. The
+/// mounts of one repository each verify their own copy of the revision they share, so where
+/// several cleared one, none is taken: a copy holds only the clears below its own mount, and
+/// persisting it would drop the others' markers.
+fn take_cleared(pending: &mut Vec<LinkedState>, link: LinkReference) -> Option<LinkedState> {
+    let of_link = |(linked, linked_state): &LinkedState| {
+        linked.id == link.repository() && linked_state.revision() == link.signature()
+    };
+    let mut found = pending
+        .iter()
+        .enumerate()
+        .filter(|(_, cleared)| of_link(cleared))
+        .map(|(index, _)| index);
+    match (found.next(), found.next()) {
+        (Some(index), None) => Some(pending.swap_remove(index)),
+        (Some(_), Some(_)) => {
+            pending.retain(|cleared| !of_link(cleared));
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Whether another mount in `links`, the registry of `state`, pins `link`'s revision and exposes
+/// the node `link` exposes: a marker cleared against one working tree copy of a folder may stand
+/// for a change in the other, so neither persists the clear.
+async fn shares_mounted_node(
+    repository: &Arc<RepositoryContext>,
+    state: &State,
+    links: &[LinkReference],
+    link: LinkReference,
+) -> Result<bool, StatusError> {
+    let mounted = async |node| {
+        state
+            .node(repository.clone(), node)
+            .await
+            .forward::<StatusError>("reading a mount to settle")
+            .map(|node| node.child)
+    };
+    let others = links.iter().filter(|other| {
+        other.repository() == link.repository()
+            && other.signature() == link.signature()
+            && other.local_node() != link.local_node()
+    });
+    let (child, others) = futures::future::try_join(
+        mounted(link.local_node()),
+        futures::future::try_join_all(others.map(|other| mounted(other.local_node()))),
+    )
+    .await?;
+    Ok(others.contains(&child))
 }
 
 /// Compare a repository's own tree against its staged state below `path`, or the whole of it where
@@ -932,10 +1099,11 @@ async fn report_repository_staged_diff(
 /// Compare the subtree a layer draws against its staged state, and report what differs at the
 /// mount it is materialized at.
 async fn report_layer_staged_diff(
-    diff: StagedDiff,
+    mut diff: StagedDiff,
     layer_state: layer::LayerState,
     selection: LayerSelection,
 ) -> Result<(), StatusError> {
+    diff.moves_from = None;
     let changes = state::diff_collect_subtree(
         layer::drawn_subtree_state(
             &layer_state.repository,
@@ -952,6 +1120,7 @@ async fn report_layer_staged_diff(
         )
         .await,
         selection.mount_path.clone(),
+        state::DiffFlags::empty(),
         FilterMode::CHANGES,
     )
     .await
@@ -1096,22 +1265,20 @@ async fn count_at_path_root(
         ));
     }
 
-    let Ok(link) = state
-        .find_node_link(repository.clone(), source_path.as_str())
+    let Ok(found) = state
+        .locate_node(repository.clone(), source_path.as_str())
         .await
     else {
         return Ok((0, 0, None));
     };
-    if !link.is_valid() {
+    if !found.is_valid() {
         return Ok((0, 0, None));
     }
 
-    let (repository, state) = link
-        .resolve(repository.clone(), state.clone())
-        .await
-        .forward::<StatusError>("resolving count path")?;
+    let (node_id, (repository, state)) =
+        found.held((repository.clone(), state.clone())).into_parts();
     let node = state
-        .node(repository.clone(), link.node)
+        .node(repository.clone(), node_id)
         .await
         .forward::<StatusError>("reading count path node")?;
 
@@ -1144,7 +1311,7 @@ async fn count_at_path_root(
         Some(CountWork {
             state,
             repository,
-            node_id: link.node,
+            node_id,
             path: mount_path.clone(),
             states,
         }),
@@ -1582,7 +1749,7 @@ fn resolve_scan_target(
                 state
                     .find_relative_from(repository.clone(), path.as_str(), stop)
                     .await
-                    .is_ok_and(|(node_link, _)| node_link.is_valid()),
+                    .is_ok_and(|found| found.is_valid()),
                 None,
             ),
             Ok(state::PathStop {
@@ -1820,6 +1987,10 @@ async fn report_tree_diffs(
     summary: &Arc<StatusSummaryStats>,
     plan: TreeDiffPlan,
 ) -> Result<Vec<LinkedState>, StatusError> {
+    let moves_from = paths
+        .iter()
+        .all(|path| path.as_ref().is_none_or(RelativePath::is_empty))
+        .then(|| state_current.clone());
     with_operation_if(
         repository.file_system(),
         plan.reads_working_tree(),
@@ -1831,6 +2002,7 @@ async fn report_tree_diffs(
                     show_scan: plan.scan,
                     check_dirty: operation.clone().filter(|_| plan.checks_dirty()),
                     cleared_links: Arc::default(),
+                    moves_from: moves_from.clone(),
                 };
                 let cleared = diff.cleared_links.clone();
                 report_staged_diffs(repository, paths, state_current, state_staged, layers, diff)
@@ -1855,6 +2027,7 @@ async fn report_tree_diffs(
             let report = ScanReport {
                 summary: summary.clone(),
                 whole_deleted_directories: !plan.scan_asked,
+                moves_from,
             };
             scan_paths(
                 operation,

@@ -12,6 +12,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use bytes::BytesMut;
 use futures::FutureExt;
 use futures::future::Either;
@@ -22,11 +23,9 @@ use lore_storage::ReadOptions;
 use zerocopy::IntoBytes;
 
 use crate::errors::*;
-use crate::event::EventError;
 use crate::fs::filesystem_provider::InstanceOperation;
 use crate::fs::filesystem_provider::with_operation;
 use crate::immutable;
-use crate::interface::LoreError;
 use crate::lore::Address;
 use crate::lore::BranchId;
 use crate::lore::Context;
@@ -50,6 +49,7 @@ pub const METADATA_MAX_SIZE: usize = 1024 * 1024;
 
 #[error_set]
 pub enum MetadataErrors {
+    Cancelled,
     LinkPinsDiverge,
     InvalidArguments,
     FileNotFound,
@@ -95,21 +95,6 @@ pub enum MetadataErrors {
     SharedStoreNotFound,
     TokenNotFound,
     MissingIdentity,
-}
-
-impl EventError for MetadataErrors {
-    fn translated(&self) -> LoreError {
-        match self {
-            MetadataErrors::FileNotFound(_) => LoreError::NotFound,
-            MetadataErrors::Oversized(_) => LoreError::Oversized,
-            MetadataErrors::Disconnected(_) => LoreError::Connection,
-            _ => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 /// Commit message ([`MetadataType::String`])
@@ -228,8 +213,8 @@ pub(crate) async fn file_node_outside_links(
 ) -> Result<NodeID, MetadataErrors> {
     let relative_path = RelativePath::new_from_user_path(repository.require_path()?, path)
         .forward_any::<MetadataErrors>("resolving user path")?;
-    let node_link = state
-        .find_node_link(repository.clone(), relative_path.as_str())
+    let found = state
+        .locate_node(repository.clone(), relative_path.as_str())
         .await
         .map_matched_err("finding node", |m| match m {
             MatchedStateErrors::NodeNotFound(traced) => MetadataErrors::FileNotFound(
@@ -240,19 +225,18 @@ pub(crate) async fn file_node_outside_links(
             ),
             other => other.forward::<MetadataErrors>("finding node"),
         })?;
-    if !node_link.is_valid() {
+    if !found.is_valid() {
         return Err(FileNotFound {
             resource: path.to_string(),
         }
         .into());
     }
-    if node_link.crosses_link(repository, state) {
-        return Err(NotSupported {
+    found.own_node().ok_or_else(|| {
+        NotSupported {
             operation: format!("file metadata on `{relative_path}`, which is inside a link"),
         }
-        .into());
-    }
-    Ok(node_link.node)
+        .into()
+    })
 }
 
 /// Which of a source revision's keys a merge or cherry-pick carries onto the
@@ -464,13 +448,7 @@ impl Metadata {
     }
 
     /// Read a stored metadata blob with `options`, refusing one larger than
-    /// [`METADATA_MAX_SIZE`].
-    ///
-    /// This is the only way bytes this process did not write become a
-    /// [`Metadata`], so it is the one place the entry chain has to be checked —
-    /// a buffer built by [`Self::set`] is correct by construction and pays
-    /// nothing. The check is one pass of integer arithmetic over the entries,
-    /// against a fetch that dominates it.
+    /// [`METADATA_MAX_SIZE`] and checking it with [`Self::from_stored`].
     ///
     /// Returns the read's future, built at the call, with the check mapped onto its output, so it
     /// holds nothing beside the read.
@@ -480,6 +458,33 @@ impl Metadata {
         hash: Hash,
         options: ReadOptions,
     ) -> impl Future<Output = Result<Self, MetadataError>> {
+        Self::read_stored(repository, hash, options).map(|read| -> Result<Self, MetadataError> {
+            Self::from_stored(read.forward::<MetadataError>("reading metadata")?)
+        })
+    }
+
+    /// [`Self::deserialize_with`], keeping a failed read apart from bytes that aren't metadata:
+    /// the outer result is the read's, and the inner one the check of [`Self::from_stored`].
+    ///
+    /// Returns the read's future with the check mapped onto its output, as
+    /// [`Self::deserialize_with`] does.
+    #[inline]
+    pub(crate) fn read_with(
+        repository: Arc<RepositoryContext>,
+        hash: Hash,
+        options: ReadOptions,
+    ) -> impl Future<Output = Result<Result<Self, MetadataError>, immutable::ImmutableError>> {
+        Self::read_stored(repository, hash, options).map(|read| read.map(Self::from_stored))
+    }
+
+    /// The read of the stored blob `hash` names, with `options`, refusing one larger than
+    /// [`METADATA_MAX_SIZE`].
+    #[inline]
+    fn read_stored(
+        repository: Arc<RepositoryContext>,
+        hash: Hash,
+        options: ReadOptions,
+    ) -> impl Future<Output = Result<Bytes, immutable::ImmutableError>> {
         let address = Address {
             hash,
             context: Context::default(),
@@ -490,12 +495,19 @@ impl Metadata {
             None, /* No range, read all */
             options.with_max_content_size(METADATA_MAX_SIZE as u64),
         )
-        .map(|read| -> Result<Self, MetadataError> {
-            let buffer = read.forward::<MetadataError>("reading metadata")?;
-            let metadata = Metadata::new_with_buffer(BytesMut::from(buffer));
-            metadata.check_buffer()?;
-            Ok(metadata)
-        })
+    }
+
+    /// The metadata that the stored blob `buffer` holds, refusing a buffer whose entry chain
+    /// [`Self::check_buffer`] doesn't accept.
+    ///
+    /// This is the only way bytes this process did not write become a [`Metadata`], so it is the
+    /// one place the entry chain has to be checked: a buffer built by [`Self::set`] is correct by
+    /// construction and pays nothing. The check is one pass of integer arithmetic over the entries,
+    /// against a fetch that dominates it.
+    fn from_stored(buffer: Bytes) -> Result<Self, MetadataError> {
+        let metadata = Metadata::new_with_buffer(BytesMut::from(buffer));
+        metadata.check_buffer()?;
+        Ok(metadata)
     }
 
     pub async fn serialize(
@@ -1190,7 +1202,8 @@ impl Metadata {
     }
 
     /// Establish that the buffer is a metadata blob this build can read, and
-    /// that its entry chain stays inside it.
+    /// that its entry chain stays inside it. A blob of a version this build
+    /// doesn't read fails as not supported.
     ///
     /// Every accessor walks the chain with raw pointers and takes the stored
     /// lengths at their word, which is only sound because a buffer that reached
@@ -1219,7 +1232,10 @@ impl Metadata {
         }
         if header.version != VERSION {
             // Handle version change when modifying VERSION.
-            return Err(MetadataError::internal("bad metadata header"));
+            return Err(NotSupported {
+                operation: format!("reading metadata of version {}", header.version),
+            }
+            .into());
         }
 
         // Each bound is checked against the room left before it is consumed, so

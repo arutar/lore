@@ -18,6 +18,7 @@ use crate::lore_warn;
 use crate::node::Node;
 use crate::node::NodeBlock;
 use crate::node::NodeID;
+use crate::node::NodeIDExt;
 use crate::node::ROOT_NODE;
 use crate::repository::RepositoryContext;
 use crate::state::LinkReference;
@@ -27,9 +28,10 @@ use crate::state::State;
 
 /// Removes a staged link add from the registry and the link's files from the mount, where they
 /// hold no local change unless `overwrite_local` says to discard it. Files the link does not hold
-/// stay, and with them the mount. A provider holding its state holds nothing of the link, so its
-/// mount stays as it is
-/// ([`holds_state`](crate::fs::filesystem_provider::FilesystemProvider::holds_state)).
+/// stay, and with them the mount. A provider holding its state serves the link from its node,
+/// which is taken away ([`link::realize_link_pin_change_in_operation`]), and the committed
+/// directory the link replaced goes back as the revision holds it
+/// ([`InstanceOperationImpl::place_copy`]).
 pub(crate) async fn reset_staged_add_link(
     operation: &Arc<InstanceOperationImpl>,
     at: NodeMapping,
@@ -56,17 +58,29 @@ pub(crate) async fn reset_staged_add_link(
         .await
         .unwrap_or_else(|_| link_path.as_str().to_string());
     let committed_directory_node = state_current
-        .find_node_link(repository.clone(), &owner_relative_path)
+        .locate_node(repository.clone(), &owner_relative_path)
         .await
         .ok()
-        .filter(|node_link| node_link.is_valid())
-        .map(|node_link| node_link.node);
+        .and_then(|found| found.own_node())
+        .filter(NodeIDExt::is_valid_node_id);
 
     if let Some(committed_node_id) = committed_directory_node {
         // Restore the committed directory: recreate the empty placeholder on
         // disk and clear the staged-delete on its node so it returns to its
-        // clean committed state.
-        if !dry_run {
+        // clean committed state. A provider holding its state serves the
+        // committed node again, as the revision holds it.
+        if !dry_run && operation.holds_state() {
+            let committed = NodeMapping {
+                repository: repository.clone(),
+                state: state_current.clone(),
+                path: link_path.clone(),
+                node: committed_node_id,
+            };
+            operation
+                .place_copy(&link_path, &committed)
+                .await
+                .forward::<LinkError>("serving the committed directory again")?;
+        } else if !dry_run {
             operation
                 .create_dir_all(&link_path)
                 .await
@@ -113,18 +127,22 @@ async fn drop_staged_link(
 ) -> Result<(), LinkError> {
     let link_id = staged_link_node.linked_node().repository;
     if !execution_context().globals().dry_run() {
-        link::realize_link_pin_change_boxed(
-            operation,
-            at.repository.clone(),
-            at.repository.to_link_context(link_id).await,
-            link::LinkPinRealizeTarget {
-                link_path: at.path.clone(),
-                old_signature: staged_link_node.address.hash,
-                new_signature: Hash::default(),
-                current_node: staged_link_node.child,
-                mount_source: link::LinkMountSource::Node(ROOT_NODE),
-            },
-            overwrite_local,
+        // A staged pin the caller cannot read was never realized, so the mount holds none of it.
+        link::skip_denied(
+            (link_id, at.path.as_str()),
+            link::realize_link_pin_change_boxed(
+                operation,
+                at.repository.clone(),
+                at.repository.to_link_context(link_id).await,
+                link::LinkPinRealizeTarget {
+                    link_path: at.path.clone(),
+                    old_signature: staged_link_node.address.hash,
+                    new_signature: Hash::default(),
+                    current_node: staged_link_node.child,
+                    mount_source: link::LinkMountSource::Node(ROOT_NODE),
+                },
+                overwrite_local,
+            ),
         )
         .await?;
     }
@@ -138,8 +156,8 @@ async fn drop_staged_link(
 /// Restores the link registry entry a staged removal dropped and re-realizes the pinned content
 /// at the mount, refusing to replace a file standing there or a local change to a file the link
 /// holds unless `overwrite_local` says to discard it. A provider holding its state serves the link
-/// from its node, so nothing of it is written
-/// ([`holds_state`](crate::fs::filesystem_provider::FilesystemProvider::holds_state)).
+/// from its node, which goes back at the mount, so nothing of its content is written
+/// ([`InstanceOperationImpl::place_link`]).
 ///
 /// Realizes through `operation`, the caller's: a filesystem holds one operation at a time and
 /// unstaging opens one for the whole walk.
@@ -184,7 +202,7 @@ async fn restorable_link(
         linked_repository.clone(),
         source_path,
         at.node,
-        None,
+        link::SameFolder::Refuse,
     )
     .await
     .forward::<LinkError>("Failed checking link source paths")?;
@@ -208,27 +226,72 @@ async fn restore_link(
         ..
     } = at;
 
-    if operation
+    let at_mount = operation
         .file_info(&link_path)
         .await
-        .forward::<LinkError>("Failed to check the link path")?
-        .is_file()
-    {
-        if !overwrite_local {
-            lore_warn!(
-                "Link at '{link_path}' has local changes (use `lore reset {link_path}` to discard them)"
-            );
-            return Err(LocalModifications.into());
-        }
+        .forward::<LinkError>("Failed to check the link path")?;
+    let (file_at_mount, mount_existed) = (at_mount.is_file(), at_mount.is_dir());
+    if file_at_mount && !overwrite_local {
+        lore_warn!(
+            "Link at '{link_path}' has local changes (use `lore reset {link_path}` to discard them)"
+        );
+        return Err(LocalModifications.into());
+    }
+
+    // A provider holding its state serves the link from its node, so its pin is not read.
+    let holds_state = operation.holds_state();
+    let pin = if holds_state || execution_context().globals().dry_run() {
+        None
+    } else {
+        let target = link::LinkPinRealizeTarget {
+            link_path: link_path.clone(),
+            old_signature: Hash::default(),
+            new_signature: current_link_node.address.hash,
+            current_node: current_link_node.child,
+            mount_source: link::LinkMountSource::Node(current_link_node.child),
+        };
+        // Boxed, as is the realize below: a link restore is a cold path.
+        let pin = Box::pin(link::ResolvedLinkPin::resolve(&linked_repository, target))
+            .await
+            .forward_with::<LinkError, _>(|| format!("Failed to fetch the link at {link_path}"))?;
+        Some(pin)
+    };
+
+    if file_at_mount {
         operation
             .remove(&link_path)
             .await
             .forward::<LinkError>("Failed to remove the file at the link path")?;
     }
+    if !holds_state {
+        operation
+            .create_dir_all(&link_path)
+            .await
+            .forward::<LinkError>("Failed to recreate the link directory")?;
+    }
+
+    if let Some(pin) = pin {
+        let realized = Box::pin(link::realize_resolved_link_pin_in_operation(
+            operation,
+            repository.clone(),
+            linked_repository,
+            &pin,
+            overwrite_local,
+        ))
+        .await;
+        if let Err(error) = realized {
+            if !mount_existed && !holds_state {
+                let _ = operation.remove_empty_directory(&link_path).await;
+            }
+            return Err(error).forward_with::<LinkError, _>(|| {
+                format!("Failed to restore the link at {link_path}")
+            });
+        }
+    }
 
     state_staged
         .link_add(
-            repository.clone(),
+            repository,
             current_link_ref.repository,
             current_link_ref.branch,
             current_link_ref.signature,
@@ -238,30 +301,14 @@ async fn restore_link(
         .await
         .forward::<LinkError>("Failed to restore link registry entry")?;
 
-    if !operation.holds_state() {
-        operation
-            .create_dir_all(&link_path)
+    // A provider holding its state serves the link from its node, which goes back at the mount.
+    if holds_state {
+        return operation
+            .place_link(&link_path, Some(&current_link_node), overwrite_local)
             .await
-            .forward::<LinkError>("Failed to recreate the link directory")?;
+            .forward::<LinkError>("Failed to serve the restored link");
     }
-
-    if execution_context().globals().dry_run() {
-        return Ok(());
-    }
-    link::realize_link_pin_change_boxed(
-        operation,
-        repository,
-        linked_repository,
-        link::LinkPinRealizeTarget {
-            link_path,
-            old_signature: Hash::default(),
-            new_signature: current_link_node.address.hash,
-            current_node: current_link_node.child,
-            mount_source: link::LinkMountSource::SamePath,
-        },
-        overwrite_local,
-    )
-    .await
+    Ok(())
 }
 
 /// Puts a link whose pin, mount or registry row change was staged back to the pin, mount and row
@@ -292,18 +339,23 @@ pub(crate) async fn reset_staged_update_link(
         .forward::<LinkError>("Failed to find link registry entry")?;
 
     if staged_pin != current_pin || !staged_link_node.mounts_same_source(&current_link_node) {
-        link::realize_link_pin_change_boxed(
-            operation,
-            repository.clone(),
-            repository.to_link_context(link_id).await,
-            link::LinkPinRealizeTarget {
-                link_path,
-                old_signature: staged_pin,
-                new_signature: current_pin,
-                current_node: staged_link_node.child,
-                mount_source: link::LinkMountSource::Node(current_link_node.child),
-            },
-            overwrite_local,
+        // A staged pin the caller cannot read was never realized, so the mount still holds the
+        // current pin.
+        link::skip_denied(
+            (link_id, link_path.as_str()),
+            link::realize_link_pin_change_boxed(
+                operation,
+                repository.clone(),
+                repository.to_link_context(link_id).await,
+                link::LinkPinRealizeTarget {
+                    link_path: link_path.clone(),
+                    old_signature: staged_pin,
+                    new_signature: current_pin,
+                    current_node: staged_link_node.child,
+                    mount_source: link::LinkMountSource::Node(current_link_node.child),
+                },
+                overwrite_local,
+            ),
         )
         .await?;
     }

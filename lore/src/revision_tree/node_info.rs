@@ -8,11 +8,9 @@ use lore_base::error::InvalidArguments;
 use lore_base::types::Address;
 use lore_error_set::prelude::*;
 use lore_macro::LoreArgs;
-use lore_revision::event::EventError;
 use lore_revision::event::LoreErrorCode;
 use lore_revision::event::LoreEvent;
 use lore_revision::event::revision_tree::LoreRevisionTreeNodeInfoEventData;
-use lore_revision::interface::LoreError;
 use lore_revision::interface::LoreNodeStagedAction;
 use lore_revision::interface::LoreNodeType;
 use lore_revision::interface::LoreString;
@@ -29,7 +27,17 @@ use crate::revision_tree::handle::LoreRevisionTree;
 
 /// Arguments for `lore_revision_tree_node_info`.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(node_info_impl)]
 pub struct LoreRevisionTreeNodeInfoArgs {
     /// Per-call correlation id echoed back in events
@@ -43,19 +51,6 @@ pub struct LoreRevisionTreeNodeInfoArgs {
 #[error_set]
 enum NodeInfoError {
     InvalidArguments,
-}
-
-impl EventError for NodeInfoError {
-    fn translated(&self) -> LoreError {
-        match self {
-            NodeInfoError::InvalidArguments(_) => LoreError::InvalidArguments,
-            NodeInfoError::Internal(_) => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 fn invalid(reason: &str) -> NodeInfoError {
@@ -88,8 +83,8 @@ fn emit_node_info_error(id: u64, error_code: LoreErrorCode) {
 /// name-table read); revision-level metadata is served by
 /// `lore_revision_tree_info`, not here. An invalid or unknown node id completes
 /// with `error_code = INVALID_ARGUMENTS`; a name-table read failure on a
-/// non-root node completes with `error_code = INTERNAL`. The verb materializes
-/// no bytes to disk.
+/// non-root node reports the read's own `error_code` and completes with
+/// `INTERNAL`. The verb materializes no bytes to disk.
 ///
 /// Node ids are opaque values issued by the API. An id the API never issued
 /// that happens to land on an unallocated slot of an existing block reads back
@@ -148,7 +143,7 @@ async fn node_info_impl(
                 {
                     Ok(name) => name,
                     Err(error) => {
-                        emit_node_info_error(id, LoreErrorCode::Internal);
+                        emit_node_info_error(id, LoreErrorCode::from_ffi_code(error.ffi_code()));
                         return Err(NodeInfoError::internal_with_context(
                             error,
                             "State::node_name_clone",

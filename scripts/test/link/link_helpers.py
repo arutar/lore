@@ -15,6 +15,8 @@ from lore import Lore
 
 DEFAULT_LINK_MOUNT = "vendor/lib"
 DEFAULT_PARENT_FILE = "README.txt"
+DEFAULT_LINKED_FILE = f"{DEFAULT_LINK_MOUNT}/linked.txt"
+DEFAULT_LINKED_CONTENT = "linked content\n"
 MAX_LINK_DEPTH = 8
 SHARED_FOLDER = {"shared/a.txt": "a original\n", "shared/b.txt": "b original\n"}
 
@@ -61,7 +63,7 @@ def make_parent_with_link(
     )
     link_repo = make_repo(
         new_lore_repo,
-        link_files or {"linked.txt": "linked content\n"},
+        link_files or {"linked.txt": DEFAULT_LINKED_CONTENT},
         "Initial linked content",
     )
 
@@ -150,6 +152,12 @@ def link_entry(repo: Lore, link_path: str) -> dict:
     """The `link list` entry of the link at `link_path`."""
     entries = parse_jsonl(repo.link_list(json=True), "linkEntry")
     return next(e for e in entries if e["linkPath"] == link_path)
+
+
+def with_another_scheme(url: str) -> str:
+    """`url` under a scheme other than its own."""
+    scheme, rest = url.split("://", 1)
+    return f"{'lores' if scheme == 'lore' else 'lore'}://{rest}"
 
 
 def link_field(repo: Lore, source_id: str, field: str) -> str:
@@ -450,6 +458,18 @@ def parse_revision_diff(output: str) -> list[tuple[str, str]]:
         if len(parts) == 2 and parts[0] in DIFF_ACTIONS:
             entries.append((parts[0], parts[1].strip()))
     return entries
+
+
+def revision_delta(
+    repo: Lore, revision: str | None = None
+) -> list[tuple[str, str, bool]]:
+    """The `revision info --delta` entries of `revision` as sorted (path, action, flagModify)."""
+    deltas = parse_jsonl(
+        repo.revision_info(revision, delta=True, json=True), "revisionInfoDelta"
+    )
+    return sorted(
+        (delta["path"], delta["action"], delta["flagModify"]) for delta in deltas
+    )
 
 
 def build_nested_link_repos_at(new_lore_repo, b_mount, c_inner_mount):
@@ -802,11 +822,10 @@ LINK_MOVES = {
 }
 
 
-#: Two links reaching one repository: nested in two linked repositories, held by the main
-#: repository twice, or held by it at two folders of the repository.
+#: Two links reaching one repository: nested in two linked repositories, or held by the main
+#: repository at two folders of the repository.
 LINKS_TO_ONE_REPOSITORY = {
     "nested": ("vendor/b/deps/d", "vendor/c/deps/d"),
-    "top-level": ("libs/d", "libs/d-again"),
     "subtrees": ("libs/a", "libs/b"),
 }
 
@@ -865,3 +884,37 @@ def assert_scan_matches_linked_files_by_time(repo: Lore):
     assert summary["mtimeMatches"] >= len(SAME_SIZE_LINK_FILES), (
         f"the scan must match every linked file by its recorded time, got {summary}"
     )
+
+
+def staged_file_with_owner(new_lore_repo, path: str, owner: str) -> Lore:
+    """A new repository with `path` staged, holding `owner` as its content and owner metadata."""
+    repo: Lore = new_lore_repo()
+    # Content of its own, so a dump of one file cannot pass for the other.
+    with repo.open_file(path, "w") as output_file:
+        output_file.write(f"{owner}\n")
+    repo.stage(path)
+    repo.file_metadata_set(path, ["owner", owner])
+    return repo
+
+
+def file_metadata_values(repo: Lore, path: str) -> dict[str, str]:
+    events = parse_jsonl(repo.file_metadata_get(path, json=True), "metadata")
+    return {event["key"]: event["value"]["data"] for event in events}
+
+
+def dumped_address(repo: Lore, path: str) -> str:
+    output = repo.file_dump(path=path)
+    return next(line for line in output.splitlines() if line.startswith("Address"))
+
+
+def written_content(repo: Lore, path: str, output: str, **file_write_kwargs) -> str:
+    """The text `lore file write --path path --output output` writes, read as the test wrote it."""
+    repo.file_write(path=path, output=output, **file_write_kwargs)
+    with open(output) as written_file:
+        return written_file.read()
+
+
+def file_history_entries(repo: Lore, path: str) -> list[tuple[str, str]]:
+    """(revision, action) of each `lore file history` entry of `path`, newest first."""
+    history = parse_jsonl(repo.file_history(path, json=True), "fileHistory")
+    return [(entry["revision"], entry["action"]) for entry in history]

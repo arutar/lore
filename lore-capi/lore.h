@@ -18,9 +18,10 @@
 //
 // Return values
 //
-// An operation function returns 0 on success and a non-zero value on error.
-// For a function that takes a callback, the error event passed to the callback
-// gives more information.
+// An operation function returns 0 on success and the error's code, a
+// lore_error_code_t value, on failure. For a function that takes a callback, the
+// Complete event carries the same code in status, and the error's message and
+// trace in error.
 //
 // Strings
 //
@@ -163,31 +164,127 @@ typedef enum lore_revision_resolve_target_t {
   LORE_REVISION_RESOLVE_TARGET_SIGNATURE = 3,
 } lore_revision_resolve_target_t;
 
-// Small discriminator enum for the per-item terminal events of the revision-tree API.
-//
-// Narrower than the general library error code: an event embeds this so a caller can branch on
-// the common cases cheaply, without reading a message. The cost is that it names only six
-// outcomes, so errors outside them arrive as `Internal`. The storage API carries a full
-// [`LoreErrorDetail`] on its per-item events instead, and no longer uses this enum.
-//
-// The values are the error codes themselves, taken from the registry in
-// `lore_base::error`, so a code read from a per-item event means the same
-// thing as the code on `Complete.status`. This enum names the subset a
-// per-item event can carry; it is not a second numbering.
+// The error codes Lore reports, each named after the error that carries it: the values of a
+// `Complete` event's `status`, of a synchronous call's return value and of
+// `lore_error_detail_t.error_code`.
 //
 typedef enum lore_error_code_t {
   // No error; the operation succeeded.
   LORE_ERROR_CODE_NONE = 0,
   // The arguments supplied to the operation were invalid.
   LORE_ERROR_CODE_INVALID_ARGUMENTS = 3,
-  // A content-addressable object could not be found in any store.
-  LORE_ERROR_CODE_ADDRESS_NOT_FOUND = 80,
-  // An internal error occurred.
-  LORE_ERROR_CODE_INTERNAL = -1,
+  // A path is not valid.
+  LORE_ERROR_CODE_INVALID_PATH = 4,
+  // An address is not valid.
+  LORE_ERROR_CODE_INVALID_ADDRESS = 5,
+  // A path does not name a link.
+  LORE_ERROR_CODE_NOT_A_LINK = 6,
+  // A path does not name a layer.
+  LORE_ERROR_CODE_NOT_A_LAYER = 7,
+  // A node was reached as the child of a node that is not its parent.
+  LORE_ERROR_CODE_INVALID_NODE_HIERARCHY = 8,
+  // The operation is not supported.
+  LORE_ERROR_CODE_NOT_SUPPORTED = 9,
+  // The caller is not authenticated.
+  LORE_ERROR_CODE_NOT_AUTHENTICATED = 16,
+  // The caller is not authorized to access the repository.
+  LORE_ERROR_CODE_NOT_AUTHORIZED = 17,
+  // No token is stored.
+  LORE_ERROR_CODE_TOKEN_NOT_FOUND = 18,
+  // The operation requires write access.
+  LORE_ERROR_CODE_WRITE_REQUIRED = 19,
+  // The connection to the server was lost.
+  LORE_ERROR_CODE_DISCONNECTED = 28,
+  // The remote could not be reached.
+  LORE_ERROR_CODE_NOT_CONNECTED = 29,
+  // The server is in maintenance mode.
+  LORE_ERROR_CODE_MAINTENANCE = 30,
   // The backing store is overloaded; the caller should retry later.
   LORE_ERROR_CODE_SLOW_DOWN = 31,
+  // No Lore service could be reached or started, so the operation did not run.
+  LORE_ERROR_CODE_SERVICE_UNAVAILABLE = 32,
+  // The caller left or timed out, so the operation stopped.
+  LORE_ERROR_CODE_CANCELLED = 33,
+  // Nothing is staged for commit.
+  LORE_ERROR_CODE_NOTHING_STAGED = 40,
+  // The branch's latest revision has moved on; sync to bring in its new revisions.
+  LORE_ERROR_CODE_BRANCH_ADVANCED = 41,
+  // The branch history is divergent.
+  LORE_ERROR_CODE_DIVERGENT = 42,
+  // A path is still in conflict.
+  LORE_ERROR_CODE_CONFLICT = 43,
+  // Local modifications prevent the operation.
+  LORE_ERROR_CODE_LOCAL_MODIFICATIONS = 44,
+  // The resource is locked by someone else.
+  LORE_ERROR_CODE_LOCK_NOT_OWNED = 45,
+  // The new metadata is identical to the original.
+  LORE_ERROR_CODE_IDENTICAL_METADATA = 46,
+  // A protected branch can't be archived.
+  LORE_ERROR_CODE_DELETE_PROTECTED = 47,
+  // The current branch can't be archived.
+  LORE_ERROR_CODE_DELETE_CURRENT = 48,
+  // The repository's default branch can't be archived.
+  LORE_ERROR_CODE_DELETE_DEFAULT = 49,
+  // A mount the operation must change is busy.
+  LORE_ERROR_CODE_MOUNTS_BUSY = 51,
+  // The remote branch of a link has revisions the local branch does not.
+  LORE_ERROR_CODE_LINK_DIVERGENT = 52,
+  // The mounts of a linked repository disagree on their revision, branch or flags.
+  LORE_ERROR_CODE_LINK_PINS_DIVERGE = 53,
+  // A repository rename may have stopped after its checks passed; run it again to complete it.
+  LORE_ERROR_CODE_REPOSITORY_RENAME_INCOMPLETE = 54,
+  // The target repository is already used in a layer.
+  LORE_ERROR_CODE_ALREADY_LINKED = 56,
+  // The branch already exists.
+  LORE_ERROR_CODE_BRANCH_ALREADY_EXISTS = 57,
+  // A repository already exists at the path.
+  LORE_ERROR_CODE_REPOSITORY_ALREADY_EXISTS = 58,
+  // A requested item was not found.
+  LORE_ERROR_CODE_NOT_FOUND = 79,
+  // A content-addressable object could not be found in any store.
+  LORE_ERROR_CODE_ADDRESS_NOT_FOUND = 80,
+  // A payload could not be found with its hash.
+  LORE_ERROR_CODE_PAYLOAD_NOT_FOUND = 81,
+  // A file path could not be resolved to a tracked node or found in the file system.
+  LORE_ERROR_CODE_FILE_NOT_FOUND = 82,
+  // A node was not found.
+  LORE_ERROR_CODE_NODE_NOT_FOUND = 83,
+  // A link was not found.
+  LORE_ERROR_CODE_LINK_NOT_FOUND = 84,
+  // No link is mounted at the path.
+  LORE_ERROR_CODE_LINK_PATH_NOT_FOUND = 85,
+  // A layer was not found.
+  LORE_ERROR_CODE_LAYER_NOT_FOUND = 86,
+  // A branch was not found.
+  LORE_ERROR_CODE_BRANCH_NOT_FOUND = 87,
+  // A revision was not found.
+  LORE_ERROR_CODE_REVISION_NOT_FOUND = 88,
+  // A repository was not found.
+  LORE_ERROR_CODE_REPOSITORY_NOT_FOUND = 89,
+  // No shared store exists at the path.
+  LORE_ERROR_CODE_SHARED_STORE_NOT_FOUND = 90,
+  // A lock does not exist.
+  LORE_ERROR_CODE_LOCK_NOT_FOUND = 91,
+  // A plugin was not found.
+  LORE_ERROR_CODE_PLUGIN_NOT_FOUND = 92,
+  // No commit identity is configured.
+  LORE_ERROR_CODE_MISSING_IDENTITY = 110,
+  // No remote is configured.
+  LORE_ERROR_CODE_NO_REMOTE = 111,
+  // A plugin's configuration is not valid.
+  LORE_ERROR_CODE_PLUGIN_CONFIG_ERROR = 112,
+  // A plugin failed to initialize.
+  LORE_ERROR_CODE_PLUGIN_INIT_ERROR = 113,
   // A size bound refused the operation, such as a name over its length bound.
   LORE_ERROR_CODE_OVERSIZED = 118,
+  // A history search reached its maximum depth.
+  LORE_ERROR_CODE_MAX_HISTORY_SEARCH_DEPTH = 119,
+  // Compression would be inefficient.
+  LORE_ERROR_CODE_INEFFICIENT_COMPRESSION = 120,
+  // Lore has been shut down.
+  LORE_ERROR_CODE_SHUT_DOWN = 193,
+  // An internal error occurred.
+  LORE_ERROR_CODE_INTERNAL = -1,
 } lore_error_code_t;
 
 // Whether the external root of a global data directory can be used.
@@ -427,14 +524,6 @@ typedef struct lore_string_t {
   uintptr_t length;
 } lore_string_t;
 
-// Data for an error event.
-typedef struct lore_error_event_data_t {
-  // The error code, matching one of the error codes.
-  uint32_t error_type;
-  // The underlying error message.
-  struct lore_string_t error_inner;
-} lore_error_event_data_t;
-
 // One captured trace entry, carried across the FFI boundary as structured
 // data.
 //
@@ -487,7 +576,8 @@ typedef struct lore_trace_location_array_t {
 //
 // [`MAX_TRACE_DEPTH`]: lore_error_set::MAX_TRACE_DEPTH
 typedef struct lore_error_detail_t {
-  // The error's error code. `0` on success; `-1` for an internal error.
+  // The error's code, a `lore_error_code_t` value: `0` on success, `-1` for an internal
+  // error.
   int32_t error_code;
   // The error message, taken from the error's `Display` output. Empty on
   // success.
@@ -499,7 +589,7 @@ typedef struct lore_error_detail_t {
 
 // Data for a completion event, marking the end of an operation.
 typedef struct lore_complete_event_data_t {
-  // The completion status code of the operation.
+  // `0` on success, or the failure's `lore_error_code_t` value.
   int32_t status;
   // The error detail for the operation. The empty default detail on
   // success; the populated detail on failure.
@@ -1660,7 +1750,9 @@ typedef struct lore_file_stage_revision_event_data_t {
   struct lore_hash_t revision;
 } lore_file_stage_revision_event_data_t;
 
-// Data for the event emitted for each file affected by a stage operation.
+// Data for the event emitted for each file affected by a stage operation. For a deleted
+// directory, it is emitted for each file the view shows below it, and for none the view leaves
+// out.
 typedef struct lore_file_stage_file_event_data_t {
   // Previous path of the file, when it was moved, relative to the root of the working tree.
   struct lore_string_t from_path;
@@ -2085,7 +2177,7 @@ typedef struct lore_repository_list_entry_event_data_t {
   struct lore_string_t name;
 } lore_repository_list_entry_event_data_t;
 
-// Event data describing an instance — used for both listing and prune notifications.
+// Event data describing an instance registration, for listing and prune notifications.
 typedef struct lore_repository_instance_event_data_t {
   // Identifier of the instance
   struct lore_instance_id_t instance_id;
@@ -2101,7 +2193,8 @@ typedef struct lore_repository_instance_event_data_t {
   // the path no longer exists on disk, 2 when the path holds a repository
   // whose `.lore/instance` names a different instance (superseded by a
   // re-create or re-clone), 3 when the path holds no readable
-  // `.lore/instance` at all
+  // `.lore/instance` at all, 4 when the registration's data is missing from
+  // the local store or malformed, which leaves every other field zero or empty
   uint8_t stale;
 } lore_repository_instance_event_data_t;
 
@@ -2729,9 +2822,9 @@ typedef struct lore_shared_store_list_item_t {
   struct lore_string_t remote_url;
   // Path to the shared store on disk.
   struct lore_string_t store_path;
-  // Paths to instances using the shared store
+  // Paths to instances using the shared store, empty for a store listed without its instances.
   struct lore_string_array_t instance_paths;
-  // Ids of instances using the shared store
+  // Ids of instances using the shared store, empty for a store listed without its instances.
   struct lore_instance_id_array_t instance_ids;
 } lore_shared_store_list_item_t;
 
@@ -2929,7 +3022,8 @@ typedef struct lore_revision_tree_resolve_path_complete_event_data_t {
   lore_repository_id_t repository;
   // Revision the resolved node belongs to.
   struct lore_hash_t revision;
-  // The outcome of the call.
+  // The outcome: on a failure of the State, any code of the State's error set, while
+  // `Complete` reports the verb's own code.
   enum lore_error_code_t error_code;
 } lore_revision_tree_resolve_path_complete_event_data_t;
 
@@ -2995,7 +3089,8 @@ typedef struct lore_revision_tree_node_info_event_data_t {
   struct lore_address_t address;
   // The preserved file id of the node.
   struct lore_context_t file_id;
-  // The outcome of the call.
+  // The outcome: on a failure of the State, any code of the State's error set, while
+  // `Complete` reports the verb's own code.
   enum lore_error_code_t error_code;
 } lore_revision_tree_node_info_event_data_t;
 
@@ -3026,7 +3121,8 @@ typedef struct lore_revision_tree_add_complete_event_data_t {
   uint64_t entry_id;
   // The newly-added node.
   lore_node_id_t node_id;
-  // The outcome of the call.
+  // The outcome: on a failure of the State, any code of the State's error set, while
+  // `Complete` reports the verb's own code.
   enum lore_error_code_t error_code;
 } lore_revision_tree_add_complete_event_data_t;
 
@@ -3038,7 +3134,8 @@ typedef struct lore_revision_tree_delete_complete_event_data_t {
   // How many nodes the entry's subtree removed, staged and discarded
   // together. Zero on failure, whatever part of the subtree was removed.
   uint64_t node_count;
-  // The outcome of the call.
+  // The outcome: on a failure of the State, any code of the State's error set, while
+  // `Complete` reports the verb's own code.
   enum lore_error_code_t error_code;
 } lore_revision_tree_delete_complete_event_data_t;
 
@@ -3051,7 +3148,8 @@ typedef struct lore_revision_tree_modify_complete_event_data_t {
   uint64_t entry_id;
   // The modified node.
   lore_node_id_t node_id;
-  // The outcome of the call.
+  // The outcome: on a failure of the State, any code of the State's error set, while
+  // `Complete` reports the verb's own code.
   enum lore_error_code_t error_code;
 } lore_revision_tree_modify_complete_event_data_t;
 
@@ -3063,7 +3161,8 @@ typedef struct lore_revision_tree_move_complete_event_data_t {
   uint64_t entry_id;
   // The moved node.
   lore_node_id_t node_id;
-  // The outcome of the call.
+  // The outcome: on a failure of the State, any code of the State's error set, while
+  // `Complete` reports the verb's own code.
   enum lore_error_code_t error_code;
 } lore_revision_tree_move_complete_event_data_t;
 
@@ -3072,7 +3171,8 @@ typedef struct lore_revision_tree_move_complete_event_data_t {
 typedef struct lore_revision_tree_metadata_set_complete_event_data_t {
   // Correlation id of the entry this reports, not of the call.
   uint64_t entry_id;
-  // The outcome of the call.
+  // The outcome: the code of the failure that ended it, while `Complete` reports the
+  // verb's own code.
   enum lore_error_code_t error_code;
 } lore_revision_tree_metadata_set_complete_event_data_t;
 
@@ -3130,7 +3230,8 @@ typedef struct lore_revision_tree_list_children_begin_event_data_t {
   lore_repository_id_t repository;
   // Revision the listed children belong to.
   struct lore_hash_t revision;
-  // The outcome of the call.
+  // The outcome: on a failure of the State, any code of the State's error set, while
+  // `Complete` reports the verb's own code.
   enum lore_error_code_t error_code;
 } lore_revision_tree_list_children_begin_event_data_t;
 
@@ -3156,7 +3257,8 @@ typedef struct lore_revision_tree_info_event_data_t {
   struct lore_string_t author_identity;
   // The number of metadata keys on the revision.
   uint32_t metadata_key_count;
-  // The outcome of the call.
+  // The outcome: the code of the failure that ended it, while `Complete` reports the
+  // verb's own code.
   enum lore_error_code_t error_code;
 } lore_revision_tree_info_event_data_t;
 
@@ -3813,14 +3915,15 @@ typedef struct lore_revision_graph_branch_pushed_event_data_t {
 
 // An event delivered to a callback. Each variant names a kind of event and
 // carries the data for that event.
+//
+// A new variant goes last, so that every other variant keeps its value, and
+// its encoding in the messages of the Lore service, which name an event by
+// its position in this list.
 enum lore_event_id_t {
   // A progress update.
   LORE_EVENT_PROGRESS,
-  // An error encountered during an operation. A terminal failure is
-  // reported on the `Complete` event in its `error` field.
-  LORE_EVENT_ERROR,
   // An operation completed.
-  LORE_EVENT_COMPLETE,
+  LORE_EVENT_COMPLETE = 2,
   // A metadata key and value.
   LORE_EVENT_METADATA,
   // A log message.
@@ -4335,7 +4438,6 @@ typedef struct lore_event_t {
   lore_event_tag_t tag;
   union {
     struct lore_progress_event_data_t progress;
-    struct lore_error_event_data_t error;
     struct lore_complete_event_data_t complete;
     struct lore_metadata_event_data_t metadata;
     struct lore_log_event_data_t log;
@@ -4634,6 +4736,17 @@ typedef struct lore_global_args_t {
   // Use in-memory stores instead of file-backed stores. No store data is
   // read from or written to the .urc/immutable/ and .urc/mutable/ directories.
   uint8_t in_memory;
+  // Leave the local stores' background index writes until the call ends: the delayed flushes
+  // of their changes, and the writes of eviction passes, which still run and evict in memory.
+  // The call's own flushes write as they do without it. The call writes what it held back
+  // before it completes, whether or not it fails, and a call that otherwise succeeds fails if
+  // that write fails. A storage handle opened with this holds the writes back until its close,
+  // whose flush writes them. In a process that serves several calls, such as the Lore service,
+  // a store holds back the background writes of every call on it while a call or handle that
+  // set this is active. If the process stops meanwhile, the index loses the changes held back:
+  // content fetched from the remote is fetched again, and content written locally stays in the
+  // packfiles unindexed until compaction reclaims it.
+  uint8_t no_background_flush;
   // Maximum number of files being processed in parallel
   uint64_t file_count_limit;
   // Maximum total size of all files being processed in parallel
@@ -5333,7 +5446,7 @@ typedef struct lore_lock_file_release_args_t {
 
 // Arguments for adding a new link to a linked repository at the given path.
 typedef struct lore_link_add_args_t {
-  // Link repository URL
+  // Name, ID or URL of a repository on this repository's remote
   struct lore_string_t link;
   // Path within this repository where the link is added
   struct lore_string_t link_path;
@@ -5385,7 +5498,8 @@ typedef struct lore_repository_clone_args_t {
   struct lore_string_t view;
   // Clone without any files
   uint8_t bare;
-  // Use direct file write
+  // Use direct file write: on Windows, write each file of one fragment past the file cache. A
+  // clone writes every file at its own path either way
   uint8_t direct_file_write;
   // Which VFS to use, if any
   enum lore_vfs_type_t vfs;
@@ -5415,6 +5529,17 @@ typedef struct lore_repository_clone_args_t {
   uint8_t dependency_recursive;
   // Maximum dependency traversal depth. 0 means unlimited.
   uint32_t dependency_depth_limit;
+  // Fragments the new instance's store holds before eviction removes some; 0 uses the default
+  // of 2000000. The periodic eviction pass treats a value below 1048576 as 1048576. Ignored, with
+  // a warning, where the instance uses a shared store, whose limits are set in its
+  // `shared_store.toml`, and where `no_tracking`, or the `in_memory` of `lore_global_args_t`, is
+  // set
+  uint64_t max_capacity;
+  // Bytes the new instance's store holds before compaction reclaims space; 0 uses the default of
+  // 10 GiB. Ignored, with a warning, where the instance uses a shared store, whose limits are set
+  // in its `shared_store.toml`, and where `no_tracking`, or the `in_memory` of
+  // `lore_global_args_t`, is set
+  uint64_t max_size;
 } lore_repository_clone_args_t;
 
 // Arguments for retrieving metadata about a remote repository.
@@ -5460,6 +5585,16 @@ typedef struct lore_repository_delete_args_t {
   // the repository at `repository_path`
   struct lore_string_t repository_url;
 } lore_repository_delete_args_t;
+
+// Arguments for renaming a remote repository.
+typedef struct lore_repository_rename_args_t {
+  // URL of the remote repository to rename, or a name or ID resolved against the remote of
+  // the repository at `repository_path`. Empty renames the repository of the instance at
+  // `repository_path`.
+  struct lore_string_t repository_url;
+  // The new name of the repository.
+  struct lore_string_t name;
+} lore_repository_rename_args_t;
 
 // Arguments for waiting on outstanding asynchronous repository tasks.
 typedef struct lore_repository_flush_args_t {
@@ -5781,7 +5916,8 @@ typedef struct lore_shared_store_info_args_t {
 
 // Arguments for listing the registry of shared stores.
 typedef struct lore_shared_store_list_args_t {
-  // Whether to load each shared store to search for each instance using it.
+  // Whether to load each shared store to search for each instance using it. A store another
+  // process still holds after the listing's wait is listed without its instances.
   uint8_t include_instances;
 } lore_shared_store_list_args_t;
 
@@ -7195,7 +7331,6 @@ uint32_t lore_event_type(const struct lore_event_t *event);
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7225,7 +7360,6 @@ void lore_auth_user_info_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7256,7 +7390,6 @@ void lore_auth_login_with_token_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7291,7 +7424,6 @@ void lore_auth_list_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_auth_logout(const struct lore_global_args_t *globals,
@@ -7316,7 +7448,6 @@ void lore_auth_logout_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_auth_clear(const struct lore_global_args_t *globals,
@@ -7335,6 +7466,10 @@ void lore_auth_clear_async(const struct lore_global_args_t *globals,
 // authorization, use `lore_auth_user_info` which queries the remote
 // authentication service.
 //
+// When `user_ids` is empty, the call resolves the current user:
+// `globals.identity`, else the identity the repository's config records, else
+// the first identity stored for the auth endpoint.
+//
 // When `auth_endpoint` is empty, the call reads it from the repository's
 // remote, and first refreshes an expired stored token unless the call
 // supplies a token. The refresh contacts the auth service and replaces the
@@ -7344,6 +7479,18 @@ void lore_auth_clear_async(const struct lore_global_args_t *globals,
 // with a locally stored token also with an `AUTH_USER_TOKEN` event. Its
 // `token` holds the cached identity token when `with_identity_token` is set,
 // and is empty otherwise.
+//
+// With `globals.offline` set, or `globals.local` set and neither
+// `with_access_token` nor `with_claims`, and an empty `auth_endpoint`, the
+// identities resolve without connecting and no token is refreshed, from the
+// stored logins whose token the domain of the repository's remote accepts. A
+// supplied token is used as given. Without `globals.identity` or a recorded
+// identity, the current user is the first such login at each auth URL. Without
+// a supplied token, the call fails with `NotAuthenticated` when the current
+// user has no such login, and a requested identity without one gets no
+// `AUTH_USER_TOKEN` event. With `with_access_token` or `with_claims`, a
+// `globals.offline` call fails with `NoRemote` after resolving the identities
+// as above.
 //
 // When `with_access_token` or `with_claims` is set, the call requires a
 // repository and additionally emits one `AUTH_IDENTITY` event for the
@@ -7366,7 +7513,6 @@ void lore_auth_clear_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7403,7 +7549,6 @@ void lore_auth_local_user_info_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7431,7 +7576,6 @@ int32_t lore_auth_login_interactive(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7459,7 +7603,6 @@ void lore_auth_login_interactive_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7491,7 +7634,6 @@ int32_t lore_branch_create(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7523,7 +7665,6 @@ void lore_branch_create_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7549,7 +7690,6 @@ int32_t lore_branch_info(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7575,7 +7715,6 @@ void lore_branch_info_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7608,7 +7747,6 @@ int32_t lore_branch_diff(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7641,7 +7779,6 @@ void lore_branch_diff_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7667,7 +7804,6 @@ int32_t lore_branch_protect(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7693,7 +7829,6 @@ void lore_branch_protect_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7719,7 +7854,6 @@ int32_t lore_branch_unprotect(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7734,6 +7868,10 @@ void lore_branch_unprotect_async(const struct lore_global_args_t *globals,
 
 // Archive a branch in the repository.
 //
+// The current branch is refused with `LORE_ERROR_CODE_DELETE_CURRENT`. A layer or link that
+// fails to archive the branch is logged as a warning naming its repository, and the call does
+// not fail for it.
+//
 // # Events
 //
 // Events are delivered via the callback as `lore_event_t`. Use the `tag` field to identify the event type.
@@ -7745,7 +7883,6 @@ void lore_branch_unprotect_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7771,7 +7908,6 @@ int32_t lore_branch_archive(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7799,7 +7935,6 @@ void lore_branch_archive_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7827,7 +7962,6 @@ int32_t lore_branch_list(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7855,7 +7989,6 @@ void lore_branch_list_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7883,7 +8016,6 @@ int32_t lore_branch_merge_abort(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7911,7 +8043,6 @@ void lore_branch_merge_abort_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7938,7 +8069,6 @@ int32_t lore_branch_merge_conflicts_list(const struct lore_global_args_t *global
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7965,7 +8095,6 @@ void lore_branch_merge_conflicts_list_async(const struct lore_global_args_t *glo
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -7992,7 +8121,6 @@ int32_t lore_branch_merge_unresolve(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8019,7 +8147,6 @@ void lore_branch_merge_unresolve_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8060,7 +8187,6 @@ int32_t lore_branch_merge_into(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8101,7 +8227,6 @@ void lore_branch_merge_into_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8129,7 +8254,6 @@ int32_t lore_branch_merge_resolve(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8157,7 +8281,6 @@ void lore_branch_merge_resolve_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8185,7 +8308,6 @@ int32_t lore_branch_merge_resolve_mine(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8213,7 +8335,6 @@ void lore_branch_merge_resolve_mine_async(const struct lore_global_args_t *globa
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8241,7 +8362,6 @@ int32_t lore_branch_merge_resolve_theirs(const struct lore_global_args_t *global
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8269,7 +8389,6 @@ void lore_branch_merge_resolve_theirs_async(const struct lore_global_args_t *glo
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8297,7 +8416,6 @@ int32_t lore_branch_merge_restart(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8325,7 +8443,6 @@ void lore_branch_merge_restart_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8363,7 +8480,6 @@ int32_t lore_branch_merge_start(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8401,7 +8517,6 @@ void lore_branch_merge_start_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8434,7 +8549,6 @@ int32_t lore_branch_switch(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8467,7 +8581,6 @@ void lore_branch_switch_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8493,7 +8606,6 @@ int32_t lore_branch_reset(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8519,7 +8631,6 @@ void lore_branch_reset_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8545,7 +8656,6 @@ int32_t lore_branch_latest_list(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8571,7 +8681,6 @@ void lore_branch_latest_list_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8607,7 +8716,6 @@ int32_t lore_branch_push(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8673,7 +8781,6 @@ void lore_branch_metadata_clear_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8699,7 +8806,6 @@ int32_t lore_file_info(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8725,7 +8831,6 @@ void lore_file_info_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8751,7 +8856,6 @@ int32_t lore_file_diff(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8777,7 +8881,6 @@ void lore_file_diff_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8803,7 +8906,6 @@ int32_t lore_file_hash(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8829,7 +8931,6 @@ void lore_file_hash_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8855,7 +8956,6 @@ int32_t lore_file_history(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8896,7 +8996,6 @@ void lore_file_history_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8922,7 +9021,6 @@ int32_t lore_file_audit(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8948,7 +9046,6 @@ void lore_file_audit_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -8974,7 +9071,6 @@ int32_t lore_file_metadata_clear(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9000,7 +9096,6 @@ void lore_file_metadata_clear_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9026,7 +9121,6 @@ int32_t lore_file_metadata_get(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9052,7 +9146,6 @@ void lore_file_metadata_get_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9078,7 +9171,6 @@ int32_t lore_file_metadata_list(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9104,7 +9196,6 @@ void lore_file_metadata_list_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_file_metadata_set(const struct lore_global_args_t *globals,
@@ -9124,7 +9215,6 @@ int32_t lore_file_metadata_set(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 void lore_file_metadata_set_async(const struct lore_global_args_t *globals,
@@ -9144,7 +9234,6 @@ void lore_file_metadata_set_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9176,7 +9265,6 @@ int32_t lore_file_reset(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9208,7 +9296,6 @@ void lore_file_reset_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9239,7 +9326,6 @@ int32_t lore_file_reset_to_last_merged(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9270,7 +9356,6 @@ void lore_file_reset_to_last_merged_async(const struct lore_global_args_t *globa
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9301,7 +9386,6 @@ int32_t lore_file_stage(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9332,7 +9416,6 @@ void lore_file_stage_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9361,7 +9444,6 @@ int32_t lore_file_stage_merge(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9390,7 +9472,6 @@ void lore_file_stage_merge_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9419,7 +9500,6 @@ int32_t lore_file_stage_move(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9451,7 +9531,6 @@ void lore_file_stage_move_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9478,7 +9557,6 @@ int32_t lore_file_dirty(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9517,7 +9595,6 @@ void lore_file_dirty_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9547,7 +9624,6 @@ int32_t lore_file_dirty_move(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9580,7 +9656,6 @@ void lore_file_dirty_move_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_file_dirty_copy(const struct lore_global_args_t *globals,
@@ -9600,7 +9675,6 @@ int32_t lore_file_dirty_copy(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 void lore_file_dirty_copy_async(const struct lore_global_args_t *globals,
@@ -9620,7 +9694,6 @@ void lore_file_dirty_copy_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9650,7 +9723,6 @@ int32_t lore_file_unstage(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9680,7 +9752,6 @@ void lore_file_unstage_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9706,7 +9777,6 @@ int32_t lore_file_write(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9732,7 +9802,6 @@ void lore_file_write_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9758,7 +9827,6 @@ int32_t lore_file_obliterate(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9784,7 +9852,6 @@ void lore_file_obliterate_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9810,7 +9877,6 @@ int32_t lore_file_dump(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9834,7 +9900,6 @@ void lore_file_dump_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9858,7 +9923,6 @@ int32_t lore_file_dependency_add(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9884,7 +9948,6 @@ void lore_file_dependency_add_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9908,7 +9971,6 @@ int32_t lore_file_dependency_remove(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9934,7 +9996,6 @@ void lore_file_dependency_remove_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9960,7 +10021,6 @@ int32_t lore_file_dependency_list(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -9990,7 +10050,6 @@ void lore_file_dependency_list_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10017,7 +10076,6 @@ int32_t lore_lock_file_acquire(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10044,7 +10102,6 @@ void lore_lock_file_acquire_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10071,7 +10128,6 @@ int32_t lore_lock_file_status(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10102,7 +10158,6 @@ void lore_lock_file_status_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10129,7 +10184,6 @@ int32_t lore_lock_file_query(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10156,7 +10210,6 @@ void lore_lock_file_query_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10183,7 +10236,6 @@ int32_t lore_lock_file_release(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10210,7 +10262,6 @@ void lore_lock_file_release_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10239,7 +10290,6 @@ int32_t lore_link_add(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10268,7 +10318,6 @@ void lore_link_add_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10294,7 +10343,6 @@ int32_t lore_link_remove(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10320,7 +10368,6 @@ void lore_link_remove_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10346,7 +10393,6 @@ int32_t lore_link_info(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10372,7 +10418,6 @@ void lore_link_info_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10398,7 +10443,6 @@ int32_t lore_link_list(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10424,7 +10468,6 @@ void lore_link_list_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10450,7 +10493,6 @@ int32_t lore_link_list_staged(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10476,7 +10518,6 @@ void lore_link_list_staged_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10502,7 +10543,6 @@ int32_t lore_link_update(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10534,7 +10574,6 @@ void lore_link_update_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10545,6 +10584,7 @@ void lore_link_update_async(const struct lore_global_args_t *globals,
 // | `LORE_EVENT_REPOSITORY_CLONE_BEGIN` | `lore_repository_clone_begin_event_data_t` | Emitted when clone begins, includes remote URL and target path |
 // | `LORE_EVENT_REPOSITORY_CLONE_PROGRESS` | `lore_repository_clone_progress_event_data_t` | Emitted periodically during clone with progress data |
 // | `LORE_EVENT_REPOSITORY_CLONE_END` | `lore_repository_clone_end_event_data_t` | Emitted only when the clone succeeds; `LORE_EVENT_COMPLETE` reports the outcome of every clone |
+// | `LORE_EVENT_REPOSITORY_INSTANCE` | `lore_repository_instance_event_data_t` | Over a shared store, one for each instance registration the clone prunes, as `lore_repository_instance_prune` reports it |
 // | `LORE_EVENT_REVISION_SYNC_TARGET` | `lore_revision_sync_target_event_data_t` | Emitted after resolving the target revision to sync during clone |
 // | `LORE_EVENT_REVISION_SYNC_FILE` | `lore_revision_sync_file_event_data_t` | Emitted for each file written during initial sync |
 // | `LORE_EVENT_REVISION_SYNC_PROGRESS` | `lore_revision_sync_progress_event_data_t` | Emitted periodically during initial file sync |
@@ -10568,7 +10608,6 @@ int32_t lore_repository_clone(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10579,6 +10618,7 @@ int32_t lore_repository_clone(const struct lore_global_args_t *globals,
 // | `LORE_EVENT_REPOSITORY_CLONE_BEGIN` | `lore_repository_clone_begin_event_data_t` | Emitted when clone begins, includes remote URL and target path |
 // | `LORE_EVENT_REPOSITORY_CLONE_PROGRESS` | `lore_repository_clone_progress_event_data_t` | Emitted periodically during clone with progress data |
 // | `LORE_EVENT_REPOSITORY_CLONE_END` | `lore_repository_clone_end_event_data_t` | Emitted only when the clone succeeds; `LORE_EVENT_COMPLETE` reports the outcome of every clone |
+// | `LORE_EVENT_REPOSITORY_INSTANCE` | `lore_repository_instance_event_data_t` | Over a shared store, one for each instance registration the clone prunes, as `lore_repository_instance_prune` reports it |
 // | `LORE_EVENT_REVISION_SYNC_TARGET` | `lore_revision_sync_target_event_data_t` | Emitted after resolving the target revision to sync during clone |
 // | `LORE_EVENT_REVISION_SYNC_FILE` | `lore_revision_sync_file_event_data_t` | Emitted for each file written during initial sync |
 // | `LORE_EVENT_REVISION_SYNC_PROGRESS` | `lore_revision_sync_progress_event_data_t` | Emitted periodically during initial file sync |
@@ -10602,7 +10642,6 @@ void lore_repository_clone_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10628,7 +10667,6 @@ int32_t lore_repository_info(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10654,7 +10692,6 @@ void lore_repository_info_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10683,7 +10720,6 @@ int32_t lore_repository_dump(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10712,7 +10748,6 @@ void lore_repository_dump_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10738,7 +10773,6 @@ int32_t lore_repository_create(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10764,7 +10798,6 @@ void lore_repository_create_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_repository_delete(const struct lore_global_args_t *globals,
@@ -10784,11 +10817,66 @@ int32_t lore_repository_delete(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 void lore_repository_delete_async(const struct lore_global_args_t *globals,
                                   const struct lore_repository_delete_args_t *args,
+                                  struct lore_event_callback_config_t callback);
+
+// Rename a Lore repository on the remote server to `name` in `lore_repository_rename_args_t`.
+// The repository keeps its ID.
+//
+// `repository_url` is a URL, or a repository name or ID on the remote of the repository at
+// `repository_path` in `lore_global_args_t`. An ID is sent as is. When `repository_url` is
+// empty, the call renames the repository of the instance at `repository_path`.
+//
+// On failure, `status` is error code 9 (not supported) when the remote cannot rename
+// repositories, and error code 54 (rename incomplete) when the remote can have stopped the
+// rename after its checks passed. Error codes 28 (disconnected) and 31 (slow down) can also
+// follow a rename the remote started. The same rename, made again, completes it, and a rename
+// back to the old name abandons it. A repeat that fails because another repository holds the
+// new name is abandoned in the same way, by a rename back to the old name. Make the repeat by URL and ID, `<remote_url>/<id>`, which
+// the message of error code 54 names: a repeat by the old name can fail, since the remote can
+// already have released that name. A caller that must repeat without reading the message
+// addresses the repository by URL and ID from the start, as `lore_repository_info` reports
+// them.
+//
+// # Events
+//
+// Events are delivered via the callback as `lore_event_t`. Use the `tag` field to identify the event type.
+//
+// ## Standard Events
+//
+// These events are emitted by all interface functions:
+//
+// | Tag | Data Type | Description |
+// |-----|-----------|-------------|
+// | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
+// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
+// | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
+// | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
+int32_t lore_repository_rename(const struct lore_global_args_t *globals,
+                               const struct lore_repository_rename_args_t *args,
+                               struct lore_event_callback_config_t callback);
+
+// Asynchronous version of `lore_repository_rename`.
+//
+// # Events
+//
+// Events are delivered via the callback as `lore_event_t`. Use the `tag` field to identify the event type.
+//
+// ## Standard Events
+//
+// These events are emitted by all interface functions:
+//
+// | Tag | Data Type | Description |
+// |-----|-----------|-------------|
+// | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
+// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
+// | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
+// | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
+void lore_repository_rename_async(const struct lore_global_args_t *globals,
+                                  const struct lore_repository_rename_args_t *args,
                                   struct lore_event_callback_config_t callback);
 
 // Flush pending repository state to persistent storage.
@@ -10804,7 +10892,6 @@ void lore_repository_delete_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_repository_flush(const struct lore_global_args_t *globals,
@@ -10824,7 +10911,6 @@ int32_t lore_repository_flush(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 void lore_repository_flush_async(const struct lore_global_args_t *globals,
@@ -10844,7 +10930,6 @@ void lore_repository_flush_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_repository_gc(const struct lore_global_args_t *globals,
@@ -10864,7 +10949,6 @@ int32_t lore_repository_gc(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 void lore_repository_gc_async(const struct lore_global_args_t *globals,
@@ -10889,7 +10973,6 @@ void lore_repository_gc_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_repository_release(const struct lore_global_args_t *globals,
@@ -10909,7 +10992,6 @@ int32_t lore_repository_release(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 void lore_repository_release_async(const struct lore_global_args_t *globals,
@@ -10929,7 +11011,6 @@ void lore_repository_release_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10955,7 +11036,6 @@ int32_t lore_layer_add(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -10981,7 +11061,6 @@ void lore_layer_add_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_layer_remove(const struct lore_global_args_t *globals,
@@ -11001,7 +11080,6 @@ int32_t lore_layer_remove(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 void lore_layer_remove_async(const struct lore_global_args_t *globals,
@@ -11021,7 +11099,6 @@ void lore_layer_remove_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11047,7 +11124,6 @@ int32_t lore_layer_list(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11073,7 +11149,6 @@ void lore_layer_list_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11099,7 +11174,6 @@ int32_t lore_repository_list(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11125,7 +11199,6 @@ void lore_repository_list_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11153,7 +11226,6 @@ int32_t lore_repository_status(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11181,7 +11253,6 @@ void lore_repository_status_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11207,7 +11278,6 @@ int32_t lore_repository_store_immutable_query(const struct lore_global_args_t *g
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11233,7 +11303,6 @@ void lore_repository_store_immutable_query_async(const struct lore_global_args_t
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11262,7 +11331,6 @@ int32_t lore_repository_verify_state(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11291,7 +11359,6 @@ void lore_repository_verify_state_async(const struct lore_global_args_t *globals
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11322,7 +11389,6 @@ int32_t lore_revision_commit(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11353,7 +11419,6 @@ void lore_revision_commit_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11380,7 +11445,6 @@ int32_t lore_revision_amend(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11407,7 +11471,6 @@ void lore_revision_amend_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11435,7 +11498,6 @@ int32_t lore_revision_info(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11463,7 +11525,6 @@ void lore_revision_info_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11490,7 +11551,6 @@ int32_t lore_revision_diff(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11517,7 +11577,6 @@ void lore_revision_diff_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11543,7 +11602,6 @@ int32_t lore_revision_find(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11569,7 +11627,6 @@ void lore_revision_find_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11596,7 +11653,6 @@ int32_t lore_revision_history(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11623,7 +11679,6 @@ void lore_revision_history_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11664,7 +11719,6 @@ int32_t lore_revision_restore(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11705,7 +11759,6 @@ void lore_revision_restore_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11731,7 +11784,6 @@ int32_t lore_revision_metadata_clear(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11757,7 +11809,6 @@ void lore_revision_metadata_clear_async(const struct lore_global_args_t *globals
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11783,7 +11834,6 @@ int32_t lore_revision_metadata_get(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11809,7 +11859,6 @@ void lore_revision_metadata_get_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11835,7 +11884,6 @@ int32_t lore_revision_metadata_list(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11861,7 +11909,6 @@ void lore_revision_metadata_list_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_revision_metadata_set(const struct lore_global_args_t *globals,
@@ -11881,7 +11928,6 @@ int32_t lore_revision_metadata_set(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 void lore_revision_metadata_set_async(const struct lore_global_args_t *globals,
@@ -11901,7 +11947,6 @@ void lore_revision_metadata_set_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11942,7 +11987,6 @@ int32_t lore_revision_sync(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -11984,7 +12028,6 @@ void lore_revision_sync_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12021,7 +12064,6 @@ int32_t lore_revision_bisect(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12058,7 +12100,6 @@ void lore_revision_bisect_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12095,7 +12136,6 @@ int32_t lore_revision_cherry_pick(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12132,7 +12172,6 @@ void lore_revision_cherry_pick_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12169,7 +12208,6 @@ int32_t lore_revision_revert(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12206,7 +12244,6 @@ void lore_revision_revert_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12234,7 +12271,6 @@ int32_t lore_revision_revert_abort(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12262,7 +12298,6 @@ void lore_revision_revert_abort_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12289,7 +12324,6 @@ int32_t lore_revision_revert_unresolve(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12316,7 +12350,6 @@ void lore_revision_revert_unresolve_async(const struct lore_global_args_t *globa
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12344,7 +12377,6 @@ int32_t lore_revision_revert_restart(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12372,7 +12404,6 @@ void lore_revision_revert_restart_async(const struct lore_global_args_t *globals
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12399,7 +12430,6 @@ int32_t lore_revision_revert_resolve(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12426,7 +12456,6 @@ void lore_revision_revert_resolve_async(const struct lore_global_args_t *globals
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12453,7 +12482,6 @@ int32_t lore_revision_revert_resolve_mine(const struct lore_global_args_t *globa
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12480,7 +12508,6 @@ void lore_revision_revert_resolve_mine_async(const struct lore_global_args_t *gl
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12507,7 +12534,6 @@ int32_t lore_revision_revert_resolve_theirs(const struct lore_global_args_t *glo
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12534,7 +12560,6 @@ void lore_revision_revert_resolve_theirs_async(const struct lore_global_args_t *
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12560,7 +12585,6 @@ int32_t lore_shared_store_create(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12586,7 +12610,6 @@ void lore_shared_store_create_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12612,7 +12635,6 @@ int32_t lore_shared_store_info(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12638,7 +12660,6 @@ void lore_shared_store_info_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12646,7 +12667,7 @@ void lore_shared_store_info_async(const struct lore_global_args_t *globals,
 //
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
-// | `LORE_EVENT_SHARED_STORE_LIST` | `lore_shared_store_list_event_data_t` | Emitted on success carrying every registered shared store, and the instances using each when `include_instances` is set |
+// | `LORE_EVENT_SHARED_STORE_LIST` | `lore_shared_store_list_event_data_t` | Emitted on success carrying every registered shared store, and the instances using each when `include_instances` is set, leaving out an instance registration the store can't read, which a `LORE_EVENT_LOG` warning counts. A store another process still holds once the listing has waited 3 seconds in all is carried without its instances, and a `LORE_EVENT_LOG` warning names it. With `include_instances` set and a service running in another process, the listing runs in the service, so this includes a store the calling process holds |
 int32_t lore_shared_store_list(const struct lore_global_args_t *globals,
                                const struct lore_shared_store_list_args_t *args,
                                struct lore_event_callback_config_t callback);
@@ -12664,7 +12685,6 @@ int32_t lore_shared_store_list(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -12672,7 +12692,7 @@ int32_t lore_shared_store_list(const struct lore_global_args_t *globals,
 //
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
-// | `LORE_EVENT_SHARED_STORE_LIST` | `lore_shared_store_list_event_data_t` | Emitted on success carrying every registered shared store, and the instances using each when `include_instances` is set |
+// | `LORE_EVENT_SHARED_STORE_LIST` | `lore_shared_store_list_event_data_t` | Emitted on success carrying every registered shared store, and the instances using each when `include_instances` is set, leaving out an instance registration the store can't read, which a `LORE_EVENT_LOG` warning counts. A store another process still holds once the listing has waited 3 seconds in all is carried without its instances, and a `LORE_EVENT_LOG` warning names it. With `include_instances` set and a service running in another process, the listing runs in the service, so this includes a store the calling process holds |
 void lore_shared_store_list_async(const struct lore_global_args_t *globals,
                                   const struct lore_shared_store_list_args_t *args,
                                   struct lore_event_callback_config_t callback);
@@ -12690,7 +12710,6 @@ void lore_shared_store_list_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_shared_store_set_use_automatically(const struct lore_global_args_t *globals,
@@ -12710,7 +12729,6 @@ int32_t lore_shared_store_set_use_automatically(const struct lore_global_args_t 
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 void lore_shared_store_set_use_automatically_async(const struct lore_global_args_t *globals,
@@ -12729,7 +12747,6 @@ void lore_shared_store_set_use_automatically_async(const struct lore_global_args
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_STORAGE_OPENED` | `lore_storage_opened_event_data_t` | Emitted on success carrying the opened handle id |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | `status` is `0` on success or the error code on failure |
 int32_t lore_storage_open(const struct lore_global_args_t *globals,
                           const struct lore_storage_open_args_t *args,
@@ -12767,7 +12784,6 @@ void lore_storage_put_async(const struct lore_global_args_t *globals,
 // | `LORE_EVENT_STORAGE_GET_HEADER` | `lore_storage_get_header_event_data_t` | Size of the item's reassembled content, emitted before any DATA events |
 // | `LORE_EVENT_STORAGE_GET_DATA` | `lore_storage_get_data_event_data_t` | Payload bytes — valid only during the callback invocation |
 // | `LORE_EVENT_STORAGE_GET_ITEM_COMPLETE` | `lore_storage_get_item_complete_event_data_t` | Terminal per-item event |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | `status` is `0` iff every item succeeded, else the error code |
 int32_t lore_storage_get(const struct lore_global_args_t *globals,
                          const struct lore_storage_get_args_t *args,
@@ -12807,7 +12823,6 @@ void lore_storage_get_async(const struct lore_global_args_t *globals,
 // | `LORE_EVENT_STORAGE_GET_DATA` | `lore_storage_get_data_event_data_t` | Payload bytes — valid only during the callback invocation. One event per item, or one per leaf fragment when `streaming` is set |
 // | `LORE_EVENT_STORAGE_GET_FRAGMENT` | `lore_storage_get_fragment_event_data_t` | One leaf fragment and its payload, in content order, when `fragments` is set. The payload is valid only during the callback invocation |
 // | `LORE_EVENT_STORAGE_GET_ITEM_COMPLETE` | `lore_storage_get_item_complete_event_data_t` | Terminal per-item event |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | `status` is `0` iff every item succeeded, else the error code |
 int32_t lore_storage_get_resolved(const struct lore_global_args_t *globals,
                                   const struct lore_storage_get_resolved_args_t *args,
@@ -12922,7 +12937,6 @@ void lore_storage_flush_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_STORAGE_GET_METADATA_ITEM_COMPLETE` | `lore_storage_get_metadata_item_complete_event_data_t` | Per-item terminal event |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | `status` is `0` iff every item succeeded, else the error code |
 int32_t lore_storage_get_metadata(const struct lore_global_args_t *globals,
                                   const struct lore_storage_get_metadata_args_t *args,
@@ -13197,7 +13211,6 @@ void lore_storage_put_file_resolved_async(const struct lore_global_args_t *globa
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_STORAGE_GET_ITEM_COMPLETE` | `lore_storage_get_item_complete_event_data_t` | Terminal per-item event, carrying the resolved address |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | `status` is `0` iff every item succeeded, else the error code |
 int32_t lore_storage_get_file_resolved(const struct lore_global_args_t *globals,
                                        const struct lore_storage_get_file_resolved_args_t *args,
@@ -13254,7 +13267,6 @@ void lore_storage_upload_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_service_start(const struct lore_global_args_t *globals,
@@ -13274,7 +13286,6 @@ int32_t lore_service_start(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 void lore_service_start_async(const struct lore_global_args_t *globals,
@@ -13301,7 +13312,6 @@ void lore_service_start_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_service_stop(const struct lore_global_args_t *globals,
@@ -13321,7 +13331,6 @@ int32_t lore_service_stop(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 void lore_service_stop_async(const struct lore_global_args_t *globals,
@@ -13353,7 +13362,6 @@ void lore_service_stop_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -13380,7 +13388,6 @@ int32_t lore_service_status(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -13412,7 +13419,6 @@ void lore_service_status_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_service_set_executable(const struct lore_global_args_t *globals,
@@ -13432,7 +13438,6 @@ int32_t lore_service_set_executable(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 void lore_service_set_executable_async(const struct lore_global_args_t *globals,
@@ -13468,7 +13473,6 @@ void lore_service_set_executable_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_service_set_external_directory(const struct lore_global_args_t *globals,
@@ -13488,7 +13492,6 @@ int32_t lore_service_set_external_directory(const struct lore_global_args_t *glo
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 void lore_service_set_external_directory_async(const struct lore_global_args_t *globals,
@@ -13512,7 +13515,6 @@ void lore_service_set_external_directory_async(const struct lore_global_args_t *
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 int32_t lore_service_set_use_automatically(const struct lore_global_args_t *globals,
@@ -13532,7 +13534,6 @@ int32_t lore_service_set_use_automatically(const struct lore_global_args_t *glob
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 void lore_service_set_use_automatically_async(const struct lore_global_args_t *globals,
@@ -13552,7 +13553,6 @@ void lore_service_set_use_automatically_async(const struct lore_global_args_t *g
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -13583,7 +13583,6 @@ int32_t lore_notification_subscribe(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -13614,7 +13613,6 @@ void lore_notification_subscribe_async(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -13640,7 +13638,6 @@ int32_t lore_notification_unsubscribe(const struct lore_global_args_t *globals,
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
 // | `LORE_EVENT_LOG` | `lore_log_event_data_t` | Diagnostic messages throughout execution |
-// | `LORE_EVENT_ERROR` | `lore_error_event_data_t` | Emitted for a non-fatal error during the operation |
 // | `LORE_EVENT_COMPLETE` | `lore_complete_event_data_t` | Always emitted at the end; `status` is `0` on success or the error code on failure |
 // | `LORE_EVENT_END` | `lore_end_event_data_t` | Always emitted after `COMPLETE` to signal callback termination |
 //
@@ -13705,12 +13702,18 @@ int32_t lore_shutdown(void);
 // pool's final size, so no knob can lift the process above a limit set here.
 // Retired per-pool variables are ignored outright.
 //
-// With no limit, every pool gets its ideal. With one, the pools are scaled to
-// fit by the largest-remainder method: each is granted its proportional share
-// of the limit, and the threads left over by rounding go to the pools with the
-// largest remainders. A pool never drops below 2 threads, since a starved pool
-// can deadlock work another pool waits on. That floor outranks the limit, so a
-// limit below 8 yields 8.
+// With no limit, every pool gets its ideal. With one, the blocking pool and the
+// net pool keep their ideals, and the worker pool and the io pool split the rest
+// evenly; on a server, whose net pool asks for one thread per processor, the net
+// pool shares the split too. No pool in the split gets more than its ideal: what
+// it leaves goes evenly to the others, and odd threads go to the worker pool
+// first, then the net pool, then the io pool. Where the split would leave a pool
+// fewer than 2, those pools keep 2 each and the pools outside the split are
+// scaled into the rest by the largest-remainder method: each is granted its
+// proportional share, and the threads left over by rounding go to the pools with
+// the largest remainders. A pool never drops below
+// 2 threads, since a starved pool can deadlock work another pool waits on. That
+// floor outranks the limit, so a limit below 8 yields 8.
 //
 // # What is not counted
 //
@@ -13779,7 +13782,10 @@ void lore_repository_metadata_clear_async(const struct lore_global_args_t *globa
                                           const struct lore_repository_metadata_clear_args_t *args,
                                           struct lore_event_callback_config_t callback);
 
-// List the tracked instances of the repository.
+// List the registered instances of the repository, each through a
+// `LORE_EVENT_REPOSITORY_INSTANCE` event. A registration whose data is missing
+// from the local store, malformed, or can't be read is left out, and a
+// `LORE_EVENT_LOG` warning counts those left out of each kind.
 int32_t lore_repository_instance_list(const struct lore_global_args_t *globals,
                                       const struct lore_repository_instance_list_args_t *args,
                                       struct lore_event_callback_config_t callback);
@@ -13792,8 +13798,13 @@ void lore_repository_instance_list_async(const struct lore_global_args_t *global
 // Remove stale instances of the repository: those whose path no longer
 // exists, those whose path holds no checkout, and those whose path now holds
 // a repository naming a different current instance. Each removed instance is
-// reported through a `RepositoryInstance` event whose `stale` field gives the
-// reason.
+// reported through a `LORE_EVENT_REPOSITORY_INSTANCE` event whose `stale` field
+// gives the reason. Also removes each registration whose data is missing from
+// the local store or malformed, reported with `stale` 4, and, where it finds any,
+// then registers the current instance again where it has no registration. Under
+// `globals.dry_run`
+// the call removes and registers nothing and still reports each such
+// registration.
 int32_t lore_repository_instance_prune(const struct lore_global_args_t *globals,
                                        const struct lore_repository_instance_prune_args_t *args,
                                        struct lore_event_callback_config_t callback);
@@ -13851,8 +13862,9 @@ void lore_repository_instance_move_async(const struct lore_global_args_t *global
 // - error code 3 (invalid arguments) for a destination that exists before the clone moves into
 //   place, names no directory, has no parent directory that can be resolved, has a name too
 //   long for the directory the clone writes beside it, is nested in another instance or a
-//   virtual clone's mount, or is where another live instance is registered, and where a path
-//   inside the copy is taken while the clone writes it;
+//   virtual clone's mount, or is where another live instance is registered (a registration the
+//   local store can't read, which a `LORE_EVENT_LOG` warning counts, names none), and where a
+//   path inside the copy is taken while the clone writes it;
 // - error code 4 (invalid path) where the instance's Lore directory lies outside its tree;
 // - error code 118 (oversized) for a copy the destination has no room for, and where a volume the
 //   clone writes fills while it runs;
@@ -14029,19 +14041,21 @@ void lore_revision_tree_node_path_async(const struct lore_global_args_t *globals
                                         const struct lore_revision_tree_node_path_args_t *args,
                                         struct lore_event_callback_config_t callback);
 
-// Add a batch of nodes to a loaded revision tree. An entry parents onto an
-// existing node or onto an earlier entry, so one call builds a subtree. Every
-// entry is checked before any node is created, so one bad entry rejects the
-// call and creates nothing; the reason names the offending entry's batch index,
-// which a caller leaving `entry_id` at zero has no other way to identify. The entry
-// and the call report `LORE_ERROR_CODE_OVERSIZED` for a name longer than a node
-// name may be, and `LORE_ERROR_CODE_INVALID_ARGUMENTS` for any other bad entry. A failure
-// after those checks pass reports `LORE_ERROR_CODE_INTERNAL` and may leave part of
-// the batch created. An entry the tree gave up on under load, in its checks or
-// after, reports `LORE_ERROR_CODE_SLOW_DOWN` instead, and so do the entries parented
-// onto it. The load is heavy concurrent change on the handle, or a store asking the
-// tree to slow down, and a caller can retry. The batch reports
-// `LORE_ERROR_CODE_SLOW_DOWN` where every failed entry did.
+// Add a batch of nodes to a loaded revision tree. An entry parents onto an existing
+// node or onto an earlier entry, so one call builds a subtree. Every entry is
+// checked before any node is created, so one bad entry rejects the call and creates
+// nothing; the reason names the offending entry's batch index, which a caller
+// leaving `entry_id` at zero has no other way to identify. The entry and the call
+// report `LORE_ERROR_CODE_OVERSIZED` for a name longer than a node name may be, and
+// `LORE_ERROR_CODE_INVALID_ARGUMENTS` for any other bad entry. A failure after those
+// checks pass fails its entry with the code of the State's failure, and the call
+// with `LORE_ERROR_CODE_INTERNAL`, and may leave part of the batch created. An entry
+// the tree gave up on under load, in its checks or after, reports
+// `LORE_ERROR_CODE_SLOW_DOWN` instead. An entry parented onto a failed entry reports that
+// entry's code. The
+// load is heavy concurrent change on the handle, or a store asking the tree to slow
+// down, and a caller can retry. The batch reports `LORE_ERROR_CODE_SLOW_DOWN` where
+// every failed entry did.
 //
 // A link entry's target revision is not resolved here, so a link naming a
 // revision that cannot be read is accepted and fails only when something later
@@ -14067,15 +14081,16 @@ void lore_revision_tree_add_async(const struct lore_global_args_t *globals,
                                   struct lore_event_callback_config_t callback);
 
 // Remove a batch of subtrees from a loaded revision tree. Each entry names a
-// subtree root and removes it whole, transitive children included. Every entry
-// is checked before any node is touched, so one bad entry rejects the call and
-// leaves every subtree in place; the reason names the offending entry's batch
-// index, which a caller leaving `entry_id` at zero has no other way to
-// identify. A failure after those checks pass reports `LORE_ERROR_CODE_INTERNAL`
-// and may leave part of the batch removed. An entry the tree gave up on under
-// load, heavy concurrent change on the handle or a store asking it to slow down,
-// reports `LORE_ERROR_CODE_SLOW_DOWN` instead, which a caller can retry. The batch
-// reports `LORE_ERROR_CODE_SLOW_DOWN` where every failed entry did.
+// subtree root and removes it whole, transitive children included. Every entry is
+// checked before any node is touched, so one bad entry rejects the call and leaves
+// every subtree in place; the reason names the offending entry's batch index,
+// which a caller leaving `entry_id` at zero has no other way to identify. A
+// failure after those checks pass fails its entry with the code of the State's
+// failure, and the call with `LORE_ERROR_CODE_INTERNAL`, and may leave part of the
+// batch removed. An entry the tree gave up on under load, heavy concurrent change
+// on the handle or a store asking it to slow down, reports
+// `LORE_ERROR_CODE_SLOW_DOWN` instead, which a caller can retry. The batch reports
+// `LORE_ERROR_CODE_SLOW_DOWN` where every failed entry did.
 //
 // A node the loaded revision holds is **staged** for deletion and stays in the
 // tree: it keeps its name and its place among its siblings, still lists through
@@ -14125,15 +14140,16 @@ void lore_revision_tree_delete_async(const struct lore_global_args_t *globals,
                                      const struct lore_revision_tree_delete_args_t *args,
                                      struct lore_event_callback_config_t callback);
 
-// Rewrite a batch of file nodes' `mode`, `size` and `address` in a loaded
-// revision tree. Every entry is checked before any node is rewritten, so one bad
-// entry rejects the call and leaves every target untouched; the reason names the
+// Rewrite a batch of file nodes' `mode`, `size` and `address` in a loaded revision
+// tree. Every entry is checked before any node is rewritten, so one bad entry
+// rejects the call and leaves every target untouched; the reason names the
 // offending entry's batch index, which a caller leaving `entry_id` at zero has no
-// other way to identify. A failure after those checks pass reports
-// `LORE_ERROR_CODE_INTERNAL` and may leave part of the batch rewritten. An entry
-// the tree gave up on under load, a store asking it to slow down, reports
-// `LORE_ERROR_CODE_SLOW_DOWN` instead, which a caller can retry. The batch reports
-// `LORE_ERROR_CODE_SLOW_DOWN` where every failed entry did.
+// other way to identify. A failure after those checks pass fails its entry with
+// the code of the State's failure, and the call with `LORE_ERROR_CODE_INTERNAL`,
+// and may leave part of the batch rewritten. An entry the tree gave up on under
+// load, a store asking it to slow down, reports `LORE_ERROR_CODE_SLOW_DOWN`
+// instead, which a caller can retry. The batch reports `LORE_ERROR_CODE_SLOW_DOWN`
+// where every failed entry did.
 //
 // Only a file is modifiable: a directory's size and address are derived at
 // commit and a link's address is its target. A zero `address.context` preserves
@@ -14164,16 +14180,17 @@ void lore_revision_tree_modify_async(const struct lore_global_args_t *globals,
 
 // Move a batch of nodes to new parents and/or new names in a loaded revision tree. An
 // entry naming the node's current parent renames it where it is. Every entry is checked
-// before any node is moved, so one bad entry rejects the call and leaves every node
-// where it was; the reason names the offending entry's batch index, which a caller
-// leaving `entry_id` at zero has no other way to identify. The entry and the call report
+// before any node is moved, so one bad entry rejects the call and leaves every node where
+// it was; the reason names the offending entry's batch index, which a caller leaving
+// `entry_id` at zero has no other way to identify. The entry and the call report
 // `LORE_ERROR_CODE_OVERSIZED` for a name longer than a node name may be, and
-// `LORE_ERROR_CODE_INVALID_ARGUMENTS` for any other bad entry. A failure after those checks
-// pass reports `LORE_ERROR_CODE_INTERNAL` and may leave earlier entries applied. An entry
-// the tree gave up on under load, in its checks or after, reports
-// `LORE_ERROR_CODE_SLOW_DOWN` instead. The load is heavy concurrent change on the handle,
-// or a store asking the tree to slow down, and a caller can retry. The batch reports
-// `LORE_ERROR_CODE_SLOW_DOWN` where every failed entry did.
+// `LORE_ERROR_CODE_INVALID_ARGUMENTS` for any other bad entry. A failure after those
+// checks pass fails its entry with the code of the State's failure, and the call with
+// `LORE_ERROR_CODE_INTERNAL`, and may leave earlier entries applied. An entry the tree
+// gave up on under load, in its checks or after, reports `LORE_ERROR_CODE_SLOW_DOWN`
+// instead. The load is heavy concurrent change on the handle, or a store asking the tree
+// to slow down, and a caller can retry. The batch reports `LORE_ERROR_CODE_SLOW_DOWN`
+// where every failed entry did.
 //
 // A move keeps the node: its node id, its `file_id` and its children come along, and
 // the change is recorded as a move rather than as a deletion and an addition, so the
@@ -14362,9 +14379,9 @@ void lore_revision_tree_metadata_clear_async(const struct lore_global_args_t *gl
 // edits. The one failure that still poisons the handle is a restore that itself
 // fails, which reports `INTERNAL` saying so. When the branch had advanced,
 // `new_tip_hash` on the terminal carries that tip, which is also how a caller tells
-// that failure apart: neither a tip collision nor an empty commit has a
-// `lore_error_code_t` of its own, so both report `INTERNAL` with the reason in the
-// completion detail — the same codes the file-system commit returns.
+// that failure apart: the call's error set holds neither `BRANCH_ADVANCED` nor
+// `NOTHING_STAGED`, which the file-system commit reports, so a tip collision and an
+// empty commit both report `INTERNAL` with the reason in the completion detail.
 //
 // **A merge revision.** `options.parent_other` names a second parent, the merged
 // revision; zero commits a revision with one parent. The loaded revision is always the
@@ -14474,9 +14491,10 @@ void lore_revision_graph_revision_resolve_async(const struct lore_global_args_t 
 // `lore_revision_graph_revision_resolve` describes. It sends a `LORE_EVENT_REVISION_GRAPH_BRANCH`
 // for each location where the name names a branch. The local store's record is followed by a
 // `LORE_EVENT_REVISION_GRAPH_INSTANCE` for each repository instance registered in the local store
-// whose current branch it is, stale ones included; the call retires no registration. Each location
-// the call consults ends with its `LORE_EVENT_REVISION_GRAPH_LOCATION_COMPLETE`, whose `records`
-// counts the instance records too.
+// whose current branch it is, stale ones included; the call retires no registration, and leaves
+// out each instance whose registration the local store can't read, which a `LORE_EVENT_LOG`
+// warning counts. Each location the call consults ends with its
+// `LORE_EVENT_REVISION_GRAPH_LOCATION_COMPLETE`, whose `records` counts the instance records too.
 //
 // | Tag | Data Type | Description |
 // |-----|-----------|-------------|
@@ -14824,12 +14842,14 @@ void lore_revision_graph_branch_create_async(const struct lore_global_args_t *gl
 // instances registered in the local store have the branch as their current branch. A live one, an
 // instance record with `stale` 0, refuses the call before either location changes: the call sends
 // a `LORE_EVENT_REVISION_GRAPH_INSTANCE` for each live one and fails, with no location complete
-// event. At the remote, the call refuses a protected branch, the repository's default branch and a
-// branch without a branch point before it archives anything, also with no location complete event,
-// and then archives the branch at the remote. In the local store, it settles a restore that
-// stopped part way, then archives the branch, refusing a protected branch, the default branch and
-// a branch without a branch point there too. A location where the branch is archived already,
-// once such a restore is settled, reports it archived and writes nothing more.
+// event. An instance whose registration the local store can't read refuses nothing; a
+// `LORE_EVENT_LOG` warning counts such instances. At the remote, the call refuses a protected
+// branch, the repository's default branch and a branch without a branch point before it archives
+// anything, also with no location complete event, and then archives the branch at the remote. In
+// the local store, it settles a restore that stopped part way, then archives the branch, refusing
+// a protected branch, the default branch and a branch without a branch point there too. A
+// location where the branch is archived already, once such a restore is settled, reports it
+// archived and writes nothing more.
 //
 // Each location that holds the branch sends a `LORE_EVENT_REVISION_GRAPH_BRANCH` with the branch's
 // record and `archived` set, then its `LORE_EVENT_REVISION_GRAPH_LOCATION_COMPLETE`, which carries
@@ -14918,8 +14938,9 @@ void lore_revision_graph_branch_archive_async(const struct lore_global_args_t *g
 // point, or a hash whose revision number on the branch the remote's revision list answers with
 // that hash, which takes one more request. A local sync with an all-zero target writes nothing,
 // and sends a `LORE_EVENT_REVISION_GRAPH_INSTANCE` for each repository instance registered in the
-// local store whose current branch is `args->branch`. The call ignores `globals.force` and
-// `globals.dry_run`, and `lore_storage_close` waits for it.
+// local store whose current branch is `args->branch`, leaving out each instance whose
+// registration the local store can't read, which a `LORE_EVENT_LOG` warning counts. The call
+// ignores `globals.force` and `globals.dry_run`, and `lore_storage_close` waits for it.
 //
 // `LORE_EVENT_REVISION_GRAPH_BRANCH_SYNCED` fires before `LORE_EVENT_COMPLETE` once the call has
 // read the local latest, on success and on failure alike. On success its `local_latest` is the new

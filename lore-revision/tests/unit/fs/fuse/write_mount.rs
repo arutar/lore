@@ -3329,13 +3329,19 @@ async fn a_create_racing_an_attach_of_the_same_name_answers_eexist() {
         .await;
 }
 
-/// The provider over a fresh rebuild of `instance` under a view excluding `globs`.
-async fn viewed_provider(instance: &Instance, globs: &[&str]) -> Arc<FuseFilesystem> {
-    use fuse_fixture::RepositoryContextCreationArgsExt as _;
+/// A filter whose view leaves out `globs`.
+fn view_excluding(globs: &[&str]) -> lore_revision::filter::Filter {
     let mut filter = lore_revision::filter::Filter::default();
     for glob in globs {
         filter.view.add_exclusion(glob).expect("filter exclusion");
     }
+    filter
+}
+
+/// The provider over a fresh rebuild of `instance` under a view excluding `globs`.
+async fn viewed_provider(instance: &Instance, globs: &[&str]) -> Arc<FuseFilesystem> {
+    use fuse_fixture::RepositoryContextCreationArgsExt as _;
+    let filter = view_excluding(globs);
     let viewed = Arc::new(lore_revision::repository::RepositoryContext::new(
         fuse_fixture::default_repository_creation_args(
             instance.fixture.immutable.clone(),
@@ -5962,6 +5968,7 @@ async fn a_lookup_among_file_inodes_of_another_node_adopts_the_first() {
                             size: 0,
                             executable: false,
                             local: false,
+                            source: 0,
                         },
                         mtime: 0,
                         node: tmp_node,
@@ -6027,6 +6034,7 @@ async fn a_tracked_inode_adopting_a_local_node_keeps_its_content_until_a_write_r
                         size: tracked.1,
                         executable: false,
                         local: false,
+                        source: 0,
                     },
                     mtime: 0,
                     node: tmp_node,
@@ -6090,6 +6098,7 @@ async fn a_lookup_takes_the_inode_of_its_node_over_a_stale_file_inode_ahead_of_i
                         size: 0,
                         executable: false,
                         local: false,
+                        source: 0,
                     },
                     mtime: 0,
                     node: k_node,
@@ -9770,6 +9779,7 @@ async fn a_write_racing_a_commit_flip_lands_in_a_live_local_file() {
                                 size: committed.size,
                                 executable: false,
                                 local: false,
+                                source: 0,
                             };
                         }
                         std::fs::remove_file(&host).expect("unlink write/f.txt");
@@ -9866,6 +9876,7 @@ async fn a_write_racing_a_flip_and_a_new_copy_up_lands_in_the_new_host_file() {
                             size: committed.size,
                             executable: false,
                             local: false,
+                            source: 0,
                         };
                     }
                     std::fs::remove_file(&host).expect("unlink write/f.txt");
@@ -11417,6 +11428,751 @@ async fn a_status_leaves_an_identical_file_respelled_local() {
             drop(fs);
             let remounted = provider(&instance).await;
             assert_eq!(listed(&remounted, ROOT_INO).await, vec!["A.txt"]);
+        })
+        .await;
+}
+
+/// An instance over `Dir/a.txt`, `Dir/b.txt`, `Dir/Sub/c.txt` and `Top.txt`, and a provider
+/// over it in which `Dir` was renamed to `dir`.
+async fn directory_renamed_in_case() -> (Instance, Arc<FuseFilesystem>) {
+    let instance = Instance::new(&[
+        ("Dir/a.txt", b"Dir/a.txt"),
+        ("Dir/b.txt", b"Dir/b.txt"),
+        ("Dir/Sub/c.txt", b"Dir/Sub/c.txt"),
+        ("Top.txt", b"Top.txt"),
+    ])
+    .await;
+    let fs = provider(&instance).await;
+    lookup(&fs, ROOT_INO, "Dir").await.expect("Dir");
+    fs.rename(&request(), ROOT_INO, b"Dir", ROOT_INO, b"dir", 0)
+        .await
+        .expect("rename Dir to dir");
+    (instance, fs)
+}
+
+/// Stages the whole tree through `fs` with `case_change`, as `lore stage --case` does.
+async fn stage_case_through(
+    instance: &Instance,
+    fs: &Arc<FuseFilesystem>,
+    case_change: lore_revision::stage::StageCaseChange,
+) -> Result<Hash, String> {
+    stage_hosts_through(
+        instance,
+        fs,
+        vec![instance.fixture.path.clone()],
+        Default::default(),
+        lore_revision::stage::StageOptions {
+            case_change,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// The paths `revision` holds.
+async fn revision_paths(instance: &Instance, revision: Hash) -> Vec<String> {
+    revision_tree(instance, revision)
+        .await
+        .into_keys()
+        .collect()
+}
+
+/// A directory renamed in case through the mount is staged as a move under the case handling
+/// that renames, and the commit's revision spells it as the mount does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_renaming_in_case_records_a_directory_renamed_in_case() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let (instance, fs) = directory_renamed_in_case().await;
+            assert_eq!(
+                status_of(&instance, &fs).await,
+                [(
+                    "dir".to_string(),
+                    (lore_revision::interface::LoreFileAction::Move, true)
+                )]
+                .into()
+            );
+            let renamed = [
+                "Top.txt",
+                "dir",
+                "dir/Sub",
+                "dir/Sub/c.txt",
+                "dir/a.txt",
+                "dir/b.txt",
+            ];
+
+            let staged = stage_case_through(
+                &instance,
+                &fs,
+                lore_revision::stage::StageCaseChange::Rename,
+            )
+            .await
+            .expect("stage");
+            assert_eq!(revision_paths(&instance, staged).await, renamed);
+            let committed = commit_staged(&instance, &fs).await.expect("commit");
+            assert_eq!(revision_paths(&instance, committed).await, renamed);
+            assert_eq!(listed(&fs, ROOT_INO).await, ["Top.txt", "dir"]);
+        })
+        .await;
+}
+
+/// A directory renamed in case through the mount is staged as a move after a status marked it:
+/// the stage's diff keeps the marks below it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_renaming_in_case_after_a_status_records_a_directory_renamed_in_case() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let (instance, fs) = directory_renamed_in_case().await;
+            changed_paths_holding_token(&instance, &fs).await;
+
+            let staged = stage_case_through(
+                &instance,
+                &fs,
+                lore_revision::stage::StageCaseChange::Rename,
+            )
+            .await
+            .expect("stage");
+            assert_eq!(
+                revision_paths(&instance, staged).await,
+                [
+                    "Top.txt",
+                    "dir",
+                    "dir/Sub",
+                    "dir/Sub/c.txt",
+                    "dir/a.txt",
+                    "dir/b.txt"
+                ]
+            );
+        })
+        .await;
+}
+
+/// A file moved and a file edited below a directory renamed in case through the mount commit at
+/// the directory's new spelling under the case handling that renames.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_renaming_in_case_records_a_move_below_a_directory_renamed_in_case() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let (instance, fs) = directory_renamed_in_case().await;
+            let sub = lookup_path(&fs, "dir/Sub").await.expect("dir/Sub");
+            lookup(&fs, sub, "c.txt").await.expect("c.txt");
+            fs.rename(&request(), sub, b"c.txt", sub, b"d.txt", 0)
+                .await
+                .expect("rename c.txt to d.txt");
+            let a = lookup_path(&fs, "dir/a.txt").await.expect("dir/a.txt");
+            fs.write(&request(), a, 0, 0, b"edited!!!", 0)
+                .await
+                .expect("write");
+
+            stage_case_through(
+                &instance,
+                &fs,
+                lore_revision::stage::StageCaseChange::Rename,
+            )
+            .await
+            .expect("stage");
+            let committed = commit_staged(&instance, &fs).await.expect("commit");
+            let tree = revision_tree(&instance, committed).await;
+            assert_eq!(
+                tree.keys().collect::<Vec<_>>(),
+                [
+                    "Top.txt",
+                    "dir",
+                    "dir/Sub",
+                    "dir/Sub/d.txt",
+                    "dir/a.txt",
+                    "dir/b.txt"
+                ]
+            );
+            assert_eq!(tree["dir/a.txt"].as_deref(), Some(&b"edited!!!"[..]));
+            assert_eq!(listed(&fs, ROOT_INO).await, ["Top.txt", "dir"]);
+        })
+        .await;
+}
+
+/// A stage under the default case handling refuses a directory renamed in case through the
+/// mount, as it refuses one renamed on an ordinary instance, and stages nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_refuses_a_directory_renamed_in_case_by_default() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let (instance, fs) = directory_renamed_in_case().await;
+
+            assert!(stage_through(&instance, &fs).await.is_err());
+            assert_eq!(
+                status_of(&instance, &fs).await,
+                [(
+                    "dir".to_string(),
+                    (lore_revision::interface::LoreFileAction::Move, true)
+                )]
+                .into()
+            );
+            assert_eq!(listed(&fs, ROOT_INO).await, ["Top.txt", "dir"]);
+        })
+        .await;
+}
+
+/// A file removed, a file created and a file edited in a directory, a status, then the directory
+/// renamed in case through the mount: the commit under the case handling that renames holds the
+/// new spelling, the created and the edited file, and not the removed one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_renaming_in_case_keeps_the_changes_a_status_marked_below_the_directory() {
+    let instance = Instance::new(&[
+        ("Dir/a.txt", b"Dir/a.txt"),
+        ("Dir/b.txt", b"Dir/b.txt"),
+        ("Top.txt", b"Top.txt"),
+    ])
+    .await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            let dir = lookup(&fs, ROOT_INO, "Dir").await.expect("Dir");
+            removed_through(&fs, "Dir/b.txt", false).await;
+            create_with(&fs, dir, "new.txt", b"new").await;
+            let a = lookup(&fs, dir, "a.txt").await.expect("a.txt");
+            fs.write(&request(), a, 0, 0, b"edited!!!", 0)
+                .await
+                .expect("write");
+            changed_paths_holding_token(&instance, &fs).await;
+            fs.rename(&request(), ROOT_INO, b"Dir", ROOT_INO, b"dir", 0)
+                .await
+                .expect("rename Dir to dir");
+
+            stage_case_through(
+                &instance,
+                &fs,
+                lore_revision::stage::StageCaseChange::Rename,
+            )
+            .await
+            .expect("stage");
+            let committed = commit_staged(&instance, &fs).await.expect("commit");
+            let tree = revision_tree(&instance, committed).await;
+            assert_eq!(
+                tree.keys().collect::<Vec<_>>(),
+                ["Top.txt", "dir", "dir/a.txt", "dir/new.txt"]
+            );
+            assert_eq!(tree["dir/a.txt"].as_deref(), Some(&b"edited!!!"[..]));
+        })
+        .await;
+}
+
+/// A reset of a path named in another case than the mount spells it resets the file the mount
+/// holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_of_a_path_named_in_another_case_resets_the_file_the_mount_holds() {
+    let instance = Instance::new(&[("dir/a.txt", b"a"), ("Top.txt", b"t")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            let a = lookup_path(&fs, "dir/a.txt").await.expect("dir/a.txt");
+            fs.write(&request(), a, 0, 0, b"edited", 0)
+                .await
+                .expect("write");
+
+            reset_through(&instance, &fs, &["Dir/A.txt"], None, false)
+                .await
+                .expect("reset");
+            assert_eq!(served_at(&fs, "dir/a.txt").await, b"a");
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+        })
+        .await;
+}
+
+/// An unstage of a path named in another case than the mount spells it unstages the file the
+/// mount holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unstage_of_a_path_named_in_another_case_unstages_the_file_the_mount_holds() {
+    use lore_revision::interface::LoreArray;
+    use lore_revision::interface::LoreString;
+    use lore_revision::repository::RepositoryWriteToken;
+
+    let instance = Instance::new(&[("dir/a.txt", b"a"), ("Top.txt", b"t")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            let a = lookup_path(&fs, "dir/a.txt").await.expect("dir/a.txt");
+            fs.write(&request(), a, 0, 0, b"edited", 0)
+                .await
+                .expect("write");
+            stage_paths_through(&instance, &fs, &["dir/a.txt"])
+                .await
+                .expect("stage");
+
+            let token = RepositoryWriteToken::acquire(&instance.fixture.path).await;
+            lore_revision::file::unstage::unstage(
+                instance.command_context(&fs, Some(token.share())),
+                &token,
+                LoreArray::from_vec(vec![LoreString::from(
+                    &instance.fixture.path.join("Dir/A.txt"),
+                )]),
+                Default::default(),
+            )
+            .await
+            .expect("unstage");
+            drop(token);
+            assert_eq!(
+                status_of(&instance, &fs).await,
+                [(
+                    "dir/a.txt".to_string(),
+                    (lore_revision::interface::LoreFileAction::Keep, true)
+                )]
+                .into()
+            );
+        })
+        .await;
+}
+
+/// A stage of a path named in another case than the mount spells it stages the file the mount
+/// holds, as on an ordinary instance, and the commit records it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_of_a_path_named_in_another_case_stages_the_file_the_mount_holds() {
+    let instance = Instance::new(&[("dir/a.txt", b"a"), ("Top.txt", b"t")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            let a = lookup_path(&fs, "dir/a.txt").await.expect("dir/a.txt");
+            fs.write(&request(), a, 0, 0, b"edited", 0)
+                .await
+                .expect("write");
+
+            stage_paths_through(&instance, &fs, &["Dir/A.txt"])
+                .await
+                .expect("stage");
+            let committed = commit_staged(&instance, &fs).await.expect("commit");
+            let tree = revision_tree(&instance, committed).await;
+            assert_eq!(
+                tree.keys().collect::<Vec<_>>(),
+                ["Top.txt", "dir", "dir/a.txt"]
+            );
+            assert_eq!(tree["dir/a.txt"].as_deref(), Some(&b"edited"[..]));
+        })
+        .await;
+}
+
+/// A directory renamed in case through the mount and back after a status marked it moved stages
+/// it at the revision's spelling.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_directory_renamed_in_case_and_back_after_a_status_stages_it_as_the_revision_spells_it() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let (instance, fs) = directory_renamed_in_case().await;
+            changed_paths_holding_token(&instance, &fs).await;
+            fs.rename(&request(), ROOT_INO, b"dir", ROOT_INO, b"Dir", 0)
+                .await
+                .expect("rename dir to Dir");
+
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+            let staged = stage_through(&instance, &fs).await.expect("stage");
+            assert_eq!(
+                revision_paths(&instance, staged).await,
+                [
+                    "Dir",
+                    "Dir/Sub",
+                    "Dir/Sub/c.txt",
+                    "Dir/a.txt",
+                    "Dir/b.txt",
+                    "Top.txt"
+                ]
+            );
+        })
+        .await;
+}
+
+/// A stage that keeps the revision's case gives a directory renamed in case through the mount the
+/// revision's spelling again, and leaves nothing to commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_keeping_case_serves_a_directory_renamed_in_case_as_the_revision_spells_it() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let (instance, fs) = directory_renamed_in_case().await;
+
+            stage_case_through(&instance, &fs, lore_revision::stage::StageCaseChange::Keep)
+                .await
+                .expect("stage");
+            assert_eq!(listed(&fs, ROOT_INO).await, ["Dir", "Top.txt"]);
+            assert_eq!(lookup(&fs, ROOT_INO, "dir").await, Err(Errno::ENOENT));
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+        })
+        .await;
+}
+
+/// An instance at a revision holding `files` and the empty directories `Dir/Sub/Deep` and
+/// `Dir/Other`, and a provider over it in which `Dir` was renamed to `dir`.
+async fn empty_directories_renamed_in_case(
+    files: &[(&str, &[u8])],
+) -> (Instance, Arc<FuseFilesystem>) {
+    let instance = Instance::new(files).await;
+    let fs = provider(&instance).await;
+    let mkdir = async |parent: u64, name: &[u8]| {
+        fs.mkdir(&request(), parent, name, libc::S_IFDIR | 0o755, 0o022)
+            .await
+            .expect("mkdir")
+            .ino
+    };
+    let dir = match lookup(&fs, ROOT_INO, "Dir").await {
+        Ok(dir) => dir,
+        Err(_) => mkdir(ROOT_INO, b"Dir").await,
+    };
+    let sub = mkdir(dir, b"Sub").await;
+    mkdir(sub, b"Deep").await;
+    mkdir(dir, b"Other").await;
+    let revision = commit_through(&instance, &fs, false).await.expect("commit");
+    let fs = provider_at(&instance, revision).await;
+    lookup(&fs, ROOT_INO, "Dir").await.expect("Dir");
+    fs.rename(&request(), ROOT_INO, b"Dir", ROOT_INO, b"dir", 0)
+        .await
+        .expect("rename Dir to dir");
+    (instance, fs)
+}
+
+/// A directory holding only empty directories, renamed in case through the mount, is staged as a
+/// move under the case handling that renames, and the commit's revision spells it as the mount
+/// does, with every empty directory below it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_renaming_in_case_records_a_directory_holding_only_empty_directories() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let (instance, fs) =
+                empty_directories_renamed_in_case(&[("Top.txt", b"Top.txt")]).await;
+            let renamed = ["Top.txt", "dir", "dir/Other", "dir/Sub", "dir/Sub/Deep"];
+
+            let staged = stage_case_through(
+                &instance,
+                &fs,
+                lore_revision::stage::StageCaseChange::Rename,
+            )
+            .await
+            .expect("stage");
+            assert_eq!(revision_paths(&instance, staged).await, renamed);
+            let committed = commit_staged(&instance, &fs).await.expect("commit");
+            assert_eq!(revision_paths(&instance, committed).await, renamed);
+            assert_eq!(listed(&fs, ROOT_INO).await, ["Top.txt", "dir"]);
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+        })
+        .await;
+}
+
+/// The empty directories beside a file below a directory renamed in case through the mount commit
+/// at the directory's new spelling under the case handling that renames.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_renaming_in_case_records_empty_directories_beside_a_file_below_the_directory() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let (instance, fs) = empty_directories_renamed_in_case(&[
+                ("Dir/a.txt", b"Dir/a.txt"),
+                ("Top.txt", b"Top.txt"),
+            ])
+            .await;
+            let renamed = [
+                "Top.txt",
+                "dir",
+                "dir/Other",
+                "dir/Sub",
+                "dir/Sub/Deep",
+                "dir/a.txt",
+            ];
+
+            let staged = stage_case_through(
+                &instance,
+                &fs,
+                lore_revision::stage::StageCaseChange::Rename,
+            )
+            .await
+            .expect("stage");
+            assert_eq!(revision_paths(&instance, staged).await, renamed);
+            let committed = commit_staged(&instance, &fs).await.expect("commit");
+            assert_eq!(revision_paths(&instance, committed).await, renamed);
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+        })
+        .await;
+}
+
+/// An instance over `Dir/a.txt` and `Top.txt`, and a provider over it in which `Dir/a.txt` was
+/// removed and `Dir` then renamed to `dir`.
+async fn emptied_directory_renamed_in_case() -> (Instance, Arc<FuseFilesystem>) {
+    let instance = Instance::new(&[("Dir/a.txt", b"Dir/a.txt"), ("Top.txt", b"Top.txt")]).await;
+    let fs = provider(&instance).await;
+    removed_through(&fs, "Dir/a.txt", false).await;
+    lookup(&fs, ROOT_INO, "Dir").await.expect("Dir");
+    fs.rename(&request(), ROOT_INO, b"Dir", ROOT_INO, b"dir", 0)
+        .await
+        .expect("rename Dir to dir");
+    (instance, fs)
+}
+
+/// A directory renamed in case through the mount, and a directory below it renamed in case too,
+/// commit at their new spellings under the case handling that renames, with the file below both.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_renaming_in_case_records_directories_renamed_in_case_one_below_the_other() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let (instance, fs) = directory_renamed_in_case().await;
+            let dir = lookup_path(&fs, "dir").await.expect("dir");
+            lookup(&fs, dir, "Sub").await.expect("Sub");
+            fs.rename(&request(), dir, b"Sub", dir, b"sub", 0)
+                .await
+                .expect("rename Sub to sub");
+            let renamed = [
+                "Top.txt",
+                "dir",
+                "dir/a.txt",
+                "dir/b.txt",
+                "dir/sub",
+                "dir/sub/c.txt",
+            ];
+
+            let staged = stage_case_through(
+                &instance,
+                &fs,
+                lore_revision::stage::StageCaseChange::Rename,
+            )
+            .await
+            .expect("stage");
+            assert_eq!(revision_paths(&instance, staged).await, renamed);
+            let committed = commit_staged(&instance, &fs).await.expect("commit");
+            assert_eq!(revision_paths(&instance, committed).await, renamed);
+        })
+        .await;
+}
+
+/// A status reports the file removed below a directory renamed in case through the mount as a
+/// deletion still to stage, beside the directory's move, however the two settle in the diff: over
+/// ten instances, as the diff settles them in either order.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_status_reports_a_removal_below_a_directory_renamed_in_case_as_marked() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let marked: std::collections::BTreeMap<_, _> = [
+                (
+                    "Dir/a.txt".to_string(),
+                    (lore_revision::interface::LoreFileAction::Delete, true),
+                ),
+                (
+                    "dir".to_string(),
+                    (lore_revision::interface::LoreFileAction::Move, true),
+                ),
+            ]
+            .into();
+            for _ in 0..10 {
+                let (instance, fs) = emptied_directory_renamed_in_case().await;
+
+                assert_eq!(status_of(&instance, &fs).await, marked);
+                assert_eq!(status_of(&instance, &fs).await, marked);
+            }
+        })
+        .await;
+}
+
+/// A directory whose only file was removed, then renamed in case through the mount, commits at its
+/// new spelling under the case handling that renames, without the removed file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_renaming_in_case_records_a_directory_emptied_before_its_rename() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let (instance, fs) = emptied_directory_renamed_in_case().await;
+
+            let staged = stage_case_through(
+                &instance,
+                &fs,
+                lore_revision::stage::StageCaseChange::Rename,
+            )
+            .await
+            .expect("stage");
+            assert_eq!(revision_paths(&instance, staged).await, ["Top.txt", "dir"]);
+            let committed = commit_staged(&instance, &fs).await.expect("commit");
+            assert_eq!(
+                revision_paths(&instance, committed).await,
+                ["Top.txt", "dir"]
+            );
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+        })
+        .await;
+}
+
+/// Stages the whole tree through `fs` with `case_change`, as `lore stage --case` does, in a context
+/// whose view leaves out `globs`.
+async fn stage_case_viewed_through(
+    instance: &Instance,
+    fs: &Arc<FuseFilesystem>,
+    globs: &[&str],
+    case_change: lore_revision::stage::StageCaseChange,
+) -> Result<Hash, String> {
+    use fuse_fixture::RepositoryContextCreationArgsExt as _;
+    use lore_revision::interface::LoreArray;
+    use lore_revision::interface::LoreString;
+    use lore_revision::repository::RepositoryWriteToken;
+
+    let filter = view_excluding(globs);
+    let token = RepositoryWriteToken::acquire(&instance.fixture.path).await;
+    let context = lore_revision::repository::RepositoryContext::new(
+        instance
+            .args_over(instance.fixture.immutable.clone())
+            .with_filesystem_provider(Arc::new(FuseProvider(fs.clone())))
+            .with_filter(Arc::new(filter)),
+    )
+    .with_write_token(token.share());
+    lore_revision::file::stage::stage(
+        Arc::new(context),
+        &token,
+        LoreArray::from_vec(vec![LoreString::from(&instance.fixture.path)]),
+        lore_revision::stage::StageOptions {
+            case_change,
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|error| format!("stage: {error}"))
+}
+
+/// A directory renamed in case through the mount whose only file the view leaves out is staged at
+/// its new spelling under the case handling that renames, with the file below it, and refused
+/// under the default case handling.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_renaming_in_case_records_a_directory_whose_file_the_view_leaves_out() {
+    let instance = Instance::new(&[
+        ("Dir/secret.bin", b"Dir/secret.bin"),
+        ("Top.txt", b"Top.txt"),
+    ])
+    .await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = viewed_provider(&instance, &["secret.bin"]).await;
+            lookup(&fs, ROOT_INO, "Dir").await.expect("Dir");
+            fs.rename(&request(), ROOT_INO, b"Dir", ROOT_INO, b"dir", 0)
+                .await
+                .expect("rename Dir to dir");
+
+            assert!(
+                stage_case_viewed_through(&instance, &fs, &["secret.bin"], Default::default())
+                    .await
+                    .is_err()
+            );
+            let staged = stage_case_viewed_through(
+                &instance,
+                &fs,
+                &["secret.bin"],
+                lore_revision::stage::StageCaseChange::Rename,
+            )
+            .await
+            .expect("stage");
+            assert_eq!(
+                revision_paths(&instance, staged).await,
+                ["Top.txt", "dir", "dir/secret.bin"]
+            );
+        })
+        .await;
+}
+
+/// A directory whose files were all removed, one below a directory of its own, then renamed in case
+/// through the mount, commits at its new spelling under the case handling that renames, without the
+/// removed files and with the directory they left.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_renaming_in_case_records_the_removals_below_a_directory_holding_only_removals() {
+    let instance = Instance::new(&[
+        ("Dir/a.txt", b"Dir/a.txt"),
+        ("Dir/Sub/c.txt", b"Dir/Sub/c.txt"),
+        ("Top.txt", b"Top.txt"),
+    ])
+    .await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            removed_through(&fs, "Dir/a.txt", false).await;
+            removed_through(&fs, "Dir/Sub/c.txt", false).await;
+            lookup(&fs, ROOT_INO, "Dir").await.expect("Dir");
+            fs.rename(&request(), ROOT_INO, b"Dir", ROOT_INO, b"dir", 0)
+                .await
+                .expect("rename Dir to dir");
+            let renamed = ["Top.txt", "dir", "dir/Sub"];
+
+            let staged = stage_case_through(
+                &instance,
+                &fs,
+                lore_revision::stage::StageCaseChange::Rename,
+            )
+            .await
+            .expect("stage");
+            assert_eq!(revision_paths(&instance, staged).await, renamed);
+            let committed = commit_staged(&instance, &fs).await.expect("commit");
+            assert_eq!(revision_paths(&instance, committed).await, renamed);
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+        })
+        .await;
+}
+
+/// A stage under the default case handling refuses a directory whose only file was removed, then
+/// renamed in case through the mount.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_refuses_a_directory_emptied_before_its_rename_in_case_by_default() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let (instance, fs) = emptied_directory_renamed_in_case().await;
+            let reported = status_of(&instance, &fs).await;
+
+            assert!(stage_through(&instance, &fs).await.is_err());
+            assert_eq!(status_of(&instance, &fs).await, reported);
+            assert_eq!(listed(&fs, ROOT_INO).await, ["Top.txt", "dir"]);
+        })
+        .await;
+}
+
+/// A stage that keeps the revision's case gives a directory whose only file was removed, then
+/// renamed in case through the mount, the revision's spelling again, and stages the removal.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_keeping_case_respells_a_directory_emptied_before_its_rename() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let (instance, fs) = emptied_directory_renamed_in_case().await;
+
+            let staged =
+                stage_case_through(&instance, &fs, lore_revision::stage::StageCaseChange::Keep)
+                    .await
+                    .expect("stage");
+            assert_eq!(listed(&fs, ROOT_INO).await, ["Dir", "Top.txt"]);
+            assert_eq!(lookup(&fs, ROOT_INO, "dir").await, Err(Errno::ENOENT));
+            assert_eq!(revision_paths(&instance, staged).await, ["Dir", "Top.txt"]);
+        })
+        .await;
+}
+
+/// A stage under the default case handling refuses a directory holding only empty directories
+/// renamed in case through the mount, as it refuses one with a file below it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_refuses_a_directory_holding_only_empty_directories_renamed_in_case_by_default() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let (instance, fs) =
+                empty_directories_renamed_in_case(&[("Top.txt", b"Top.txt")]).await;
+
+            assert!(stage_through(&instance, &fs).await.is_err());
+            assert_eq!(
+                status_of(&instance, &fs).await,
+                [(
+                    "dir".to_string(),
+                    (lore_revision::interface::LoreFileAction::Move, true)
+                )]
+                .into()
+            );
+            assert_eq!(listed(&fs, ROOT_INO).await, ["Top.txt", "dir"]);
+        })
+        .await;
+}
+
+/// A stage that keeps the revision's case gives a directory holding only empty directories,
+/// renamed in case through the mount, the revision's spelling again, and leaves nothing to report.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stage_keeping_case_respells_a_directory_holding_only_empty_directories() {
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let (instance, fs) =
+                empty_directories_renamed_in_case(&[("Top.txt", b"Top.txt")]).await;
+
+            stage_case_through(&instance, &fs, lore_revision::stage::StageCaseChange::Keep)
+                .await
+                .expect("stage");
+            assert_eq!(listed(&fs, ROOT_INO).await, ["Dir", "Top.txt"]);
+            assert_eq!(lookup(&fs, ROOT_INO, "dir").await, Err(Errno::ENOENT));
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
         })
         .await;
 }
@@ -23325,6 +24081,132 @@ async fn every_write_at_or_below_a_link_answers_read_only() {
         .await;
 }
 
+/// Attaches a link at `vendor` to the root of a revision of another repository holding
+/// `src/lib.txt`, whose content the store holds, as a sync bringing it leaves it.
+async fn attach_served_link(fs: &FuseFilesystem, instance: &Instance) {
+    use crate::helper::in_memory;
+
+    let writer = in_memory_writer(instance);
+    let linked = lore_revision::lore::RepositoryId::from(uuid::Uuid::now_v7());
+    let pin = in_memory::linked_revision_storing(
+        &writer,
+        linked,
+        &[("src/lib.txt", in_memory::Linked::File(b"linked one"))],
+    )
+    .await;
+    fs.state()
+        .node_attach(
+            instance.fixture.repository.clone(),
+            ROOT_NODE,
+            in_memory::link_node("vendor", linked, pin),
+            "vendor",
+        )
+        .await
+        .expect("attach the link");
+}
+
+/// Every write below a served link answers `EROFS`: a create, mknod, mkdir or symlink in a
+/// directory of the linked revision, an unlink, rmdir or rename of what it holds, and a write or
+/// setattr of its file. The linked content stays served, and `write/` holds nothing of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_write_below_a_served_link_answers_read_only() {
+    use lore_fuse::abi::SetattrIn;
+    use lore_fuse::abi::entry::setattr_valid;
+
+    let instance = Instance::new(&[("keep.txt", b"k")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            attach_served_link(&fs, &instance).await;
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            let src = lookup(&fs, vendor, "src").await.expect("src");
+            let lib = lookup(&fs, src, "lib.txt").await.expect("lib.txt");
+            let erofs = Some(Errno::EROFS);
+            let create_flags = (libc::O_CREAT | libc::O_RDWR) as u32;
+
+            let created = fs
+                .create(
+                    &request(),
+                    src,
+                    b"new.txt",
+                    libc::S_IFREG | 0o644,
+                    0o022,
+                    create_flags,
+                )
+                .await;
+            assert_eq!(created.err(), erofs, "create in a linked directory");
+            let made = fs
+                .mknod(&request(), src, b"node", libc::S_IFREG | 0o644, 0, 0o022)
+                .await;
+            assert_eq!(made.err(), erofs, "mknod in a linked directory");
+            let made = fs
+                .mkdir(&request(), src, b"sub", libc::S_IFDIR | 0o755, 0o022)
+                .await;
+            assert_eq!(made.err(), erofs, "mkdir in a linked directory");
+            let made = fs.symlink(&request(), src, b"ln", b"x").await;
+            assert_eq!(made.err(), erofs, "symlink in a linked directory");
+            assert_eq!(
+                fs.unlink(&request(), src, b"lib.txt").await.err(),
+                erofs,
+                "unlink of a linked file"
+            );
+            assert_eq!(
+                fs.rmdir(&request(), vendor, b"src").await.err(),
+                erofs,
+                "rmdir of a linked directory"
+            );
+            for (new_parent, new_name, what) in [
+                (src, "moved.txt", "a rename within a linked directory"),
+                (ROOT_INO, "out.txt", "a rename out of the link"),
+            ] {
+                let renamed = fs
+                    .rename(
+                        &request(),
+                        src,
+                        b"lib.txt",
+                        new_parent,
+                        new_name.as_bytes(),
+                        0,
+                    )
+                    .await;
+                assert_eq!(renamed.err(), erofs, "{what}");
+            }
+            assert_eq!(
+                fs.write(&request(), lib, 0, 0, b"LINKED", 0).await.err(),
+                erofs,
+                "a write of a linked file"
+            );
+            for (ino, valid, what) in [
+                (lib, setattr_valid::SIZE, "a truncate of a linked file"),
+                (lib, setattr_valid::MODE, "a chmod of a linked file"),
+                (
+                    src,
+                    setattr_valid::MTIME_NOW,
+                    "a touch of a linked directory",
+                ),
+            ] {
+                let attr = SetattrIn {
+                    valid,
+                    mode: libc::S_IFREG | 0o600,
+                    ..SetattrIn::default()
+                };
+                let set = fs.setattr(&request(), ino, &attr).await;
+                assert_eq!(set.err(), erofs, "{what}");
+            }
+
+            assert_eq!(lookup(&fs, src, "lib.txt").await, Ok(lib));
+            let mut out = [0u8; 64];
+            let read = fs
+                .read(&request(), lib, 0, 0, &mut out, true)
+                .await
+                .ok()
+                .expect("the linked file reads");
+            assert_eq!(&out[..read], b"linked one");
+            assert!(!instance.write_dir().join("vendor").exists());
+        })
+        .await;
+}
+
 /// The messages that name [`WARNED_LINK`], collected by the log callback.
 static WARNED_LINK_LOGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
@@ -23341,8 +24223,10 @@ fn collect_warned_link_logs(level: lore_base::log::LoreLogLevel, _location: &str
     }
 }
 
-/// A mount warns once for each link it serves, however often the link's inode is made, and a
-/// new mount warns again.
+/// A mount warns once for each link whose pinned revision it cannot read, when it first enters
+/// the link, on the first lookup below it or listing of it, however often the link's inode is
+/// made, and a new mount warns again. Neither a listing of the parent nor a lookup of the link
+/// itself warns.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mount_warns_once_for_each_link() {
     let instance = Instance::new(&[("keep.txt", b"k")]).await;
@@ -23364,30 +24248,190 @@ async fn a_mount_warns_once_for_each_link() {
         .scope(fuse_fixture::setup_test_execution(), async {
             let fs = provider(&instance).await;
             attach_link(&fs, &instance, ROOT_NODE, WARNED_LINK).await;
+            assert!(
+                listed(&fs, ROOT_INO)
+                    .await
+                    .iter()
+                    .any(|name| name == WARNED_LINK),
+                "the root lists the link"
+            );
+            let row = warned();
             let link = lookup(&fs, ROOT_INO, WARNED_LINK).await.expect("the link");
+            let unasked = warned();
+            assert_eq!(lookup(&fs, link, "l.txt").await, Err(Errno::ENOENT));
             let first = warned();
             fs.forget(link, 1);
             assert!(
                 fs.inodes().get(link).is_none(),
                 "the forget drops the inode"
             );
-            lookup(&fs, ROOT_INO, WARNED_LINK)
+            let link = lookup(&fs, ROOT_INO, WARNED_LINK)
                 .await
                 .expect("the link again");
+            assert_eq!(lookup(&fs, link, "l.txt").await, Err(Errno::ENOENT));
             let again = warned();
             drop(fs);
             let fs = provider(&instance).await;
             attach_link(&fs, &instance, ROOT_NODE, WARNED_LINK).await;
-            lookup(&fs, ROOT_INO, WARNED_LINK)
+            let link = lookup(&fs, ROOT_INO, WARNED_LINK)
                 .await
                 .expect("the link remounted");
-            (first, again, warned())
+            assert!(listed(&fs, link).await.is_empty(), "the link lists nothing");
+            (row, unasked, first, again, warned())
         })
         .await;
     lore_base::log::set_log_callback(None);
     lore_base::log::set_log_level(level);
     drop(capture);
-    assert_eq!(counted, (1, 1, 2), "one warning per mount and link");
+    assert_eq!(counted, (0, 0, 1, 1, 2), "one warning per mount and link");
+}
+
+/// A link the mount enters but cannot serve, one mounting a file of the revision it pins or one
+/// whose source is a chain of links running past the depth links allow, is entered once and
+/// served empty: a lookup below it finds nothing and it lists nothing, however often it is asked,
+/// and the mount warns once for it. A chain as deep as links allow is served.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_mounting_no_directory_or_nesting_too_deep_is_entered_empty_and_warned_once() {
+    use lore_revision::fs::fuse::inode::InodeKind;
+    use lore_revision::state::MAX_LINK_DEPTH;
+
+    use crate::helper::in_memory;
+
+    let instance = Instance::new(&[("keep.txt", b"k")]).await;
+    let capture = crate::helper::LOG_CAPTURE.lock().await;
+    WARNED_LINK_LOGS
+        .lock()
+        .expect("the log collector lock is not poisoned")
+        .clear();
+    let level = lore_base::log::log_level();
+    lore_base::log::set_log_level(lore_base::log::LoreLogLevel::Info);
+    lore_base::log::set_log_callback(Some(collect_warned_link_logs));
+    let warned = |name: &str| {
+        WARNED_LINK_LOGS
+            .lock()
+            .expect("the log collector lock is not poisoned")
+            .iter()
+            .filter(|message| message.contains(&format!("'{name}'")))
+            .count()
+    };
+    let unserved = [format!("{WARNED_LINK}-file"), format!("{WARNED_LINK}-deep")];
+    let chain = format!("{WARNED_LINK}-chain");
+    let (served, found) = LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            let writer = in_memory_writer(&instance);
+            let linked = lore_revision::lore::RepositoryId::from(uuid::Uuid::now_v7());
+            let (pin, file) =
+                linked_revision_with(&writer, linked, "l.txt", in_memory::file("l.txt")).await;
+            let links = [
+                (
+                    &unserved[0],
+                    Node {
+                        child: file,
+                        ..in_memory::link_node(&unserved[0], linked, pin)
+                    },
+                ),
+                (
+                    &unserved[1],
+                    link_chain(&writer, &unserved[1], MAX_LINK_DEPTH + 1).await,
+                ),
+                (&chain, link_chain(&writer, &chain, MAX_LINK_DEPTH).await),
+            ];
+            for (name, link) in links {
+                fs.state()
+                    .node_attach(instance.fixture.repository.clone(), ROOT_NODE, link, name)
+                    .await
+                    .expect("attach the link");
+            }
+            let mut served = Vec::new();
+            for name in &unserved {
+                let link = lookup(&fs, ROOT_INO, name).await.expect("the link");
+                let mut asked = Vec::new();
+                for _ in 0..2 {
+                    asked.push((
+                        lookup(&fs, link, "l.txt").await,
+                        listed(&fs, link).await.is_empty(),
+                    ));
+                }
+                let entered = fs.inodes().get(link).is_some_and(|entry| {
+                    matches!(entry.kind, InodeKind::Dir { entered: true, .. })
+                });
+                served.push((name.clone(), asked, entered, warned(name)));
+            }
+            let deepest = lookup(&fs, ROOT_INO, &chain).await.expect("the chain");
+            (
+                served,
+                (lookup(&fs, deepest, "l.txt").await.is_ok(), warned(&chain)),
+            )
+        })
+        .await;
+    lore_base::log::set_log_callback(None);
+    lore_base::log::set_log_level(level);
+    drop(capture);
+    for (name, asked, entered, warnings) in served {
+        assert_eq!(
+            asked,
+            [(Err(Errno::ENOENT), true); 2],
+            "{name}: nothing is found below it, and it lists nothing"
+        );
+        assert!(entered, "{name} is entered");
+        assert_eq!(warnings, 1, "{name} is warned of once");
+    }
+    assert_eq!(
+        found,
+        (true, 0),
+        "a chain as deep as links allow is served, unwarned"
+    );
+}
+
+/// A link named `name` whose source is a chain of `links` links, itself included, each mounting
+/// the next, the last the root of a revision holding `l.txt`.
+async fn link_chain(
+    writer: &Arc<lore_revision::repository::RepositoryContext>,
+    name: &str,
+    links: usize,
+) -> Node {
+    use crate::helper::in_memory;
+
+    let mut linked = lore_revision::lore::RepositoryId::from(uuid::Uuid::now_v7());
+    let mut pin = in_memory::linked_revision(writer, linked).await;
+    let mut mounted = ROOT_NODE;
+    for _ in 1..links {
+        let link = Node {
+            child: mounted,
+            ..in_memory::link_node("next", linked, pin)
+        };
+        linked = lore_revision::lore::RepositoryId::from(uuid::Uuid::now_v7());
+        (pin, mounted) = linked_revision_with(writer, linked, "next", link).await;
+    }
+    Node {
+        child: mounted,
+        ..in_memory::link_node(name, linked, pin)
+    }
+}
+
+/// A revision of the repository `linked` whose root holds `node` as `name`, and the node's ID in
+/// it.
+async fn linked_revision_with(
+    writer: &Arc<lore_revision::repository::RepositoryContext>,
+    linked: lore_revision::lore::RepositoryId,
+    name: &str,
+    node: Node,
+) -> (Hash, NodeID) {
+    use crate::helper::in_memory;
+
+    let context = writer.to_link_context(linked).await;
+    let state = lore_revision::state::State::new();
+    in_memory::add(&state, context.clone(), ROOT_NODE, node, name).await;
+    let pin = in_memory::commit(&context, &state, Hash::default(), in_memory::branch_id()).await;
+    let pinned = lore_revision::state::State::deserialize(context.clone(), pin)
+        .await
+        .expect("the linked revision loads");
+    let id = pinned
+        .find_subnode(context, ROOT_NODE, hash_string(name))
+        .await
+        .expect("the node the revision holds");
+    (pin, id)
 }
 
 /// The repository's context over the instance's stores, which commits in memory.
@@ -23407,10 +24451,24 @@ async fn merge_a_link(
 ) -> (lore_revision::lore::RepositoryId, Hash) {
     use crate::helper::in_memory;
 
-    let feature = create_branch_id_through(instance, fs, "feature").await;
     let writer = in_memory_writer(instance);
     let linked = lore_revision::lore::RepositoryId::from(uuid::Uuid::now_v7());
     let pin = in_memory::linked_revision(&writer, linked).await;
+    merge_a_link_to(instance, fs, linked, pin).await;
+    (linked, pin)
+}
+
+/// [`merge_a_link`] of a link to the revision `pin` of the repository `linked`.
+async fn merge_a_link_to(
+    instance: &Instance,
+    fs: &Arc<FuseFilesystem>,
+    linked: lore_revision::lore::RepositoryId,
+    pin: Hash,
+) {
+    use crate::helper::in_memory;
+
+    let feature = create_branch_id_through(instance, fs, "feature").await;
+    let writer = in_memory_writer(instance);
     let base = instance.fixture.state.revision();
     let state = in_memory::revision_state(&writer, base).await;
     let link = in_memory::link_node("vendor", linked, pin);
@@ -23422,7 +24480,6 @@ async fn merge_a_link(
     merge_through(instance, fs, feature)
         .await
         .expect("the merge");
-    (linked, pin)
 }
 
 /// Runs `lore link remove <link_path>` through `fs`.
@@ -23622,9 +24679,8 @@ async fn removing_a_link_a_merge_staged_leaves_nothing_at_its_path() {
         .await;
 }
 
-/// Removing a link a merge staged through the mount reads nothing of the link and nothing at or
-/// below its path, as the removal takes nothing there: a local file at its path does not refuse
-/// the removal of a link whose revision the store no longer holds, and stays.
+/// Removing a link a merge staged through the mount reads nothing of the link: the removal of a
+/// link whose revision the store no longer holds takes it away from what the mount serves.
 #[tokio::test(flavor = "multi_thread")]
 async fn removing_a_link_a_merge_staged_reads_nothing_below_its_path() {
     let instance = Instance::new(&[("a.txt", b"alpha")]).await;
@@ -23639,34 +24695,20 @@ async fn removing_a_link_a_merge_staged_reads_nothing_below_its_path() {
                 .obliterate(linked, Address::zero_context_hash(pin), Arc::default())
                 .await
                 .expect("dropping the linked revision");
-            let vendor = fs
-                .mkdir(
-                    &request(),
-                    ROOT_INO,
-                    b"vendor",
-                    libc::S_IFDIR | 0o755,
-                    0o022,
-                )
-                .await
-                .expect("mkdir")
-                .ino;
-            create_with(&fs, vendor, "l.txt", b"local").await;
 
             link_remove_through(&instance, &fs, "vendor")
                 .await
                 .expect("the link removal");
 
-            assert_eq!(
-                std::fs::read(instance.write_dir().join("vendor/l.txt")).expect("the local file"),
-                b"local"
-            );
+            assert_eq!(lookup(&fs, ROOT_INO, "vendor").await, Err(Errno::ENOENT));
+            assert!(!instance.write_dir().join("vendor").exists());
         })
         .await;
 }
 
-/// A link pin change realizes nothing through a provider holding its state, so neither of its
-/// entry points reads the linked revisions: one between revisions the store does not hold
-/// succeeds.
+/// A link pin change writes nothing of the link through a provider holding its state, which moves
+/// the link it serves, so neither of its entry points reads the linked revisions: one between
+/// revisions the store does not hold, of a link the mount does not serve, succeeds.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_link_pin_change_on_the_mount_reads_neither_revision() {
     use lore_revision::link::LinkMountSource;
@@ -23747,9 +24789,68 @@ async fn a_stage_below_a_link_whose_revision_is_not_held_stages_nothing() {
         .await;
 }
 
+/// An instance write below a link the mount serves, of a new file or of one the link serves, is
+/// refused as a write to the read-only link, and one on a provider without `write/` as a write to
+/// a read-only instance.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_below_a_link_is_refused_as_one_to_the_read_only_link() {
+    use lore_revision::fs::filesystem_provider::FsError;
+    use lore_revision::fs::filesystem_provider::InstanceOperation as _;
+    use lore_revision::util::path::RelativePath;
+
+    /// The refusal of a write of each of `paths` through `fs`, as `NotSupported`'s message.
+    async fn refusals(
+        instance: &Instance,
+        fs: &Arc<FuseFilesystem>,
+        paths: &[&str],
+    ) -> Vec<String> {
+        let repository = instance.command_context(fs, None);
+        lore_revision::fs::filesystem_provider::with_operation(
+            repository.file_system(),
+            async |operation| {
+                let mut refusals = Vec::new();
+                for path in paths {
+                    let path = RelativePath::new_from_initial_path(path).expect("a path");
+                    let wrote = operation
+                        .write_file(&path, bytes::Bytes::from_static(b"x"))
+                        .await;
+                    refusals.push(match wrote {
+                        Err(error @ FsError::NotSupported(_)) => error.to_string(),
+                        other => panic!("{path}: {other:?} is no refusal"),
+                    });
+                }
+                Ok::<_, FsError>(refusals)
+            },
+        )
+        .await
+        .expect("the operation")
+    }
+
+    let instance = Instance::new(&[("a.txt", b"alpha")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            merge_a_link(&instance, &fs).await;
+            let below_the_link =
+                "Operation not supported: writing a file at or below a link, which is read-only";
+            assert_eq!(
+                refusals(&instance, &fs, &["vendor/new.txt", "vendor/l.txt"]).await,
+                [below_the_link, below_the_link],
+            );
+            drop(fs);
+
+            let fs = read_only_provider(&instance).await;
+            assert_eq!(
+                refusals(&instance, &fs, &["a.txt"]).await,
+                ["Operation not supported: writing a file on a read-only instance"],
+            );
+        })
+        .await;
+}
+
 /// A reset of a link's staged removal through the mount restores the link and writes nothing of
-/// it, whether or not the mount serves the link yet: nothing lands in `write/`, the link stands in
-/// the State the mount serves as it did, and status is clean.
+/// it, whether the mount served the link since the merge or since a remount: nothing lands in
+/// `write/`, the mount serves the link again, and status is clean.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reset_of_a_link_removal_writes_nothing_of_the_link() {
     for remounted in [false, true] {
@@ -23767,10 +24868,18 @@ async fn a_reset_of_a_link_removal_writes_nothing_of_the_link() {
                 } else {
                     fs
                 };
-                let served = lookup(&fs, ROOT_INO, "vendor").await;
+                let served = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+                lookup(&fs, served, "l.txt")
+                    .await
+                    .expect("the link is served");
                 link_remove_through(&instance, &fs, "vendor")
                     .await
                     .expect("the link removal");
+                assert_eq!(
+                    lookup(&fs, ROOT_INO, "vendor").await,
+                    Err(Errno::ENOENT),
+                    "remounted {remounted}: the removal takes the link away"
+                );
 
                 reset_through(&instance, &fs, &["vendor"], None, false)
                     .await
@@ -23780,11 +24889,12 @@ async fn a_reset_of_a_link_removal_writes_nothing_of_the_link() {
                     !instance.write_dir().join("vendor").exists(),
                     "remounted {remounted}: write/ holds nothing at the link's path"
                 );
-                assert_eq!(
-                    lookup(&fs, ROOT_INO, "vendor").await,
-                    served,
-                    "remounted {remounted}: the mount serves the link's path as before"
-                );
+                let vendor = lookup(&fs, ROOT_INO, "vendor")
+                    .await
+                    .unwrap_or_else(|_| panic!("remounted {remounted}: the link is back"));
+                lookup(&fs, vendor, "l.txt")
+                    .await
+                    .unwrap_or_else(|_| panic!("remounted {remounted}: the link is served"));
                 assert_eq!(
                     status_of(&instance, &fs).await,
                     Default::default(),
@@ -23795,33 +24905,656 @@ async fn a_reset_of_a_link_removal_writes_nothing_of_the_link() {
     }
 }
 
-/// A reset of a link a merge staged through the mount removes nothing at its path, which holds
-/// none of the link: a directory made there stays.
+/// A reset of a link's staged removal through the mount serves the link again over a local file
+/// made at its path since, unforced, since a reset discards local changes: the file goes, `write/`
+/// holds nothing at the path, and status is clean.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_reset_of_a_link_a_merge_staged_keeps_the_directory_at_its_path() {
+async fn a_reset_of_a_link_removal_discards_local_changes_at_the_link() {
     let instance = Instance::new(&[("a.txt", b"alpha")]).await;
     LORE_CONTEXT
         .scope(fuse_fixture::setup_test_execution(), async {
             let fs = provider(&instance).await;
             merge_a_link(&instance, &fs).await;
-            fs.mkdir(
-                &request(),
-                ROOT_INO,
-                b"vendor",
-                libc::S_IFDIR | 0o755,
-                0o022,
-            )
-            .await
-            .expect("mkdir");
+            commit_through(&instance, &fs, false)
+                .await
+                .expect("the commit of the merge");
+            link_remove_through(&instance, &fs, "vendor")
+                .await
+                .expect("the link removal");
+            let vendor = fs
+                .mkdir(
+                    &request(),
+                    ROOT_INO,
+                    b"vendor",
+                    libc::S_IFDIR | 0o755,
+                    0o022,
+                )
+                .await
+                .expect("mkdir")
+                .ino;
+            create_with(&fs, vendor, "x.txt", b"local").await;
+
+            reset_through(&instance, &fs, &["vendor"], None, false)
+                .await
+                .expect("the reset, unforced");
+
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            lookup(&fs, vendor, "l.txt")
+                .await
+                .expect("the link is served");
+            assert_eq!(lookup(&fs, vendor, "x.txt").await, Err(Errno::ENOENT));
+            assert!(!instance.write_dir().join("vendor").exists());
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+        })
+        .await;
+}
+
+/// A reset of a link a merge staged through the mount takes the link away from what the mount
+/// serves, writes nothing at its path, and leaves status clean.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_of_a_link_a_merge_staged_takes_it_away() {
+    let instance = Instance::new(&[("a.txt", b"alpha")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            merge_a_link(&instance, &fs).await;
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            lookup(&fs, vendor, "l.txt")
+                .await
+                .expect("the merge serves the link");
 
             reset_through(&instance, &fs, &["vendor"], None, false)
                 .await
                 .expect("the reset");
 
+            assert_eq!(lookup(&fs, ROOT_INO, "vendor").await, Err(Errno::ENOENT));
+            assert!(!instance.write_dir().join("vendor").exists());
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+        })
+        .await;
+}
+
+/// A reset of a link a merge staged over a committed directory brings the directory back as a reset
+/// on an ordinary instance does, empty or holding a file: the mount serves it and what it holds as
+/// the revision holds them, clean, with nothing written for them, and status shows nothing, no
+/// local add included.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_of_a_link_a_merge_staged_over_a_directory_brings_the_directory_back() {
+    for holding in [&[][..], &["x.txt"][..]] {
+        reset_of_a_link_a_merge_staged_over_a_directory(holding).await;
+    }
+}
+
+/// [`a_reset_of_a_link_a_merge_staged_over_a_directory_brings_the_directory_back`] over a
+/// directory holding a file at each of `holding`.
+async fn reset_of_a_link_a_merge_staged_over_a_directory(holding: &[&str]) {
+    use crate::helper::in_memory;
+
+    let instance = Instance::new(&[("a.txt", b"alpha")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            let writer = in_memory_writer(&instance);
+            let base = instance.fixture.state.revision();
+            let (_, main) =
+                lore_revision::instance::load_current_anchor_boxed(&instance.fixture.repository)
+                    .await
+                    .expect("the current anchor reads");
+            let state = in_memory::revision_state(&writer, base).await;
+            // As a stage of the working tree records it, with no mode.
+            let vendor = Node {
+                mode: 0,
+                ..in_memory::directory("vendor")
+            };
+            let dir = in_memory::add(&state, writer.clone(), ROOT_NODE, vendor, "vendor").await;
+            for name in holding {
+                in_memory::add(&state, writer.clone(), dir, in_memory::file(name), name).await;
+            }
+            let committed = in_memory::commit(&writer, &state, base, main).await;
+            sync_through(&instance, &fs, committed, Default::default())
+                .await
+                .expect("the sync bringing the directory");
+
+            let feature = create_branch_id_through(&instance, &fs, "feature").await;
+            let linked = lore_revision::lore::RepositoryId::from(uuid::Uuid::now_v7());
+            let pin = in_memory::linked_revision(&writer, linked).await;
+            let state = in_memory::revision_state(&writer, base).await;
+            let link = in_memory::link_node("vendor", linked, pin);
+            in_memory::add(&state, writer.clone(), ROOT_NODE, link, "vendor").await;
+            in_memory::commit(&writer, &state, committed, feature).await;
+            switch_through(&instance, &fs, lore_revision::branch::DEFAULT_DEFAULT_NAME)
+                .await
+                .expect("switch back");
+            merge_through(&instance, &fs, feature)
+                .await
+                .expect("the merge");
+            let served = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            lookup(&fs, served, "l.txt")
+                .await
+                .expect("the merge serves the link");
+
+            reset_through(&instance, &fs, &["vendor"], None, false)
+                .await
+                .unwrap_or_else(|error| panic!("holding {holding:?}: the reset: {error}"));
+
+            let vendor = lookup(&fs, ROOT_INO, "vendor")
+                .await
+                .unwrap_or_else(|_| panic!("holding {holding:?}: the directory is back"));
+            assert_eq!(listed(&fs, vendor).await, holding, "what vendor lists");
+            let mut paths = vec!["vendor".to_string()];
+            paths.extend(holding.iter().map(|name| format!("vendor/{name}")));
+            for path in &paths {
+                let node = fs
+                    .state()
+                    .node(
+                        instance.fixture.repository.clone(),
+                        node_at(&instance, &fs, path).await,
+                    )
+                    .await
+                    .expect("the node");
+                assert!(
+                    !node.is_link() && !node.is_dirty(),
+                    "{path} is the revision's node, clean: flags {:#x}",
+                    node.flags
+                );
+            }
             assert!(
-                instance.write_dir().join("vendor").is_dir(),
-                "the directory at the link's path stays"
+                !instance.write_dir().join("vendor").exists(),
+                "holding {holding:?}: write/ holds nothing for vendor"
             );
+            assert_eq!(
+                status_of(&instance, &fs).await,
+                Default::default(),
+                "holding {holding:?}: status"
+            );
+        })
+        .await;
+}
+
+/// A merge bringing a link through the mount serves the link at once, as a merge on an ordinary
+/// instance writes its files: status shows the link staged and nothing dirty, the commit leaves
+/// status clean, and a remount at the merge serves the link.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_bringing_a_link_serves_it_at_once_and_after_its_commit_and_a_remount() {
+    use lore_revision::interface::LoreFileAction;
+
+    let instance = Instance::new(&[("a.txt", b"alpha")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            merge_a_link(&instance, &fs).await;
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            lookup(&fs, vendor, "l.txt")
+                .await
+                .expect("the merge serves the link");
+            assert_eq!(
+                status_of(&instance, &fs)
+                    .await
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                [("vendor".to_string(), (LoreFileAction::Add, false))]
+            );
+
+            let merged = commit_through(&instance, &fs, false)
+                .await
+                .expect("the commit of the merge");
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            lookup(&fs, vendor, "l.txt")
+                .await
+                .expect("the commit keeps the link served");
+            drop(fs);
+
+            let fs = provider_at(&instance, merged).await;
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            lookup(&fs, vendor, "l.txt")
+                .await
+                .expect("a remount serves the link");
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+        })
+        .await;
+}
+
+/// A remount before a merge bringing a link is committed serves the link the staged state holds,
+/// and status stays as the merge left it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remount_serves_the_link_a_merge_staged() {
+    use lore_revision::interface::LoreFileAction;
+
+    let instance = Instance::new(&[("a.txt", b"alpha")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            merge_a_link(&instance, &fs).await;
+            drop(fs);
+
+            let fs = provider(&instance).await;
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            lookup(&fs, vendor, "l.txt")
+                .await
+                .expect("the remount serves the staged link");
+            assert_eq!(
+                status_of(&instance, &fs)
+                    .await
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                [("vendor".to_string(), (LoreFileAction::Add, false))]
+            );
+            commit_through(&instance, &fs, false)
+                .await
+                .expect("the commit of the merge");
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+        })
+        .await;
+}
+
+/// A link pin change through a provider holding its state moves the link the mount serves at
+/// once, through either entry point: the new pin's files are served below it and the old pin's
+/// are not, the inode the kernel held for the link goes, and status stays clean.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_pin_change_on_the_mount_serves_the_new_pin_at_once() {
+    use lore_revision::link::LinkMountSource;
+    use lore_revision::link::LinkPinRealizeTarget;
+    use lore_revision::util::path::RelativePath;
+
+    use crate::helper::in_memory;
+
+    let instance = Instance::new(&[("a.txt", b"alpha")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            let (linked, first) = merge_a_link(&instance, &fs).await;
+            commit_through(&instance, &fs, false)
+                .await
+                .expect("the commit of the merge");
+            let writer = in_memory_writer(&instance);
+            let second = in_memory::linked_revision_holding(&writer, linked, &["two.txt"]).await;
+            let third = in_memory::linked_revision_holding(&writer, linked, &["three.txt"]).await;
+            let repository = instance.command_context(&fs, None);
+            let link_context = repository.to_link_context(linked).await;
+            let target = |old_signature, new_signature| LinkPinRealizeTarget {
+                link_path: RelativePath::new_from_initial_path("vendor").expect("a link path"),
+                old_signature,
+                new_signature,
+                current_node: ROOT_NODE,
+                mount_source: LinkMountSource::Node(ROOT_NODE),
+            };
+            let old = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+
+            lore_revision::link::realize_link_pin_change(
+                repository.clone(),
+                link_context.clone(),
+                target(first, second),
+            )
+            .await
+            .expect("the realize opening its operation");
+            assert!(
+                fs.inodes().get(old).is_some_and(|entry| entry.orphaned),
+                "the inode of the link at the old pin goes"
+            );
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            lookup(&fs, vendor, "two.txt")
+                .await
+                .expect("the new pin is served");
+            assert_eq!(lookup(&fs, vendor, "l.txt").await, Err(Errno::ENOENT));
+
+            lore_revision::fs::filesystem_provider::with_operation(
+                repository.file_system(),
+                async |operation| {
+                    lore_revision::link::realize_link_pin_change_in_operation(
+                        &operation,
+                        repository.clone(),
+                        link_context.clone(),
+                        target(second, third),
+                        false,
+                    )
+                    .await
+                },
+            )
+            .await
+            .expect("the realize in the caller's operation");
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            lookup(&fs, vendor, "three.txt")
+                .await
+                .expect("the new pin is served");
+            assert_eq!(lookup(&fs, vendor, "two.txt").await, Err(Errno::ENOENT));
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+        })
+        .await;
+}
+
+/// Removing a link through the mount takes it away from what the mount serves at once, and a
+/// remount before the removal is committed leaves it away: status shows the removal as an
+/// ordinary instance does, and its commit leaves status clean.
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_a_link_on_the_mount_takes_it_away_at_once_and_after_a_remount() {
+    use lore_revision::interface::LoreFileAction;
+
+    let instance = Instance::new(&[("a.txt", b"alpha")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            merge_a_link(&instance, &fs).await;
+            let merged = commit_through(&instance, &fs, false)
+                .await
+                .expect("the commit of the merge");
+
+            link_remove_through(&instance, &fs, "vendor")
+                .await
+                .expect("the link removal");
+            // Staged and marked deleted, as the removal's stage marks it on any instance.
+            let removed = [("vendor".to_string(), (LoreFileAction::Delete, true))];
+            assert_eq!(lookup(&fs, ROOT_INO, "vendor").await, Err(Errno::ENOENT));
+            assert_eq!(
+                status_of(&instance, &fs)
+                    .await
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                removed
+            );
+            drop(fs);
+
+            let fs = provider_at(&instance, merged).await;
+            assert_eq!(
+                lookup(&fs, ROOT_INO, "vendor").await,
+                Err(Errno::ENOENT),
+                "a remount serves no link the staged state removed"
+            );
+            assert_eq!(
+                status_of(&instance, &fs)
+                    .await
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                removed
+            );
+            commit_through(&instance, &fs, false)
+                .await
+                .expect("the commit of the removal");
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+            assert_eq!(lookup(&fs, ROOT_INO, "vendor").await, Err(Errno::ENOENT));
+        })
+        .await;
+}
+
+/// A link placed through the mount where local changes stand is refused, and the changes stay,
+/// unless forced, which discards them and serves the link.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_placed_over_local_changes_is_refused_unless_forced() {
+    use lore_revision::fs::filesystem_provider::FsError;
+
+    let instance = Instance::new(&[("a.txt", b"alpha")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            let vendor = fs
+                .mkdir(
+                    &request(),
+                    ROOT_INO,
+                    b"vendor",
+                    libc::S_IFDIR | 0o755,
+                    0o022,
+                )
+                .await
+                .expect("mkdir")
+                .ino;
+            create_with(&fs, vendor, "local.txt", b"local").await;
+
+            let refused = place_a_link_through(&instance, &fs, "vendor", false).await;
+            assert!(
+                refused.as_ref().is_err_and(FsError::is_local_modifications),
+                "{refused:?}"
+            );
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            lookup(&fs, vendor, "local.txt")
+                .await
+                .expect("the local file stays");
+
+            place_a_link_through(&instance, &fs, "vendor", true)
+                .await
+                .expect("the forced placement");
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            lookup(&fs, vendor, "l.txt")
+                .await
+                .expect("the link is served");
+            assert_eq!(lookup(&fs, vendor, "local.txt").await, Err(Errno::ENOENT));
+            assert!(!instance.write_dir().join("vendor/local.txt").exists());
+        })
+        .await;
+}
+
+/// A link placed through the mount below a local file standing in place of a directory on its
+/// path is refused, and the file stays, unless forced, which removes the file and serves the link
+/// in a directory there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_placed_below_a_local_file_is_refused_unless_forced() {
+    use lore_revision::fs::filesystem_provider::FsError;
+
+    let instance = Instance::new(&[("a.txt", b"alpha")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            create_with(&fs, ROOT_INO, "ext", b"local").await;
+
+            let refused = place_a_link_through(&instance, &fs, "ext/lib", false).await;
+            assert!(
+                refused.as_ref().is_err_and(FsError::is_local_modifications),
+                "{refused:?}"
+            );
+            let ext = lookup(&fs, ROOT_INO, "ext").await.expect("ext");
+            let attr = fs.getattr(&request(), ext).await.expect("getattr").attr;
+            assert_eq!(attr.mode & libc::S_IFMT, libc::S_IFREG, "the file stays");
+
+            place_a_link_through(&instance, &fs, "ext/lib", true)
+                .await
+                .expect("the forced placement");
+            let ext = lookup(&fs, ROOT_INO, "ext").await.expect("ext");
+            let attr = fs.getattr(&request(), ext).await.expect("getattr").attr;
+            assert_eq!(
+                attr.mode & libc::S_IFMT,
+                libc::S_IFDIR,
+                "a directory stands"
+            );
+            let lib = lookup(&fs, ext, "lib").await.expect("the link");
+            lookup(&fs, lib, "l.txt").await.expect("the link is served");
+            assert!(!instance.write_dir().join("ext").is_file());
+        })
+        .await;
+}
+
+/// Places through `fs` at `path`, forced where `force`, a link to a revision of another repository
+/// holding `l.txt`, as a command placing a link does.
+async fn place_a_link_through(
+    instance: &Instance,
+    fs: &Arc<FuseFilesystem>,
+    path: &str,
+    force: bool,
+) -> Result<(), lore_revision::fs::filesystem_provider::FsError> {
+    use lore_revision::util::path::RelativePath;
+
+    use crate::helper::in_memory;
+
+    let linked = lore_revision::lore::RepositoryId::from(uuid::Uuid::now_v7());
+    let pin = in_memory::linked_revision(&in_memory_writer(instance), linked).await;
+    let path = RelativePath::new_from_initial_path(path).expect("a link path");
+    let link = in_memory::link_node(path.name(), linked, pin);
+    let repository = instance.command_context(fs, None);
+    lore_revision::fs::filesystem_provider::with_operation(
+        repository.file_system(),
+        async |operation| operation.place_link(&path, Some(&link), force).await,
+    )
+    .await
+}
+
+/// Removing a link nested in another through the mount takes it away from what the mount serves
+/// at once, and leaves the rest of the link that holds it served: status shows the removal as an
+/// ordinary instance does, its commit leaves status clean, and a remount at the commit serves the
+/// link holding it without it.
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_a_nested_link_on_the_mount_takes_it_away_at_once() {
+    use crate::helper::in_memory;
+    use crate::helper::in_memory::Linked;
+
+    let instance = Instance::new(&[("a.txt", b"alpha")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            let writer = in_memory_writer(&instance);
+            let inner = lore_revision::lore::RepositoryId::from(uuid::Uuid::now_v7());
+            let inner_pin = in_memory::linked_revision(&writer, inner).await;
+            let outer = lore_revision::lore::RepositoryId::from(uuid::Uuid::now_v7());
+            let outer_pin = in_memory::linked_revision_storing(
+                &writer,
+                outer,
+                &[
+                    ("o.txt", Linked::File(b"outer")),
+                    ("inner", Linked::Link(inner, inner_pin)),
+                ],
+            )
+            .await;
+            merge_a_link_to(&instance, &fs, outer, outer_pin).await;
+            commit_through(&instance, &fs, false)
+                .await
+                .expect("the commit of the merge");
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            let nested = lookup(&fs, vendor, "inner").await.expect("the nested link");
+            lookup(&fs, nested, "l.txt")
+                .await
+                .expect("the nested link is served");
+
+            link_remove_through(&instance, &fs, "vendor/inner")
+                .await
+                .expect("the nested link removal");
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            assert_eq!(lookup(&fs, vendor, "inner").await, Err(Errno::ENOENT));
+            lookup(&fs, vendor, "o.txt")
+                .await
+                .expect("the link holding it stays served");
+            assert_eq!(
+                status_of(&instance, &fs)
+                    .await
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                [(
+                    "vendor/inner".to_string(),
+                    (lore_revision::interface::LoreFileAction::Delete, true)
+                )]
+            );
+
+            let removed = commit_through(&instance, &fs, false)
+                .await
+                .expect("the commit of the removal");
+            assert_eq!(status_of(&instance, &fs).await, Default::default());
+            drop(fs);
+            let fs = provider_at(&instance, removed).await;
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            assert_eq!(lookup(&fs, vendor, "inner").await, Err(Errno::ENOENT));
+            lookup(&fs, vendor, "o.txt")
+                .await
+                .expect("a remount serves the link holding it");
+        })
+        .await;
+}
+
+/// Moving a link nested in another to a new pin through the mount, as `lore link update` does once
+/// it folded the new pin up into the outermost link's (`serve_outermost_link`), serves the nested
+/// link's new pin at once, and leaves the rest of the link that holds it served. The command reads
+/// the linked repository's remote first, which the fixture has none of, so the test makes the
+/// calls the command makes on the mount: the nested link moved, then the outermost link.
+#[tokio::test(flavor = "multi_thread")]
+async fn moving_a_nested_link_on_the_mount_serves_its_new_pin_at_once() {
+    use lore_revision::util::path::RelativePath;
+
+    use crate::helper::in_memory;
+    use crate::helper::in_memory::Linked;
+
+    let instance = Instance::new(&[("a.txt", b"alpha")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            let writer = in_memory_writer(&instance);
+            let inner = lore_revision::lore::RepositoryId::from(uuid::Uuid::now_v7());
+            let outer = lore_revision::lore::RepositoryId::from(uuid::Uuid::now_v7());
+            let outer_holding = async |inner_pin: Hash| {
+                in_memory::linked_revision_storing(
+                    &writer,
+                    outer,
+                    &[
+                        ("o.txt", Linked::File(b"outer")),
+                        ("inner", Linked::Link(inner, inner_pin)),
+                    ],
+                )
+                .await
+            };
+            let outer_pin = outer_holding(in_memory::linked_revision(&writer, inner).await).await;
+            merge_a_link_to(&instance, &fs, outer, outer_pin).await;
+            commit_through(&instance, &fs, false)
+                .await
+                .expect("the commit of the merge");
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            let nested = lookup(&fs, vendor, "inner").await.expect("the nested link");
+            lookup(&fs, nested, "l.txt")
+                .await
+                .expect("the nested link is served");
+
+            let moved = in_memory::linked_revision_holding(&writer, inner, &["m.txt"]).await;
+            let mut link = fs
+                .state()
+                .node(
+                    instance.fixture.repository.clone(),
+                    node_at(&instance, &fs, "vendor").await,
+                )
+                .await
+                .expect("the outermost link");
+            link.address.hash = outer_holding(moved).await;
+            let path = |path: &str| RelativePath::new_from_initial_path(path).expect("a path");
+            let repository = instance.command_context(&fs, None);
+            lore_revision::fs::filesystem_provider::with_operation(
+                repository.file_system(),
+                async |operation| {
+                    operation
+                        .repin_link(&path("vendor/inner"), moved, ROOT_NODE)
+                        .await?;
+                    operation
+                        .place_link(&path("vendor"), Some(&link), false)
+                        .await
+                },
+            )
+            .await
+            .expect("the move");
+
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            let nested = lookup(&fs, vendor, "inner").await.expect("the nested link");
+            lookup(&fs, nested, "m.txt")
+                .await
+                .expect("the nested link's new pin is served");
+            assert_eq!(lookup(&fs, nested, "l.txt").await, Err(Errno::ENOENT));
+            lookup(&fs, vendor, "o.txt")
+                .await
+                .expect("the link holding it stays served");
+        })
+        .await;
+}
+
+/// A remount where local changes stand at the path of a link the staged state holds leaves them
+/// served there, and not the link.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remount_leaves_local_changes_where_a_staged_link_would_stand() {
+    let instance = Instance::new(&[("a.txt", b"alpha")]).await;
+    LORE_CONTEXT
+        .scope(fuse_fixture::setup_test_execution(), async {
+            let fs = provider(&instance).await;
+            merge_a_link(&instance, &fs).await;
+            drop(fs);
+            let local = instance.write_dir().join("vendor");
+            std::fs::create_dir_all(&local).expect("a local directory");
+            std::fs::write(local.join("local.txt"), b"local").expect("a local file");
+
+            let fs = provider(&instance).await;
+            let vendor = lookup(&fs, ROOT_INO, "vendor").await.expect("vendor");
+            lookup(&fs, vendor, "local.txt")
+                .await
+                .expect("the local file stays served");
+            assert_eq!(lookup(&fs, vendor, "l.txt").await, Err(Errno::ENOENT));
         })
         .await;
 }

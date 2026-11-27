@@ -7,6 +7,7 @@ mod diff;
 #[cfg(feature = "test-util")]
 pub mod diff;
 pub mod dump;
+mod found;
 pub mod node;
 #[cfg(not(feature = "test-util"))]
 pub(crate) mod os_diff;
@@ -45,6 +46,8 @@ pub use diff::GraftOracle;
 #[cfg(target_os = "linux")]
 pub(crate) use diff::diff_states_into;
 pub(crate) use diff::diff_subtree_flagged;
+pub use found::FoundNode;
+pub use found::HeldNode;
 use futures::future::Either;
 use lore_base::error::InvalidPath;
 use lore_base::lore_spawn;
@@ -148,7 +151,6 @@ use crate::immutable::read_options_from_repository;
 use crate::instance::InstanceId;
 use crate::interface::LoreString;
 use crate::link::LinkFlags;
-use crate::link::LinkedState;
 use crate::lore::Address;
 use crate::lore::BranchId;
 use crate::lore::Context;
@@ -199,16 +201,19 @@ use crate::repository::RepositoryWriteToken;
 use crate::repository::is_reserved_node_name;
 use crate::repository::prefetch;
 use crate::revision::RevisionMetadata;
+use crate::runtime::CancellationCheck;
+use crate::runtime::check_cancelled;
 use crate::stage::stage_delete;
 use crate::store::KeyType;
 use crate::store::StoreMatch;
 use crate::util::path::RelativePath;
 use crate::util::path::RelativePathBuf;
+use crate::util::request_tracker::CollectStep;
 use crate::util::request_tracker::StoreRequestTracker;
 
 /// Data for an event summarizing a dumped repository state.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRepositoryStateDumpEventData {
     /// Sequence number of the revision.
@@ -223,7 +228,7 @@ pub struct LoreRepositoryStateDumpEventData {
 
 /// Data for an event describing a single node in a dumped repository state.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRepositoryStateDumpNodeEventData {
     /// Name of the node.
@@ -3309,6 +3314,26 @@ impl State {
         self.node_delta(repository, node, true).await
     }
 
+    /// The entries the delta of this revision records for changes other than deletions, sorted by
+    /// node: those [`Self::node_change`] finds.
+    pub async fn changed_nodes(
+        &self,
+        repository: Arc<RepositoryContext>,
+    ) -> Result<Vec<NodeDelta>, StateError> {
+        let delta_block = self
+            .delta_block(repository)
+            .await?
+            .to_aligned::<NodeDelta>();
+        let mut entries: Vec<NodeDelta> = delta_block
+            .as_type_slice::<NodeDelta>()
+            .iter()
+            .filter(|entry| entry.action != FileAction::Delete as u16)
+            .copied()
+            .collect();
+        entries.sort_unstable_by_key(|entry| entry.node);
+        Ok(entries)
+    }
+
     /// The entry the delta of this revision records for `node` that is a deletion where `deletion`
     /// says, and one that isn't otherwise.
     async fn node_delta(
@@ -5574,17 +5599,16 @@ impl State {
         Ok(walked.answer.is_some())
     }
 
-    /// Collect the repository-relative paths of all dirty nodes at or under
-    /// `root_node`, the set to stage. `base_path` is `root_node`'s path and the
-    /// prefix of every returned path. A link at `root_node` and each dirty link
-    /// below it are followed into the linked state each pins, up to
-    /// [`MAX_LINK_DEPTH`] links deep.
+    /// What a stage without `--scan` takes at or under `root_node` ([`DirtyPaths`]). `base_path` is
+    /// `root_node`'s path and the prefix of every returned path. A link at `root_node` and each
+    /// dirty link below it are followed into the linked state each pins, up to [`MAX_LINK_DEPTH`]
+    /// links deep.
     pub async fn collect_dirty_paths(
         &self,
         repository: Arc<RepositoryContext>,
         root_node: NodeID,
         base_path: RelativePath,
-    ) -> Result<Vec<RelativePath>, StateError> {
+    ) -> Result<DirtyPaths, StateError> {
         if let Some(pin) = self.link_pin(repository.clone(), root_node).await? {
             return Self::collect_pinned_dirty_paths(pin, &repository, base_path, 0).await;
         }
@@ -5609,7 +5633,7 @@ impl State {
         repository: &Arc<RepositoryContext>,
         path: RelativePath,
         link_depth: usize,
-    ) -> Result<Vec<RelativePath>, StateError> {
+    ) -> Result<DirtyPaths, StateError> {
         let (linked_repository, linked_state) = pin.open(repository).await?;
         Box::pin(linked_state.collect_dirty_paths_linked(
             linked_repository,
@@ -5620,14 +5644,18 @@ impl State {
         .await
     }
 
+    /// [`Self::collect_dirty_paths`] in a state reached through `link_depth` links. A directory
+    /// marked added or moved is a change of its own, whatever it holds, the collection's root but
+    /// the repository's included ([`stages_as_itself`]); the marked changes below it are collected
+    /// as well.
     async fn collect_dirty_paths_linked(
         &self,
         repository: Arc<RepositoryContext>,
         root_node: NodeID,
         base_path: RelativePath,
         link_depth: usize,
-    ) -> Result<Vec<RelativePath>, StateError> {
-        let mut result = Vec::new();
+    ) -> Result<DirtyPaths, StateError> {
+        let mut result = DirtyPaths::default();
         let force = execution_context().globals().force();
         // Work in immutable `RelativePath` throughout: `push_into_buf` borrows
         // the parent (no per-sibling clone) and a single `freeze` per retained
@@ -5643,10 +5671,14 @@ impl State {
                 .await
                 .forward::<StateError>("Failed to get children for dirty path collection")?;
 
-            if node_id == root_node && children.is_empty() && !path.is_empty() {
+            if node_id == root_node && !path.is_empty() {
                 let node = self.node(repository.clone(), node_id).await?;
-                let tracked = node.is_dirty_add()
-                    && node.is_directory()
+                let itself = stages_as_itself(&node);
+                let whole = node.is_directory()
+                    && node.is_dirty_add()
+                    && node.is_staged()
+                    && children.is_empty();
+                let tracked = (itself || whole)
                     && !force
                     && self
                         .tracks(
@@ -5655,8 +5687,7 @@ impl State {
                             NodeFlags::from_bits_retain(node.flags),
                         )
                         .await?;
-                if node.is_dirty_add()
-                    && node.is_directory()
+                if (itself || whole)
                     && (force
                         || repository.filter.should_descend(
                             states,
@@ -5664,9 +5695,12 @@ impl State {
                             FilterMode::TRACKED.at(tracked),
                         ))
                 {
-                    result.push(path);
+                    if itself {
+                        result.directories.push(path.clone());
+                    } else {
+                        result.paths.push(path.clone());
+                    }
                 }
-                continue;
             }
 
             for &child_id in &children {
@@ -5714,26 +5748,24 @@ impl State {
                 }
 
                 if child.is_file() {
-                    result.push(child_path);
+                    result.paths.push(child_path);
                 } else if child.is_link() {
                     if link_depth < MAX_LINK_DEPTH {
-                        let linked_paths = Self::collect_pinned_dirty_paths(
+                        let linked = Self::collect_pinned_dirty_paths(
                             child.linked_node(),
                             &repository,
                             child_path,
                             link_depth,
                         )
                         .await?;
-                        result.extend(linked_paths);
+                        result.paths.extend(linked.paths);
+                        result.directories.extend(linked.directories);
                     }
                 } else if child.is_directory() {
-                    // A new (dirty-add) directory is itself a change to stage. One
-                    // only marked, not staged, is that only where it is empty, with
-                    // no child to carry it: one holding nodes is carried by them,
-                    // and recorded itself it would stage everything the working
-                    // tree holds below it, marked or not.
-                    if child.is_dirty_add() && !marked_directory_carried_by_children(&child) {
-                        result.push(child_path.clone());
+                    if stages_as_itself(&child) {
+                        result.directories.push(child_path.clone());
+                    } else if child.is_dirty_add() {
+                        result.paths.push(child_path.clone());
                     }
                     // A dirty-delete directory is staged as the deletion of its
                     // whole subtree: stage_delete on a directory recurses and
@@ -5741,7 +5773,7 @@ impl State {
                     // and don't descend — collecting descendants here would only
                     // queue redundant deletes that stage_delete already covers.
                     if child.is_dirty_delete() {
-                        result.push(child_path);
+                        result.paths.push(child_path);
                     } else {
                         stack.push((child_id, child_path, child_states));
                     }
@@ -5959,52 +5991,79 @@ impl State {
     /// that name, and a revision holding one anyway is not reached through it, whichever case
     /// it is spelled in. Resolution is by name hash, which folds case, so this is the one check
     /// on the path that a listing's skip of such a node does not already cover.
-    ///
-    /// Answers [`Self::find_relative`]'s future itself, mapped to the link, so the caller's future
-    /// holds no second copy of the arguments.
-    pub fn find_relative_node_link<'a>(
-        &'a self,
-        repository: Arc<RepositoryContext>,
-        root: NodeID,
-        path: &'a str,
-    ) -> impl Future<Output = Result<NodeLink, StateError>> + Send + 'a {
-        futures::FutureExt::map(self.find_relative(repository, root, path), |found| {
-            found.map(|(link, _)| link)
-        })
-    }
-
-    /// [`Self::find_relative`], with the repository and state holding the node: the linked ones
-    /// where a link was crossed to reach it, and `repository` and this state otherwise.
-    ///
-    /// Answers [`Self::find_relative`]'s future itself, mapped, so the caller's future holds no
-    /// second copy of the arguments.
-    pub(crate) fn find_relative_held<'a>(
-        self: &'a Arc<Self>,
-        repository: Arc<RepositoryContext>,
-        root: NodeID,
-        path: &'a str,
-    ) -> impl Future<Output = Result<(NodeLink, LinkedState), StateError>> + Send + 'a {
-        let own = (repository.clone(), self.clone());
-        futures::FutureExt::map(self.find_relative(repository, root, path), move |found| {
-            found.map(|(link, held)| (link, held.unwrap_or(own)))
-        })
-    }
-
-    /// [`Self::find_relative_node_link`], with the linked state holding the node where a link was
-    /// crossed to reach it, for a caller that reads the node.
-    pub(crate) async fn find_relative(
+    pub async fn locate_node_below(
         &self,
         repository: Arc<RepositoryContext>,
         root: NodeID,
         path: &str,
-    ) -> Result<(NodeLink, Option<LinkedState>), StateError> {
+    ) -> Result<FoundNode, StateError> {
         let stop = self
             .find_to_link::<true>(&repository, root, path, false)
             .await?;
         self.find_relative_from(repository, path, stop).await
     }
 
-    /// [`Self::find_relative`] resumed where [`Self::find_to_link`] stopped on `path`, for a
+    /// [`Self::locate_node_below`] from the root.
+    ///
+    /// Answers [`Self::locate_node_below`]'s future itself, so the caller's future holds no second
+    /// copy of the arguments.
+    pub fn locate_node<'a>(
+        &'a self,
+        repository: Arc<RepositoryContext>,
+        path: &'a str,
+    ) -> impl Future<Output = Result<FoundNode, StateError>> + Send + 'a {
+        self.locate_node_below(repository, ROOT_NODE, path)
+    }
+
+    /// [`Self::locate_node_below`], held by the pair that numbers the node.
+    ///
+    /// Answers [`Self::locate_node_below`]'s future itself, mapped, so the caller's future holds no
+    /// second copy of the arguments.
+    pub(crate) fn locate_held_node_below<'a>(
+        self: &'a Arc<Self>,
+        repository: Arc<RepositoryContext>,
+        root: NodeID,
+        path: &'a str,
+    ) -> impl Future<Output = Result<HeldNode, StateError>> + Send + 'a {
+        let searched = (repository.clone(), self.clone());
+        futures::FutureExt::map(
+            self.locate_node_below(repository, root, path),
+            move |found| found.map(|found| found.held(searched)),
+        )
+    }
+
+    /// [`Self::locate_held_node_below`] for a valid node, `None` where the tree does not hold
+    /// `path`.
+    ///
+    /// Answers [`Self::locate_held_node_below`]'s future itself, mapped, so the caller's future
+    /// holds no second copy of the arguments.
+    pub(crate) fn locate_held_node_below_if_present<'a>(
+        self: &'a Arc<Self>,
+        repository: Arc<RepositoryContext>,
+        root: NodeID,
+        path: &'a str,
+    ) -> impl Future<Output = Result<Option<HeldNode>, StateError>> + Send + 'a {
+        futures::FutureExt::map(
+            self.locate_held_node_below(repository, root, path),
+            |found| match found {
+                Ok(held) => Ok(held.id().is_valid_node_id().then_some(held)),
+                Err(err) if err.is_node_not_found() => Ok(None),
+                Err(err) => Err(err),
+            },
+        )
+    }
+
+    /// The node at `path` as a bare link, for tests that read it.
+    #[cfg(feature = "test-util")]
+    pub async fn find_node_link(
+        &self,
+        repository: Arc<RepositoryContext>,
+        path: &str,
+    ) -> Result<NodeLink, StateError> {
+        Ok(self.locate_node(repository, path).await?.identity())
+    }
+
+    /// [`Self::locate_node_below`] resumed where [`Self::find_to_link`] stopped on `path`, for a
     /// caller that reads the stop itself first.
     ///
     /// Not an `async fn`: only a link crossed awaits, and its future holds only what crossing
@@ -6014,16 +6073,13 @@ impl State {
         repository: Arc<RepositoryContext>,
         path: &'a str,
         stop: PathStop,
-    ) -> impl Future<Output = Result<(NodeLink, Option<LinkedState>), StateError>> + Send + 'a {
+    ) -> impl Future<Output = Result<FoundNode, StateError>> + Send + 'a {
         let link = match stop.at {
             Stop::End => {
-                return futures::future::Either::Left(std::future::ready(Ok((
-                    NodeLink {
-                        node: stop.node,
-                        repository: repository.id,
-                        revision: self.revision(),
-                    },
-                    None,
+                return futures::future::Either::Left(std::future::ready(Ok(FoundNode::own(
+                    stop.node,
+                    &repository,
+                    self,
                 ))));
             }
             Stop::Missing => {
@@ -6042,23 +6098,23 @@ impl State {
         futures::future::Either::Right(async move {
             let repository = repository.to_link_context(link.repository).await;
             let link_state = State::deserialize(repository.clone(), link.revision).await?;
-            let (found, held) = link_state
-                .find_relative_boxed(repository.clone(), link.node, rest)
+            let found = link_state
+                .locate_node_below_boxed(repository.clone(), link.node, rest)
                 .await?;
-            Ok((found, held.or(Some((repository, link_state)))))
+            Ok(found.or_held((repository, link_state)))
         })
     }
 
-    /// [`Self::find_relative`] for [`Self::find_relative_from`] to recurse into, boxed as a trait
-    /// object outside it. Its own type would hold `find_relative_from`'s, so proving that one
-    /// `Send` would never end.
-    fn find_relative_boxed<'a>(
+    /// [`Self::locate_node_below`] for [`Self::find_relative_from`] to recurse into, boxed as a
+    /// trait object outside it. Its own type would hold `find_relative_from`'s, so proving that
+    /// one `Send` would never end.
+    fn locate_node_below_boxed<'a>(
         &'a self,
         repository: Arc<RepositoryContext>,
         root: NodeID,
         path: &'a str,
-    ) -> crate::BoxFuture<'a, Result<(NodeLink, Option<LinkedState>), StateError>> {
-        Box::pin(self.find_relative(repository, root, path))
+    ) -> crate::BoxFuture<'a, Result<FoundNode, StateError>> {
+        Box::pin(self.locate_node_below(repository, root, path))
     }
 
     /// Where a walk of `path` below `root` stops: at its end, at the first link it crosses, or
@@ -6126,15 +6182,6 @@ impl State {
         })
     }
 
-    pub async fn find_node_link(
-        &self,
-        repository: Arc<RepositoryContext>,
-        path: &str,
-    ) -> Result<NodeLink, StateError> {
-        self.find_relative_node_link(repository, ROOT_NODE, path)
-            .await
-    }
-
     /// The kind this tree tracks `path` below `root` as ([`State::tracks`]): `Some` of whether a
     /// filter asks about it as a directory, or `None` where the tree does not track it. The node is
     /// read through any link the path crosses, and a path the tree cannot resolve is not tracked.
@@ -6144,55 +6191,23 @@ impl State {
         root: NodeID,
         path: &str,
     ) -> Result<Option<bool>, StateError> {
-        let Some(link) = self
-            .find_relative_node_link(repository.clone(), root, path)
+        let Some(held) = self
+            .locate_held_node_below(repository, root, path)
             .await
             .ok()
-            .filter(NodeLink::is_valid)
+            .filter(|held| held.id().is_valid_node_id())
         else {
             return Ok(None);
         };
-        let Ok((repository, state)) = link.resolve(repository, self.clone()).await else {
-            return Ok(None);
-        };
-        let Ok(node) = state.node(repository.clone(), link.node).await else {
+        let Ok(node) = held.read().await else {
             return Ok(None);
         };
         let flags = NodeFlags::from_bits_retain(node.flags);
-        Ok(state
-            .tracks(&repository, link.node, flags)
+        Ok(held
+            .state()
+            .tracks(held.repository(), held.id(), flags)
             .await?
             .then(|| !flags.contains(NodeFlags::File)))
-    }
-
-    pub async fn find_link_parent_node(
-        &self,
-        repository: Arc<RepositoryContext>,
-        path: &str,
-        target_repository_id: RepositoryId,
-    ) -> Result<NodeID, StateError> {
-        let mut current_path = RelativePath::from_str(path).unwrap_or_default();
-
-        while !current_path.is_empty() {
-            current_path.pop();
-
-            if current_path.is_empty() {
-                break;
-            }
-
-            if let Ok(node_link) = self
-                .find_node_link(repository.clone(), current_path.as_str())
-                .await
-                && node_link.is_valid()
-                && let Ok(node) = self.node(repository.clone(), node_link.node).await
-                && node.is_link()
-                && node.address.context == target_repository_id.into()
-            {
-                return Ok(node_link.node);
-            }
-        }
-
-        Err(NodeNotFound.into())
     }
 
     pub async fn find_node(
@@ -6200,24 +6215,8 @@ impl State {
         repository: Arc<RepositoryContext>,
         path: &str,
     ) -> Result<Node, StateError> {
-        let (found, held) = self
-            .find_relative(repository.clone(), ROOT_NODE, path)
-            .await?;
-        self.found_node(repository, &found, held).await
-    }
-
-    /// The node [`Self::find_relative`] found, read in the linked state it returned where it
-    /// crossed a link to reach the node.
-    pub(crate) async fn found_node(
-        &self,
-        repository: Arc<RepositoryContext>,
-        found: &NodeLink,
-        held: Option<LinkedState>,
-    ) -> Result<Node, StateError> {
-        match held {
-            Some((repository, state)) => state.node(repository, found.node).await,
-            None => self.node(repository, found.node).await,
-        }
+        let found = self.locate_node(repository.clone(), path).await?;
+        self.found_node(repository, &found).await
     }
 
     pub async fn node(
@@ -6921,6 +6920,15 @@ impl State {
         self.serialized_link_list(repository).await
     }
 
+    /// Whether the link registry holds a link, answered from the runtime copy where present and
+    /// from the serialized list's hash otherwise, which is zero for an empty list, without a read.
+    pub(crate) fn registers_link(&self) -> bool {
+        match self.runtime_read().link_list.as_ref() {
+            Some(link_list) => !link_list.is_empty(),
+            None => !self.data_read().hash_link.is_zero(),
+        }
+    }
+
     /// Applies `edit` to the runtime link registry, holding the lock across the whole
     /// read-modify-write.
     ///
@@ -7092,8 +7100,8 @@ impl State {
         .await
     }
 
-    /// Pins every row of `link_id` at `signature` on `branch`, keeping their flags, and answers
-    /// those rows.
+    /// Pins the rows of `link_id` that `only` selects at `signature` on `branch`, keeping their
+    /// flags, and answers those rows.
     #[lore_macro::test_pub]
     pub(crate) async fn link_repin(
         &self,
@@ -7101,12 +7109,13 @@ impl State {
         link_id: RepositoryId,
         branch: BranchId,
         signature: Hash,
+        only: impl Fn(&LinkReference) -> bool,
     ) -> Result<Vec<LinkReference>, StateError> {
         let mut rows = Vec::new();
         self.edit_link_list(repository, link_id, |link_list| {
             for link in link_list
                 .iter_mut()
-                .filter(|link| link.repository == link_id)
+                .filter(|link| link.repository == link_id && only(link))
             {
                 link.branch = branch;
                 link.signature = signature;
@@ -7632,11 +7641,30 @@ fn dirty_path_contributes(child: &Node, skip_staged: bool) -> bool {
         && !marked_directory_carried_by_children(child)
 }
 
-/// Whether `node` is a new directory only marked dirty, not staged, whose children carry it.
-/// Recorded itself, it would be staged or re-marked whole, taking in everything the working tree
-/// holds below it, marked or not. A staged one is still recorded: its path is what stages the
-/// removal of what staging put below it.
-fn marked_directory_carried_by_children(node: &Node) -> bool {
+/// What a stage without `--scan` takes at or under a node ([`State::collect_dirty_paths`]).
+#[derive(Debug, Default)]
+pub struct DirtyPaths {
+    /// The paths staged with what the working tree holds below them: files, deletions with their
+    /// subtrees, and staged adds, whose walk removes what staging put below them that the working
+    /// tree no longer holds.
+    pub paths: Vec<RelativePath>,
+    /// The directories staged as themselves, their nodes and their parents alone
+    /// ([`stages_as_itself`]).
+    pub directories: Vec<RelativePath>,
+}
+
+/// Whether a stage takes `node` as itself, its node and its parents alone: a directory marked
+/// added or moved, not staged, a change of its own whatever it holds.
+fn stages_as_itself(node: &Node) -> bool {
+    node.is_directory() && !node.is_staged() && (node.is_dirty_add() || node.is_dirty_move())
+}
+
+/// Whether `node` is a new directory only marked dirty, not staged, whose children carry it: a
+/// stage leaves one the working tree no longer holds to the paths below it, and a dirty walk
+/// records no path of it, as re-marked whole it would take in everything the working tree holds
+/// below it, marked or not. A staged one is still recorded: its path is what stages the removal
+/// of what staging put below it.
+pub(crate) fn marked_directory_carried_by_children(node: &Node) -> bool {
     node.is_dirty_add() && !node.is_staged() && node.is_directory() && node.child().is_some()
 }
 
@@ -8260,20 +8288,14 @@ pub async fn gather_tree_paths(
     let (walk_state, walk_repository, parent_node_id, starts_linked) = if path.is_empty() {
         (state, repository, ROOT_NODE, false)
     } else {
-        let node_link = state
-            .find_node_link(repository.clone(), path.as_str())
-            .await?;
-        if !node_link.is_valid() {
+        let found = state.locate_node(repository.clone(), path.as_str()).await?;
+        if !found.is_valid() {
             return Err(NodeNotFound.into());
         }
-        if node_link.revision == state.revision() {
-            (state, repository, node_link.node, false)
-        } else {
-            let starts_linked = node_link.repository != repository.id;
-            let linked_repo = repository.to_link_context(node_link.repository).await;
-            let linked_state = State::deserialize(linked_repo.clone(), node_link.revision).await?;
-            (linked_state, linked_repo, node_link.node, starts_linked)
-        }
+        let own_id = repository.id;
+        let (node, (walk_repository, walk_state)) = found.held((repository, state)).into_parts();
+        let starts_linked = walk_repository.id != own_id;
+        (walk_state, walk_repository, node, starts_linked)
     };
 
     let mut walk = TreeWalk::default();
@@ -8292,6 +8314,9 @@ pub async fn gather_tree_paths(
         include_last_revision,
     )
     .await?;
+    // A linked subtree that fails to read is skipped, so the walk checks once more before it
+    // reports a complete tree.
+    check_cancelled()?;
     walk.indices = HashMap::new();
     Ok(walk)
 }
@@ -8357,7 +8382,7 @@ async fn enumerate_children(
 
 /// Skips the linked subtree at `revision` of `repository` that failed with `err`: logs the failure,
 /// at debug level for what is not found, and counts it in `failures` where given. A read refused
-/// as `SlowDown` is returned instead, to fail the walk.
+/// as `SlowDown`, and a cancelled walk, are returned instead, to fail the walk.
 #[lore_macro::test_pub]
 fn skip_linked_subtree(
     prefix: &str,
@@ -8367,7 +8392,7 @@ fn skip_linked_subtree(
     failures: Option<&mut AttributionFailures>,
 ) -> Result<(), StateError> {
     match err {
-        StateErrors::SlowDown(_) => return Err(err),
+        StateErrors::SlowDown(_) | StateErrors::Cancelled(_) => return Err(err),
         StateErrors::NotFound(_)
         | StateErrors::NodeNotFound(_)
         | StateErrors::LinkNotFound(_)
@@ -8446,6 +8471,7 @@ async fn gather_tree_paths_node(
     } else {
         false
     };
+    check_cancelled()?;
     let last_revision = match attribution.as_deref_mut() {
         Some(attribution) => {
             attribution
@@ -8825,7 +8851,8 @@ fn add_change_where(
 /// identity, they pair in the order they stand.
 ///
 /// The vector is modified in place: the add becomes the move, taking the delete's `from` as its
-/// source, and the delete is dropped. Changes that are not coalesced keep their order.
+/// source and its [`change::Flags::KeptBeside`], and the delete is dropped. Changes that are not
+/// coalesced keep their order.
 pub fn detect_and_coalesce_moves(changes: &mut Vec<NodeChange>) {
     let is_candidate = |change: &NodeChange| {
         matches!(change.action, FileAction::Add | FileAction::Delete)
@@ -8873,6 +8900,7 @@ pub fn detect_and_coalesce_moves(changes: &mut Vec<NodeChange>) {
         };
 
         let from_state = changes[delete].from.clone();
+        let kept_beside = changes[delete].flags & change::Flags::KeptBeside;
         lore_trace!(
             "Detected move: {} -> {}",
             from_state.mapping.path.as_str(),
@@ -8881,6 +8909,7 @@ pub fn detect_and_coalesce_moves(changes: &mut Vec<NodeChange>) {
         let moved = &mut changes[add];
         moved.action = FileAction::Move;
         moved.from = from_state;
+        moved.flags |= kept_beside;
         if moved.from.differs_from(&moved.to) {
             moved.flags |= change::Flags::Modify;
         }
@@ -9332,35 +9361,21 @@ pub async fn diff(
     filter_mode: FilterMode,
 ) -> Result<DiffWalkStats, StateError> {
     if let Some(path) = path {
-        let from_link = state_from
-            .find_node_link(repository_from.clone(), path.as_str())
+        let (from_node, (repository_from, state_from)) = state_from
+            .locate_node(repository_from.clone(), path.as_str())
             .await
-            .unwrap_or(NodeLink::invalid());
-        let to_link = state_to
-            .find_node_link(repository_to.clone(), path.as_str())
+            .unwrap_or_default()
+            .held((repository_from, state_from))
+            .into_parts();
+        let (to_node, (repository_to, state_to)) = state_to
+            .locate_node(repository_to.clone(), path.as_str())
             .await
-            .unwrap_or(NodeLink::invalid());
+            .unwrap_or_default()
+            .held((repository_to, state_to))
+            .into_parts();
 
-        let mut repository_from = repository_from;
-        let state_from =
-            if !from_link.repository.is_zero() && from_link.repository != repository_from.id {
-                repository_from = repository_from.to_link_context(from_link.repository).await;
-                State::deserialize(repository_from.clone(), from_link.revision).await?
-            } else {
-                state_from
-            };
-
-        let mut repository_to = repository_to;
-        let state_to = if !to_link.repository.is_zero() && to_link.repository != repository_to.id {
-            repository_to = repository_to.to_link_context(to_link.repository).await;
-            State::deserialize(repository_to.clone(), to_link.revision).await?
-        } else {
-            state_to
-        };
-
-        let from =
-            node_change_state(&repository_from, &state_from, from_link.node, path.clone()).await;
-        let to = node_change_state(&repository_to, &state_to, to_link.node, path.clone()).await;
+        let from = node_change_state(&repository_from, &state_from, from_node, path.clone()).await;
+        let to = node_change_state(&repository_to, &state_to, to_node, path.clone()).await;
 
         diff::diff_subtree(from, to, path, graft, changes, filter_mode).await
     } else {
@@ -9547,14 +9562,16 @@ pub(crate) async fn diff_subtree_paths(
 /// A subtree a working copy materializes somewhere other than where the repository holding it
 /// spells it from — what a link mounts — is diffed by naming its node in each revision and
 /// reporting at the path it is materialized at, so no change carries the other spelling.
+/// `flags` are joined to the flags the sides derive.
 pub async fn diff_collect_subtree(
     from: NodeChangeState,
     to: NodeChangeState,
     path: RelativePath,
+    flags: DiffFlags,
     filter_mode: FilterMode,
 ) -> Result<Vec<NodeChange>, StateError> {
     let mut changes = ChangeStream::spawn(async move |changes| {
-        diff::diff_subtree(from, to, path, None, &changes, filter_mode).await
+        diff::diff_subtree_flagged(from, to, path, None, flags, &changes, filter_mode).await
     })
     .collect()
     .await?;
@@ -9567,12 +9584,54 @@ pub async fn diff_collect_subtree(
 /// preserving the post-walk move-coalescing and path-sort that the legacy
 /// `state::diff` performed. Callers that want a `Vec<NodeChange>` use this
 /// wrapper; callers that want streaming use `diff` directly.
-pub async fn diff_collect(
+pub fn diff_collect(
     repository_from: Arc<RepositoryContext>,
     state_from: Arc<State>,
     repository_to: Arc<RepositoryContext>,
     state_to: Arc<State>,
     path: Option<RelativePath>,
+    filter_mode: FilterMode,
+) -> impl Future<Output = Result<Vec<NodeChange>, StateError>> {
+    collect_coalesced(
+        repository_from,
+        state_from,
+        repository_to,
+        state_to,
+        path,
+        DiffFlags::empty(),
+        filter_mode,
+    )
+}
+
+/// [`diff_collect`] of the whole trees, with `flags` joined to the flags the sides derive.
+pub(crate) fn diff_collect_flagged(
+    repository_from: Arc<RepositoryContext>,
+    state_from: Arc<State>,
+    repository_to: Arc<RepositoryContext>,
+    state_to: Arc<State>,
+    flags: DiffFlags,
+    filter_mode: FilterMode,
+) -> impl Future<Output = Result<Vec<NodeChange>, StateError>> {
+    collect_coalesced(
+        repository_from,
+        state_from,
+        repository_to,
+        state_to,
+        None,
+        flags,
+        filter_mode,
+    )
+}
+
+/// [`collect_diff`] with every directory deleted as a whole listed path by path, its moves
+/// coalesced and the changes sorted by path.
+async fn collect_coalesced(
+    repository_from: Arc<RepositoryContext>,
+    state_from: Arc<State>,
+    repository_to: Arc<RepositoryContext>,
+    state_to: Arc<State>,
+    path: Option<RelativePath>,
+    flags: DiffFlags,
     filter_mode: FilterMode,
 ) -> Result<Vec<NodeChange>, StateError> {
     let mut changes = collect_diff(
@@ -9581,6 +9640,7 @@ pub async fn diff_collect(
         repository_to,
         state_to,
         path,
+        flags,
         filter_mode,
         Deletes::Each,
     )
@@ -9591,28 +9651,47 @@ pub async fn diff_collect(
 }
 
 /// Every change [`diff`] emits below `path`, in the order it emits them, with a directory deleted as
-/// a whole emitted as `deletes` says.
+/// a whole emitted as `deletes` says. `flags` join the flags of a walk of the whole trees, where
+/// `path` is `None`, and are empty for a walk below a path.
+#[allow(clippy::too_many_arguments)]
 async fn collect_diff(
     repository_from: Arc<RepositoryContext>,
     state_from: Arc<State>,
     repository_to: Arc<RepositoryContext>,
     state_to: Arc<State>,
     path: Option<RelativePath>,
+    flags: DiffFlags,
     filter_mode: FilterMode,
     deletes: Deletes,
 ) -> Result<Vec<NodeChange>, StateError> {
-    let walk = async move |changes: ChangeSender| {
-        diff(
-            repository_from,
-            state_from,
-            repository_to,
-            state_to,
-            path,
-            None,
-            &changes,
-            filter_mode,
-        )
-        .await
+    let walk = async move |changes: ChangeSender| match path {
+        None => {
+            diff_whole_trees(
+                repository_from,
+                state_from,
+                repository_to,
+                state_to,
+                None,
+                flags,
+                &changes,
+                filter_mode,
+            )
+            .await
+        }
+        path => {
+            debug_assert!(flags.is_empty());
+            diff(
+                repository_from,
+                state_from,
+                repository_to,
+                state_to,
+                path,
+                None,
+                &changes,
+                filter_mode,
+            )
+            .await
+        }
     };
     let changes = match deletes {
         Deletes::Each => ChangeStream::spawn(walk),
@@ -9621,7 +9700,7 @@ async fn collect_diff(
     changes.collect().await
 }
 
-/// [`diff_collect`] where a directory deleted as a whole is one change carrying
+/// [`diff_collect_flagged`] where a directory deleted as a whole is one change carrying
 /// [`Flags::Subtree`](change::Flags::Subtree), which the caller expands as it gets to it through
 /// the [`Subtrees`] answered beside the changes.
 ///
@@ -9634,6 +9713,7 @@ pub(crate) async fn diff_collect_subtrees(
     state_from: Arc<State>,
     repository_to: Arc<RepositoryContext>,
     state_to: Arc<State>,
+    flags: DiffFlags,
     filter_mode: FilterMode,
 ) -> Result<(Vec<NodeChange>, Arc<Subtrees>), StateError> {
     let mut changes = collect_diff(
@@ -9642,6 +9722,7 @@ pub(crate) async fn diff_collect_subtrees(
         repository_to,
         state_to,
         None,
+        flags,
         filter_mode,
         Deletes::Whole,
     )
@@ -9856,20 +9937,29 @@ impl NodeMapping {
         }
     }
 
-    /// The node this mapping holds at `path`, or an invalid link where it holds none.
+    /// The node this mapping holds at `path`, or an invalid node where it holds none.
     ///
     /// `path` is spelled from the top-level repository instance root, as every change is, and the
     /// names below this mapping's own path are walked from `node`. Both are the tree's own
     /// spelling: a path taken from the file system answers for nothing where the two name a
     /// component with different case.
-    pub async fn node_at(&self, path: &RelativePath) -> NodeLink {
+    pub async fn node_at(&self, path: &RelativePath) -> FoundNode {
         let Some(below) = path.below(&self.path) else {
-            return NodeLink::invalid();
+            return FoundNode::default();
         };
         self.state
-            .find_relative_node_link(self.repository.clone(), self.node, below)
+            .locate_node_below(self.repository.clone(), self.node, below)
             .await
             .unwrap_or_default()
+    }
+
+    /// [`Self::node_at`] held by the pair that numbers it, `None` where this mapping holds no node
+    /// at `path`.
+    pub async fn held_at(&self, path: &RelativePath) -> Option<HeldNode> {
+        let found = self.node_at(path).await;
+        found
+            .is_valid()
+            .then(|| found.held((self.repository.clone(), self.state.clone())))
     }
 }
 
@@ -9894,8 +9984,8 @@ pub struct FilesystemDiffStats {
     /// `DiffWalkStats::finds_after_change` counts them. For tests.
     #[doc(hidden)]
     pub finds_after_change: AtomicU64,
-    /// One directory that cannot be listed, or file or name that cannot be read, which the walk
-    /// passed over, where it passed over any. A file that cannot be read compares as unmodified,
+    /// One directory that cannot be listed, file or name that cannot be read, or link mount whose
+    /// repository refuses the caller, which the walk passed over, where it passed over any. A file that cannot be read compares as unmodified,
     /// so this is all that tells a caller removing it that it may hold work.
     pub unreadable: parking_lot::Mutex<Option<RelativePath>>,
 }
@@ -10602,7 +10692,7 @@ pub(crate) async fn link_mount_work(
 
 /// Whether the working tree holds anything at `path` but an empty directory: an incoming
 /// revision writing there could overwrite it.
-async fn holds_anything(operation: &InstanceOperationImpl, path: &RelativePath) -> bool {
+pub(crate) async fn holds_anything(operation: &InstanceOperationImpl, path: &RelativePath) -> bool {
     match operation.read_directory(path).await {
         Ok(mut listing) => listing.next_with_untracked().await.is_some(),
         Err(_) => !matches!(operation.file_info(path).await, Ok(info) if !info.exists()),
@@ -10788,7 +10878,7 @@ async fn diff_context_at(
     } else {
         let filter = &base.from.repository.filter;
         let parent_states = filter.parent_exclusion_states(&path);
-        let from = mapping_at(&base.from, &path).await?;
+        let from = mapping_at(&base.from, &path).await;
         // A path the tree tracks is past the ignore slot, as in a walk, whatever the rules match.
         let (is_directory, tracked) = if from.node.is_valid_or_root_node_id() {
             let node = from.state.node(from.repository.clone(), from.node).await?;
@@ -10812,7 +10902,7 @@ async fn diff_context_at(
         if excluded {
             return Ok(None);
         }
-        (from, mapping_at(&base.current, &path).await?, states)
+        (from, mapping_at(&base.current, &path).await, states)
     };
     Ok(Some(FilesystemDiffContext {
         operation: base.operation.clone(),
@@ -10832,25 +10922,13 @@ async fn diff_context_at(
 
 /// What the tree `side` names holds at `path`, through any link on the way: an invalid node where
 /// it holds nothing there.
-async fn mapping_at(side: &NodeMapping, path: &RelativePath) -> Result<NodeMapping, StateError> {
-    let node_link = side
-        .state
-        .find_node_link(side.repository.clone(), path.as_str())
+async fn mapping_at(side: &NodeMapping, path: &RelativePath) -> NodeMapping {
+    side.state
+        .locate_node(side.repository.clone(), path.as_str())
         .await
-        .unwrap_or(NodeLink {
-            node: INVALID_NODE,
-            repository: side.repository.id,
-            revision: side.state.revision(),
-        });
-    let (repository, state) = node_link
-        .resolve(side.repository.clone(), side.state.clone())
-        .await?;
-    Ok(NodeMapping {
-        repository,
-        state,
-        path: path.clone(),
-        node: node_link.node,
-    })
+        .unwrap_or_default()
+        .held((side.repository.clone(), side.state.clone()))
+        .into_mapping(path.clone())
 }
 
 /// Hands one diff to `operation`, which answers with the walk behind a stream.
@@ -11003,12 +11081,13 @@ impl FileDiffContext {
             return Ok(parent);
         }
         match file_path.parent() {
-            Some(parent) if !parent.is_empty() => Ok(self
+            Some(parent) if !parent.is_empty() => self
                 .state_from
-                .find_node_link(self.repository_from.clone(), parent)
+                .locate_node(self.repository_from.clone(), parent)
                 .await
                 .forward::<StateError>("scan add: parent directory node missing for nested add")?
-                .node),
+                .own_node()
+                .ok_or_else(|| NodeNotFound.into()),
             _ => Ok(ROOT_NODE),
         }
     }
@@ -12357,7 +12436,11 @@ async fn collect_name_fragments(
     blocks: Vec<Address>,
 ) -> Result<Vec<Address>, StateError> {
     let mut tasks = JoinSet::new();
+    let cancellation = CancellationCheck::current();
     for address in blocks {
+        if cancellation.check().is_err() {
+            break;
+        }
         lore_spawn!(
             tasks,
             futures::FutureExt::map(
@@ -12385,6 +12468,8 @@ async fn collect_name_fragments(
         }
     }
 
+    // A read that failed because the request was dropped reports the drop, not the read.
+    check_cancelled()?;
     if let Some(err) = failure {
         return Err(err);
     }
@@ -12476,17 +12561,24 @@ pub async fn collect_fragments(
     collection: Collection,
     tracker: Arc<StoreRequestTracker>,
 ) -> Result<Vec<Address>, StateError> {
+    tracker.start_collection();
     let from_state_address = lore_spawn!({
         let repository = repository.clone();
         let state = state_from.clone();
         let tracker = tracker.clone();
         async move {
-            let addresses = collect_state_fragments(repository.clone(), state).await?;
-            // Collect all from block addresses, even uploaded, as we want to diff against these
-            let mut addresses =
-                collect_new_addresses(repository, &addresses, Collection::All, tracker).await?;
-            addresses.sort_unstable();
-            Ok(addresses)
+            tracker
+                .clone()
+                .time_step(CollectStep::FromState, async move {
+                    let addresses = collect_state_fragments(repository.clone(), state).await?;
+                    // Collect all from block addresses, even uploaded, as we want to diff against these
+                    let mut addresses =
+                        collect_new_addresses(repository, &addresses, Collection::All, tracker)
+                            .await?;
+                    addresses.sort_unstable();
+                    Ok(addresses)
+                })
+                .await
         }
     });
 
@@ -12495,53 +12587,78 @@ pub async fn collect_fragments(
         let state = state_to.clone();
         let tracker = tracker.clone();
         async move {
-            let addresses = collect_state_fragments(repository.clone(), state).await?;
-            let mut addresses =
-                collect_new_addresses(repository, &addresses, collection, tracker).await?;
-            addresses.sort_unstable();
-            Ok(addresses)
+            tracker
+                .clone()
+                .time_step(CollectStep::ToState, async move {
+                    let addresses = collect_state_fragments(repository.clone(), state).await?;
+                    let mut addresses =
+                        collect_new_addresses(repository, &addresses, collection, tracker).await?;
+                    addresses.sort_unstable();
+                    Ok(addresses)
+                })
+                .await
         }
     });
 
     let from_block_address = lore_spawn!({
         let repository = repository.clone();
         let state = state_from.clone();
+        let tracker = tracker.clone();
         async move {
-            // Blocks are never fragmented, safe to not call collect_new_addresses
-            let mut addresses = collect_node_blocks(repository, state).await?;
-            addresses.sort_unstable();
-            Ok(addresses)
+            tracker
+                .time_step(CollectStep::FromNodeBlocks, async move {
+                    // Blocks are never fragmented, safe to not call collect_new_addresses
+                    let mut addresses = collect_node_blocks(repository, state).await?;
+                    addresses.sort_unstable();
+                    Ok(addresses)
+                })
+                .await
         }
     });
 
     let to_block_address = lore_spawn!({
         let repository = repository.clone();
         let state = state_to.clone();
+        let tracker = tracker.clone();
         async move {
-            // Blocks are never fragmented, safe to not call collect_new_addresses
-            let mut addresses = collect_node_blocks(repository, state).await?;
-            addresses.sort_unstable();
-            Ok(addresses)
+            tracker
+                .time_step(CollectStep::ToNodeBlocks, async move {
+                    // Blocks are never fragmented, safe to not call collect_new_addresses
+                    let mut addresses = collect_node_blocks(repository, state).await?;
+                    addresses.sort_unstable();
+                    Ok(addresses)
+                })
+                .await
         }
     });
 
     let from_file_metadata_block_address = lore_spawn!({
         let repository = repository.clone();
         let state = state_from.clone();
+        let tracker = tracker.clone();
         async move {
             // Collect all from metadata block addresses, even uploaded, as we want to diff against these
-            let addresses = collect_file_metadata_blocks(repository, state).await?;
-            Ok(addresses)
+            tracker
+                .time_step(
+                    CollectStep::FromFileMetadataBlocks,
+                    collect_file_metadata_blocks(repository, state),
+                )
+                .await
         }
     });
 
     let to_file_metadata_block_address = lore_spawn!({
         let repository = repository.clone();
         let state = state_to.clone();
+        let tracker = tracker.clone();
         async move {
             // Collect all to metadata block addresses, even uploaded, as we want to inspect and load these
-            let addresses = collect_file_metadata_blocks(repository, state).await?;
-            Ok(addresses)
+            tracker
+                .time_step(
+                    CollectStep::ToFileMetadataBlocks,
+                    collect_file_metadata_blocks(repository, state),
+                )
+                .await
         }
     });
 
@@ -12553,10 +12670,15 @@ pub async fn collect_fragments(
         async move {
             // Safe to filter these directly to only contain not uploaded fragments, we don't
             // use it as input to any other collection
-            collect_new_file_fragments(
-                repository, state_from, state_to, ROOT_NODE, ROOT_NODE, collection, tracker,
-            )
-            .await
+            tracker
+                .clone()
+                .time_step(
+                    CollectStep::NewFiles,
+                    collect_new_file_fragments(
+                        repository, state_from, state_to, ROOT_NODE, ROOT_NODE, collection, tracker,
+                    ),
+                )
+                .await
         }
     });
 
@@ -12565,7 +12687,17 @@ pub async fn collect_fragments(
         let metadata_hash = state_to.metadata_hash();
         let tracker = tracker.clone();
         async move {
-            collect_new_revision_metadata_fragments(repository, metadata_hash, collection, tracker)
+            tracker
+                .clone()
+                .time_step(
+                    CollectStep::RevisionMetadata,
+                    collect_new_revision_metadata_fragments(
+                        repository,
+                        metadata_hash,
+                        collection,
+                        tracker,
+                    ),
+                )
                 .await
         }
     });
@@ -12599,7 +12731,10 @@ pub async fn collect_fragments(
     };
     let from_len = from_block_address.len();
     let to_len = to_block_address.len();
-    let diff_block_address = if failure.is_none() {
+    // A failed node block list leaves nothing to diff, so the steps that work on the diff are
+    // skipped and stay waiting.
+    let diff_reached = failure.is_none();
+    let diff_block_address = if diff_reached {
         collect_diff_addresses(from_block_address, to_block_address)
     } else {
         vec![]
@@ -12615,11 +12750,19 @@ pub async fn collect_fragments(
         let blocks = diff_block_address.clone();
         let tracker = tracker.clone();
         async move {
-            let addresses = collect_name_fragments(repository.clone(), blocks).await?;
-            let mut addresses =
-                collect_new_addresses(repository, &addresses, collection, tracker).await?;
-            addresses.sort_unstable();
-            Ok(addresses)
+            if !diff_reached {
+                return Ok(vec![]);
+            }
+            tracker
+                .clone()
+                .time_step(CollectStep::NewNames, async move {
+                    let addresses = collect_name_fragments(repository.clone(), blocks).await?;
+                    let mut addresses =
+                        collect_new_addresses(repository, &addresses, collection, tracker).await?;
+                    addresses.sort_unstable();
+                    Ok(addresses)
+                })
+                .await
         }
     });
 
@@ -12629,10 +12772,19 @@ pub async fn collect_fragments(
         let repository = repository.clone();
         let tracker = tracker.clone();
         async move {
-            let mut addresses =
-                collect_new_addresses(repository, &diff_block_address, collection, tracker).await?;
-            addresses.sort_unstable();
-            Ok(addresses)
+            if !diff_reached {
+                return Ok(vec![]);
+            }
+            tracker
+                .clone()
+                .time_step(CollectStep::NewNodeBlocks, async move {
+                    let mut addresses =
+                        collect_new_addresses(repository, &diff_block_address, collection, tracker)
+                            .await?;
+                    addresses.sort_unstable();
+                    Ok(addresses)
+                })
+                .await
         }
     });
 
@@ -12699,41 +12851,52 @@ pub async fn collect_fragments(
 
     let from_file_metadata_block_len = from_file_metadata_block_address.len();
     let to_file_metadata_block_len = to_file_metadata_block_address.len();
-    let (mut new_file_metadata_block_address, mut new_file_metadata_blob_address_tasks) = if failure
-        .is_none()
-    {
-        let mut new_file_metadata_address = vec![];
-        let mut tasks = JoinSet::new();
-        for (block_index, to_block_address) in to_file_metadata_block_address.iter().enumerate() {
-            if to_block_address.hash.is_zero() {
-                continue;
-            }
+    // Once any earlier step has failed, the blobs are skipped and their step stays waiting.
+    let (mut new_file_metadata_block_address, mut new_file_metadata_blob_address_tasks, blob_tasks) =
+        if failure.is_none() {
+            let blob_tasks = tracker.start_tasks(CollectStep::FileMetadataBlobs);
+            let mut new_file_metadata_address = vec![];
+            let mut tasks = JoinSet::new();
+            for (block_index, to_block_address) in to_file_metadata_block_address.iter().enumerate()
+            {
+                if to_block_address.hash.is_zero() {
+                    continue;
+                }
 
-            let from_block_address = from_file_metadata_block_address.get(block_index).cloned();
-            if from_block_address != Some(*to_block_address) {
-                new_file_metadata_address.push(*to_block_address);
+                let from_block_address = from_file_metadata_block_address.get(block_index).cloned();
+                if from_block_address != Some(*to_block_address) {
+                    new_file_metadata_address.push(*to_block_address);
 
-                // Check which metadata is new
-                let repository = repository.clone();
-                let state_to = state_to.clone();
-                lore_spawn!(
-                    tasks,
-                    collect_new_node_metadata_fragments(
-                        repository,
-                        state_to,
-                        from_block_address,
-                        *to_block_address,
-                        block_index,
-                        collection,
-                        tracker.clone(),
-                    )
-                );
+                    // Check which metadata is new
+                    let repository = repository.clone();
+                    let state_to = state_to.clone();
+                    let to_block_address = *to_block_address;
+                    let tracker = tracker.clone();
+                    let blob_tasks = blob_tasks.clone();
+                    blob_tasks.add();
+                    lore_spawn!(tasks, async move {
+                        let addresses = collect_new_node_metadata_fragments(
+                            repository,
+                            state_to,
+                            from_block_address,
+                            to_block_address,
+                            block_index,
+                            collection,
+                            tracker,
+                        )
+                        .await;
+                        blob_tasks.done();
+                        addresses
+                    });
+                }
             }
-        }
-        (new_file_metadata_address, tasks)
-    } else {
-        (vec![], JoinSet::new())
-    };
+            (new_file_metadata_address, tasks, Some(blob_tasks))
+        } else {
+            (vec![], JoinSet::new(), None)
+        };
+    if let Some(blob_tasks) = &blob_tasks {
+        blob_tasks.done();
+    }
     lore_debug!(
         "Collecting fragments, from file metadata {from_file_metadata_block_len} blocks, to file metadata new {to_file_metadata_block_len} blocks -> {} new blocks",
         new_file_metadata_block_address.len()
@@ -12809,26 +12972,36 @@ pub async fn collect_fragments(
     lore_debug!("Collected {} new addresses from state", fragments.len());
 
     // Add branch metadata
-    if let Ok((_current_revision, current_branch)) =
-        crate::instance::load_current_anchor(&repository).await
-        && let Ok(metadata_hash) = branch::metadata_hash(repository.clone(), current_branch).await
-    {
-        let metadata_fragments = collect_new_addresses(
-            repository.clone(),
-            &[Address::zero_context_hash(metadata_hash)],
-            collection,
-            tracker,
-        )
+    let branch_metadata_fragments = tracker
+        .time_step(CollectStep::BranchMetadata, async {
+            let (_current_revision, current_branch) =
+                crate::instance::load_current_anchor(&repository)
+                    .await
+                    .ok()?;
+            let metadata_hash = branch::metadata_hash(repository.clone(), current_branch)
+                .await
+                .ok()?;
+            Some(
+                collect_new_addresses(
+                    repository.clone(),
+                    &[Address::zero_context_hash(metadata_hash)],
+                    collection,
+                    tracker.clone(),
+                )
+                .await,
+            )
+        })
         .await;
-        if let Ok(mut metadata_fragments) = metadata_fragments {
+    match branch_metadata_fragments {
+        Some(Ok(mut metadata_fragments)) => {
             lore_debug!(
                 "Collected {} new addresses from branch metadata",
                 metadata_fragments.len()
             );
             fragments.append(&mut metadata_fragments);
-        } else {
-            failure = failure.or(metadata_fragments.err());
         }
+        Some(Err(err)) => failure = failure.or(Some(err)),
+        None => (),
     }
 
     // Collect new file node fragments
@@ -12878,6 +13051,9 @@ pub async fn collect_fragments(
     fragments.sort_unstable();
     fragments.dedup();
     lore_debug!("Collected {} new addresses in total", fragments.len());
+    // The collections stop early once cancelled, and some of them swallow their own errors, so a
+    // cancelled call returns no list at all rather than one that may be missing addresses.
+    check_cancelled()?;
 
     Ok(fragments)
 }
@@ -12918,7 +13094,11 @@ async fn collect_new_file_fragments(
     let mut tasks = JoinSet::new();
     let mut failure = None;
     let mut from_index = 0;
+    let cancellation = CancellationCheck::current();
     for to_named_node in to.children {
+        if cancellation.check().is_err() {
+            break;
+        }
         let to_node_id = to_named_node.node;
         let to_node = to.state.node(to.repository.clone(), to_node_id).await;
         let Ok(to_node) = to_node else {
@@ -12994,6 +13174,7 @@ async fn collect_new_file_fragments(
     if let Some(err) = failure {
         return Err(err);
     }
+    check_cancelled()?;
 
     Ok(new_addresses)
 }
@@ -13161,7 +13342,11 @@ async fn collect_new_addresses(
 
     const MAX_TASKS: usize = 1000;
     let mut task = JoinSet::new();
+    let cancellation = CancellationCheck::current();
     for address in addresses {
+        if cancellation.check().is_err() {
+            break;
+        }
         if address.hash.is_zero() {
             continue;
         }
@@ -13246,6 +13431,9 @@ async fn collect_new_addresses(
             new_addresses.append(&mut address);
         }
     }
+    // A cancelled call returns no list at all: the recursion swallows its errors, so a list
+    // gathered while cancelled could be missing addresses its caller would then never check.
+    check_cancelled()?;
 
     Ok(new_addresses)
 }

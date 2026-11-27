@@ -17,7 +17,6 @@ use crate::branch::merge;
 use crate::branch::merge::MergeType;
 use crate::change::NodeChange;
 use crate::errors::*;
-use crate::event::EventError;
 use crate::event::LoreEvent;
 use crate::filter;
 use crate::filter::FilterInstance;
@@ -32,7 +31,6 @@ use crate::fs::hold;
 use crate::fs::realize::realize_state;
 use crate::history;
 use crate::interface::LoreBranchLocation;
-use crate::interface::LoreError;
 use crate::interface::LoreFileAction;
 use crate::interface::LoreString;
 use crate::layer;
@@ -59,7 +57,9 @@ use crate::util::serde::u8_as_bool;
 
 /// Source and target revisions selected for a sync.
 #[repr(C)]
-#[derive(Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRevisionSyncTargetEventData {
     /// Remote URL
@@ -93,7 +93,9 @@ pub struct LoreRevisionSyncTargetEventData {
 
 /// Progress counters reported while a sync updates the working files.
 #[repr(C)]
-#[derive(Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRevisionSyncProgressEventData {
     /// Number of files updated so far.
@@ -119,7 +121,9 @@ pub struct LoreRevisionSyncProgressEventData {
 
 /// The revision that resulted from a sync.
 #[repr(C)]
-#[derive(Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRevisionSyncRevisionEventData {
     /// Branch (if any)
@@ -138,6 +142,7 @@ pub struct LoreRevisionSyncRevisionEventData {
 
 #[error_set]
 pub enum SyncError {
+    Cancelled,
     InvalidArguments,
     WriteRequired,
     NoRemote,
@@ -185,16 +190,6 @@ pub enum SyncError {
     MissingIdentity,
 }
 
-impl EventError for SyncError {
-    fn translated(&self) -> LoreError {
-        LoreError::Internal
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
-}
-
 impl From<FsError> for SyncError {
     fn from(value: FsError) -> Self {
         Err::<(), _>(value)
@@ -205,7 +200,9 @@ impl From<FsError> for SyncError {
 
 /// Details of a single file changed by a sync.
 #[repr(C)]
-#[derive(Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreRevisionSyncFileEventData {
     /// Path of the file, relative to the root of the working tree.
@@ -1550,7 +1547,7 @@ pub async fn realize_changes(
             state_stage,
             dry_run,
             merge_current.map(crate::fs::realize::MergeCurrent::new),
-            None, /* No view change */
+            Some(&crate::fs::realize::EmptiedDirectories::Excluded),
             stats,
         )
         .await

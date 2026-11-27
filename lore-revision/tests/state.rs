@@ -26,6 +26,7 @@ mod tests {
     use lore_revision::state::StateData;
     use lore_revision::state::StateError;
     use lore_revision::state::collect_new_fragments;
+    use lore_revision::util::request_tracker::CollectStep;
     use lore_revision::util::request_tracker::StoreRequestTracker;
     use lore_storage::hash::hash_string;
     use lore_storage::local::immutable_store::LocalImmutableStore;
@@ -306,6 +307,140 @@ mod tests {
                     rehashed, signature,
                     "rewriting the blocks unchanged must give the same signature"
                 );
+            }))
+            .await
+            .expect("Task failed");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_tree_walk_returns_no_tree() {
+        let (immutable_store, mutable_store, execution) =
+            test_store_create().await.expect("Failed to create stores");
+
+        #[allow(clippy::disallowed_methods)]
+        runtime()
+            .spawn(LORE_CONTEXT.scope(execution.clone(), async move {
+                let repository = Arc::new(RepositoryContext::new_server_context(
+                    immutable_store,
+                    mutable_store,
+                    rand::random::<RepositoryId>(),
+                    lore_revision::state::allow_all_repositories(),
+                ));
+                let state = State::new();
+                for name in ["a", "b", "c"] {
+                    let node = Node {
+                        flags: NodeFlags::File.bits(),
+                        name_hash: hash_string(name),
+                        ..Default::default()
+                    };
+                    state
+                        .node_add(repository.clone(), ROOT_NODE, node, name)
+                        .await
+                        .expect("Failed to add node");
+                }
+
+                let cancellation = lore_revision::runtime::Cancellation::new();
+                cancellation.cancel();
+                let cancelled = Arc::new(
+                    lore_revision::interface::ExecutionContext::new_client(
+                        lore_revision::interface::LoreGlobalArgs::default(),
+                        lore_revision::relay::EventDispatcher::no_dispatch(),
+                    )
+                    .with_cancellation(cancellation),
+                );
+                let Err(err) = LORE_CONTEXT
+                    .scope(
+                        cancelled,
+                        lore_revision::state::gather_tree_paths(
+                            state,
+                            repository,
+                            lore_revision::util::path::RelativePath::new(),
+                            0,
+                            false,
+                        ),
+                    )
+                    .await
+                else {
+                    panic!("a cancelled walk returns no tree");
+                };
+                assert!(err.is_cancelled(), "{err:?}");
+            }))
+            .await
+            .expect("Task failed");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_fragment_collection_returns_no_list() {
+        let (_immutable_store, mutable_store, execution) =
+            test_store_create().await.expect("Failed to create stores");
+
+        #[allow(clippy::disallowed_methods)]
+        runtime()
+            .spawn(LORE_CONTEXT.scope(execution.clone(), async move {
+                let tempdir = generate_tempdir();
+                let path = tempdir.to_path_buf();
+                let immutable_store = LocalImmutableStore::new(
+                    None,
+                    lore_storage::local::immutable_store::ImmutableStoreSettings::default(),
+                )
+                .await
+                .expect("Failed to create store");
+                let write_token =
+                    lore_revision::repository::RepositoryWriteToken::acquire(path.as_path()).await;
+                let repository = Arc::new(
+                    RepositoryContext::new(
+                        default_repository_creation_args(immutable_store.clone(), mutable_store)
+                            .with_path(&path),
+                    )
+                    .with_write_token(write_token.share()),
+                );
+
+                let state_from = State::new();
+                let state_to = State::new();
+                let name = "test-node";
+                let node = Node {
+                    name_hash: hash_string(name),
+                    ..Default::default()
+                };
+                state_to
+                    .node_add(repository.clone(), ROOT_NODE, node, name)
+                    .await
+                    .expect("Failed to add node");
+                state_from
+                    .serialize(repository.clone(), &write_token)
+                    .await
+                    .expect("Failed to serialize from state");
+                let signature_to = state_to
+                    .serialize(repository.clone(), &write_token)
+                    .await
+                    .expect("Failed to serialize to state");
+                let state_to = State::deserialize(repository.clone(), signature_to)
+                    .await
+                    .expect("Failed to deserialize state");
+
+                let cancellation = lore_revision::runtime::Cancellation::new();
+                cancellation.cancel();
+                let cancelled = Arc::new(
+                    lore_revision::interface::ExecutionContext::new_client(
+                        lore_revision::interface::LoreGlobalArgs::default(),
+                        lore_revision::relay::EventDispatcher::no_dispatch(),
+                    )
+                    .with_cancellation(cancellation),
+                );
+                let err = LORE_CONTEXT
+                    .scope(
+                        cancelled,
+                        collect_new_fragments(
+                            repository.clone(),
+                            state_from,
+                            state_to,
+                            true,
+                            Arc::new(StoreRequestTracker::default()),
+                        ),
+                    )
+                    .await
+                    .expect_err("a cancelled collection returns no list");
+                assert!(err.is_cancelled(), "{err:?}");
             }))
             .await
             .expect("Task failed");
@@ -739,6 +874,7 @@ mod tests {
                         .expect("Failed to deserialize state");
 
                     let tracker = Arc::new(StoreRequestTracker::default());
+                    let collected = std::time::Instant::now();
                     collect_new_fragments(
                         repository.clone(),
                         state_from.clone(),
@@ -755,6 +891,18 @@ mod tests {
                         tracker.lookups()
                     );
                     assert!(tracker.peak_lookups_in_flight() >= 1);
+                    let elapsed = collected.elapsed();
+                    let steps = tracker.collect_steps().expect("the collection is timed");
+                    for step in CollectStep::ALL {
+                        let finished = steps
+                            .finished(step)
+                            .unwrap_or_else(|| panic!("{} finished in {steps}", step.label()));
+                        assert!(
+                            finished <= elapsed,
+                            "{} finished within the collection in {steps}",
+                            step.label()
+                        );
+                    }
                 }))
                 .await
                 .expect("Test task failed");
@@ -856,6 +1004,90 @@ mod tests {
                 }))
                 .await
                 .expect("Test task failed");
+        }
+
+        mod missing_block_list {
+            use lore_base::error::AddressNotFound;
+            use lore_revision::util::request_tracker::CollectSteps;
+            use lore_revision::util::request_tracker::StepState;
+            use lore_storage::ImmutableStore;
+
+            use super::*;
+            use crate::block_single_flight::Seed;
+            use crate::block_single_flight::seeded_repository;
+
+            /// Collects the seeded state against an empty one after obliterating `list`, which fails
+            /// the collection. Asserts the failure names `list`, and answers where each step stood.
+            async fn steps_after_losing(list: fn(&Seed) -> Address) -> CollectSteps {
+                let (_, mutable_store, execution) =
+                    test_store_create().await.expect("Failed to create stores");
+
+                #[allow(clippy::disallowed_methods)]
+                runtime()
+                    .spawn(LORE_CONTEXT.scope(execution, async move {
+                        let seed = Box::pin(seeded_repository(mutable_store)).await;
+                        let state_to = State::deserialize(seed.repository.clone(), seed.signature)
+                            .await
+                            .expect("Failed to deserialize state");
+                        seed.store
+                            .clone()
+                            .obliterate(seed.repository.id, list(&seed), Arc::default())
+                            .await
+                            .expect("Failed to obliterate the block list");
+
+                        let tracker = Arc::new(StoreRequestTracker::default());
+                        let err = collect_new_fragments(
+                            seed.repository.clone(),
+                            State::new(),
+                            state_to,
+                            true,
+                            tracker.clone(),
+                        )
+                        .await
+                        .expect_err("a collection missing a block list fails");
+                        let missing = err.as_address_not_found().unwrap_or_else(|| {
+                            panic!("the failure names a missing address: {err}")
+                        });
+                        assert_eq!(
+                            missing.address,
+                            AddressNotFound::from(list(&seed)).address,
+                            "the failure names the obliterated list"
+                        );
+                        tracker.collect_steps().expect("the collection is timed")
+                    }))
+                    .await
+                    .expect("Test task failed")
+            }
+
+            /// A collection that cannot read the file metadata block list never reaches the metadata
+            /// blobs, which stay waiting, while the list's own step finishes.
+            #[tokio::test]
+            async fn a_lost_file_metadata_block_list_leaves_the_blobs_waiting() {
+                let steps = steps_after_losing(|seed| seed.metadata_list).await;
+
+                assert_eq!(
+                    steps.state(CollectStep::FileMetadataBlobs),
+                    StepState::Waiting,
+                    "{steps}"
+                );
+                steps
+                    .finished(CollectStep::ToFileMetadataBlocks)
+                    .unwrap_or_else(|| panic!("the failed list read finished in {steps}"));
+            }
+
+            /// A collection that cannot read the node block list has no blocks to diff, so the name
+            /// tables and the changed node blocks stay waiting.
+            #[tokio::test]
+            async fn a_lost_node_block_list_leaves_the_diff_steps_waiting() {
+                let steps = steps_after_losing(|seed| seed.node_list).await;
+
+                for step in [CollectStep::NewNames, CollectStep::NewNodeBlocks] {
+                    assert_eq!(steps.state(step), StepState::Waiting, "{steps}");
+                }
+                steps
+                    .finished(CollectStep::ToNodeBlocks)
+                    .unwrap_or_else(|| panic!("the failed list read finished in {steps}"));
+            }
         }
     }
 
@@ -2872,7 +3104,7 @@ mod block_single_flight {
 
     /// Counts the payload reads reaching the store underneath, per address, and
     /// paces them.
-    struct CountingStore {
+    pub(crate) struct CountingStore {
         inner: Arc<dyn ImmutableStore>,
         reads: Mutex<BTreeMap<Address, u32>>,
     }
@@ -3029,11 +3261,11 @@ mod block_single_flight {
 
     /// A repository over a counting store, and a state written into it carrying
     /// one node block and one file metadata block.
-    struct Seed {
+    pub(crate) struct Seed {
         _tempdir: TempDir,
-        store: Arc<CountingStore>,
-        repository: Arc<RepositoryContext>,
-        signature: Hash,
+        pub(crate) store: Arc<CountingStore>,
+        pub(crate) repository: Arc<RepositoryContext>,
+        pub(crate) signature: Hash,
         block_index: usize,
         /// Store address of the node block, so a burst can be held to reading
         /// that address once rather than to a total that says nothing about
@@ -3042,7 +3274,9 @@ mod block_single_flight {
         /// Store address of the file metadata block.
         metadata_block: Address,
         /// Store address of the file metadata block address list.
-        metadata_list: Address,
+        pub(crate) metadata_list: Address,
+        /// Store address of the node block address list.
+        pub(crate) node_list: Address,
     }
 
     /// Store address of block `block_index` in the address list rooted at `list`.
@@ -3062,7 +3296,7 @@ mod block_single_flight {
         Address::zero_context_hash(bytes.as_type_slice::<Hash>()[block_index])
     }
 
-    async fn seeded_repository(mutable_store: Arc<dyn MutableStore>) -> Seed {
+    pub(crate) async fn seeded_repository(mutable_store: Arc<dyn MutableStore>) -> Seed {
         let tempdir = generate_tempdir();
         let path = tempdir.to_path_buf();
 
@@ -3128,6 +3362,7 @@ mod block_single_flight {
             node_block: block_address(&repository, tree.hash_node, block_index).await,
             metadata_block: block_address(&repository, tree.hash_file_metadata, block_index).await,
             metadata_list: Address::zero_context_hash(tree.hash_file_metadata),
+            node_list: Address::zero_context_hash(tree.hash_node),
             _tempdir: tempdir,
             store,
             repository,

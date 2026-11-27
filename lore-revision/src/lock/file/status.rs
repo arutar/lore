@@ -12,14 +12,12 @@ use tokio::task::JoinSet;
 use crate::branch;
 use crate::errors::*;
 use crate::event;
-use crate::event::EventError;
 use crate::interface::LoreArray;
-use crate::interface::LoreError;
 use crate::interface::LoreString;
 use crate::lock;
-use crate::lock::util::LOCK_BATCH_SIZE;
 use crate::lock::util::assemble_resource_for_path;
 use crate::lock::util::fold_batch_results;
+use crate::lock::util::lock_batch_size;
 use crate::lock::util::lock_path_node;
 use crate::lock::util::lock_tree;
 use crate::lore_debug;
@@ -38,6 +36,7 @@ pub struct StatusOptions {
 
 #[error_set]
 pub enum StatusError {
+    Cancelled,
     LinkPinsDiverge,
     Disconnected,
     InvalidArguments,
@@ -85,19 +84,11 @@ pub enum StatusError {
     MissingIdentity,
 }
 
-impl EventError for StatusError {
-    fn translated(&self) -> LoreError {
-        LoreError::Internal
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
-}
-
 /// Data for an event that marks the start of a lock status report.
 #[repr(C)]
-#[derive(Clone, Default, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, Default, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreLockFileStatusBeginEventData {
     /// Number of status entries that follow.
@@ -106,7 +97,7 @@ pub struct LoreLockFileStatusBeginEventData {
 
 /// Data for an event reporting the lock status of a single path.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreLockFileStatusEventData {
     /// Path the status applies to.
@@ -168,7 +159,7 @@ pub async fn status(
 
     let resources_count = resources.len();
     let resources_values = Vec::from_iter(resources);
-    let batch_iterator = resources_values.chunks(LOCK_BATCH_SIZE);
+    let batch_iterator = resources_values.chunks(lock_batch_size(&remote.environment));
     let num_batches = batch_iterator.len();
 
     let mut batches: JoinSet<Result<Vec<LockData>, StatusError>> = JoinSet::new();

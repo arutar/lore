@@ -15,6 +15,7 @@ use lore_revision::stage::StageOptions;
 use lore_revision::state::Clear;
 use lore_revision::state::State;
 
+use super::staged_as_marked;
 use crate::dirty_move_fixture::assert_no_change_marked;
 use crate::dirty_move_fixture::chained;
 use crate::dirty_move_fixture::children_named;
@@ -27,6 +28,7 @@ use crate::dirty_move_fixture::made_directory;
 use crate::dirty_move_fixture::node_at;
 use crate::dirty_move_fixture::node_id_at;
 use crate::dirty_move_fixture::node_of;
+use crate::dirty_move_fixture::removed;
 use crate::dirty_move_fixture::removed_directory;
 use crate::dirty_move_fixture::rename;
 use crate::dirty_move_fixture::restaged;
@@ -42,12 +44,6 @@ use crate::helper::TestRepository;
 use crate::helper::mount_intermediate;
 use crate::helper::test_commit;
 use crate::helper::test_file_write;
-
-/// Removes the file `path` below `instance`'s working tree.
-#[allow(clippy::disallowed_methods)] // A test fixture in its own temporary directory.
-fn removed(instance: &TestRepository, path: &str) {
-    std::fs::remove_file(instance.path.join(path)).expect("the delete on disk");
-}
 
 /// Moves `dir/sub` over `dir` in `instance`'s working tree, which then holds `sub`'s files in
 /// `dir` and nothing else of the old `dir`.
@@ -1181,15 +1177,15 @@ async fn a_dirty_move_onto_an_added_directory_holding_a_file_kept_from_its_place
 async fn a_dirty_move_onto_an_added_directory_holding_a_file_that_can_leave_takes_its_name() {
     for staged_holder in [false, true] {
         with_instance(|instance| async move {
-            let first = committed(&instance, &["c.txt", "m.txt", "other.txt"]).await;
-            let c = node_id_at(&instance, &first, "c.txt").await;
+            let first = committed(&instance, &["s/c.txt", "m.txt", "other.txt"]).await;
+            let c = node_id_at(&instance, &first, "s/c.txt").await;
             let m = node_id_at(&instance, &first, "m.txt").await;
             made_directory(&instance, "n");
             dirtied(&instance, "n").await;
-            dirty_moved(&instance, "c.txt", "n/c.txt").await;
+            dirty_moved(&instance, "s/c.txt", "n/c.txt").await;
             if staged_holder {
-                written(&instance, &["c.txt"]);
-                stage_path(&instance, "c.txt").await;
+                written(&instance, &["s/c.txt"]);
+                stage_path(&instance, "s").await;
             }
             removed_directory(&instance, "n");
 
@@ -1201,12 +1197,12 @@ async fn a_dirty_move_onto_an_added_directory_holding_a_file_that_can_leave_take
                 "{case}: n holds the moved file alone"
             );
             assert_eq!(node_id_at(&instance, &state, "n").await, m, "{case}");
-            let holder = node_id_at(&instance, &state, "c.txt").await;
+            let holder = node_id_at(&instance, &state, "s/c.txt").await;
             if staged_holder {
                 let record = node_of(&instance, &state, holder).await;
                 assert!(
                     holder != c && record.is_staged(),
-                    "{case}: c.txt, flags {:#x}",
+                    "{case}: s/c.txt, flags {:#x}",
                     record.flags
                 );
                 let gone = node_of(&instance, &state, c).await;
@@ -1219,7 +1215,7 @@ async fn a_dirty_move_onto_an_added_directory_holding_a_file_that_can_leave_take
                 let back = node_of(&instance, &state, c).await;
                 assert!(
                     holder == c && back.is_dirty_delete() && !back.is_staged(),
-                    "{case}: c.txt, flags {:#x}",
+                    "{case}: s/c.txt, flags {:#x}",
                     back.flags
                 );
             }
@@ -1743,6 +1739,77 @@ async fn a_staged_move_onto_the_root_is_invalid() {
         assert!(
             matches!(refused, Err(StageError::InvalidArguments(_))),
             "the move onto the root was not refused as invalid: {refused:?}"
+        );
+    })
+    .await;
+}
+
+/// A new directory marked dirty while empty is staged as itself: a file created in it afterwards,
+/// which nothing marked, stays out of the stage.
+#[tokio::test]
+async fn a_stage_of_a_new_directory_marked_empty_leaves_out_a_file_created_in_it() {
+    use crate::dirty_move_fixture::Held;
+    use crate::dirty_move_fixture::held_at;
+
+    with_instance(|instance| async move {
+        committed(&instance, &["other.txt"]).await;
+        made_directory(&instance, "n");
+        dirtied(&instance, "n").await;
+        written(&instance, &["n/new.txt"]);
+
+        staged_as_marked(&instance, &[""]).await;
+
+        assert_eq!(
+            held_at(&instance.repository, &["n", "n/new.txt"]).await,
+            [Held::StagedAdd, Held::Nothing]
+        );
+    })
+    .await;
+}
+
+/// A new directory holding a file marked dirty and one not is staged with the marked file alone.
+#[tokio::test]
+async fn a_stage_of_a_new_directory_takes_its_marked_file_alone() {
+    use crate::dirty_move_fixture::Held;
+    use crate::dirty_move_fixture::held_at;
+
+    with_instance(|instance| async move {
+        committed(&instance, &["other.txt"]).await;
+        written(&instance, &["n/marked.txt", "n/unmarked.txt"]);
+        dirtied(&instance, "n/marked.txt").await;
+
+        staged_as_marked(&instance, &[""]).await;
+
+        assert_eq!(
+            held_at(
+                &instance.repository,
+                &["n", "n/marked.txt", "n/unmarked.txt"]
+            )
+            .await,
+            [Held::StagedAdd, Held::StagedAdd, Held::Nothing]
+        );
+    })
+    .await;
+}
+
+/// A stage without `--scan` of a directory moved and marked with `lore file dirty move` stages its
+/// move: the directory and the unchanged file that moves with it are staged as moved, and a file
+/// created in the directory afterwards, which nothing marked, stays out of the stage.
+#[tokio::test]
+async fn a_stage_of_a_dirty_moved_directory_leaves_out_a_file_created_in_it() {
+    use crate::dirty_move_fixture::Held;
+    use crate::dirty_move_fixture::held_at;
+
+    with_instance(|instance| async move {
+        committed(&instance, &["d/k.txt", "other.txt"]).await;
+        dirty_moved(&instance, "d", "e").await;
+        written(&instance, &["e/new.txt"]);
+
+        staged_as_marked(&instance, &[""]).await;
+
+        assert_eq!(
+            held_at(&instance.repository, &["e", "e/k.txt", "e/new.txt"]).await,
+            [Held::StagedMove, Held::StagedMove, Held::Nothing]
         );
     })
     .await;

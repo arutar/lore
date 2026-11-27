@@ -11,7 +11,6 @@ use lore_base::error::ServiceUnavailable;
 use lore_base::runtime::LORE_CONTEXT;
 use lore_error_set::FfiError;
 use lore_error_set::HasTrace;
-use lore_revision::event::EventError;
 use lore_revision::event::LoreErrorDetail;
 use lore_revision::interface::ExecutionContext;
 use lore_revision::interface::LoreGlobalArgs;
@@ -44,6 +43,11 @@ tokio::task_local! {
 /// with the move's `ServiceUnavailable`, as the stopped service has unmounted its instances.
 pub(crate) fn during_external_root_move<F: Future>(call: F) -> impl Future<Output = F::Output> {
     EXTERNAL_ROOT_MOVE.scope((), call)
+}
+
+/// Whether the running call is one the move reply handed back, which runs here.
+pub(crate) fn runs_during_external_root_move() -> bool {
+    EXTERNAL_ROOT_MOVE.try_with(|()| ()).is_ok()
 }
 
 /// Runs `call`, relayed from a process with `environment`, so that the execution context it sets
@@ -102,7 +106,7 @@ pub async fn repository_call_read<Arg, T, F, Fut, ResT, ErrT>(
     command: F,
 ) -> i32
 where
-    ErrT: EventError + FfiError + HasTrace,
+    ErrT: FfiError + HasTrace + std::fmt::Display,
     Arg: std::fmt::Debug,
     F: FnOnce(Arc<RepositoryContext>, Arg) -> Fut,
     Fut: Future<Output = Result<ResT, ErrT>> + 'static,
@@ -129,6 +133,7 @@ where
                     Err(err) => break 'call (LoreErrorDetail::from_error(&err), None),
                 };
                 let detail = LoreErrorDetail::from_result(&command(repository.clone(), args).await);
+                let detail = held_back_writes_outcome(&repository, detail).await;
                 (detail, Some(post_command_cleanup(repository)))
             };
 
@@ -155,7 +160,7 @@ pub async fn repository_call_write<Arg, T, F, Fut, ResT, ErrT>(
     command: F,
 ) -> i32
 where
-    ErrT: EventError + FfiError + HasTrace,
+    ErrT: FfiError + HasTrace + std::fmt::Display,
     Arg: std::fmt::Debug,
     F: FnOnce(Arc<RepositoryContext>, RepositoryWriteToken, Arg) -> Fut,
     Fut: Future<Output = Result<ResT, ErrT>> + 'static,
@@ -186,6 +191,7 @@ where
                 };
                 let detail =
                     LoreErrorDetail::from_result(&command(repository.clone(), token, args).await);
+                let detail = held_back_writes_outcome(&repository, detail).await;
                 (detail, Some(post_command_cleanup(repository)))
             };
 
@@ -225,7 +231,7 @@ pub async fn repository_call_exclusive_planned<Arg, T, P, FutP, FutF, ResT, ErrT
     finish: impl FnOnce(P) -> FutF,
 ) -> i32
 where
-    ErrT: EventError + FfiError + HasTrace,
+    ErrT: FfiError + HasTrace + std::fmt::Display,
     Arg: std::fmt::Debug,
     FutP: Future<Output = Result<Option<P>, ErrT>> + 'static,
     FutF: Future<Output = ()> + 'static,
@@ -288,6 +294,7 @@ where
                     let detail = LoreErrorDetail::from_result(
                         &command(repository.clone(), token, &plan).await,
                     );
+                    let detail = held_back_writes_outcome(&repository, detail).await;
                     (detail, Some(post_command_cleanup(repository)))
                 };
                 check_no_lingering_repository(weak_repository);
@@ -313,7 +320,7 @@ pub async fn repository_call_no_store<Arg, T, F, Fut, ResT, ErrT>(
     command: F,
 ) -> i32
 where
-    ErrT: EventError + FfiError + HasTrace,
+    ErrT: FfiError + HasTrace + std::fmt::Display,
     Arg: std::fmt::Debug,
     F: FnOnce(Arc<RepositoryContext>, Arg) -> Fut,
     Fut: Future<Output = Result<ResT, ErrT>> + 'static,
@@ -385,7 +392,7 @@ async fn prepare_repository_call(
         .await;
     let failure = match found {
         Ok(dotpath) if dotpath.is_dir() => return Ok((repository_path, execution)),
-        Ok(_) if EXTERNAL_ROOT_MOVE.try_with(|()| ()).is_ok() => {
+        Ok(_) if runs_during_external_root_move() => {
             LoreErrorDetail::from_error(&ServiceCallError::from(ServiceUnavailable {
                 reason: format!(
                     "{} holds no Lore directory, and {EXTERNAL_ROOT_MOVING}",
@@ -407,6 +414,26 @@ async fn prepare_repository_call(
         })
         .await;
     Err(status)
+}
+
+/// The outcome of a call whose command on `repository` ended in `detail`, once the index writes
+/// the command held back ([`RepositoryContext::flush_held_back`]) are written, whatever the command
+/// returned: `detail` where the command failed, with a failure of the flush logged
+/// ([`RepositoryContext::flush_held_back_after_failure`]), and otherwise the error of the flush
+/// where it fails.
+async fn held_back_writes_outcome(
+    repository: &RepositoryContext,
+    detail: LoreErrorDetail,
+) -> LoreErrorDetail {
+    let options = execution_context().globals().flush_options();
+    if detail.error_code != 0 {
+        repository.flush_held_back_after_failure(options).await;
+        return detail;
+    }
+    match repository.flush_held_back(options).await {
+        Err(err) => LoreErrorDetail::from_error(&err),
+        Ok(()) => detail,
+    }
 }
 
 fn post_command_cleanup(repository: Arc<RepositoryContext>) -> std::sync::Weak<RepositoryContext> {

@@ -7,11 +7,9 @@ use serde::Serialize;
 
 use crate::branch;
 use crate::errors::*;
-use crate::event::EventError;
 use crate::event::LoreEvent;
 use crate::interface::LoreArray;
 use crate::interface::LoreBranchPoint;
-use crate::interface::LoreError;
 use crate::interface::LoreString;
 use crate::lore::BranchId;
 use crate::lore::Hash;
@@ -22,6 +20,7 @@ use crate::util::serde::u8_as_bool;
 
 #[error_set]
 pub enum InfoError {
+    Cancelled,
     LinkPinsDiverge,
     NotFound,
     AddressNotFound,
@@ -69,22 +68,11 @@ pub enum InfoError {
     MissingIdentity,
 }
 
-impl EventError for InfoError {
-    fn translated(&self) -> LoreError {
-        match self {
-            InfoError::NotFound(_) => LoreError::NotFound,
-            _ => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
-}
-
 /// Event data reported with information about a single branch.
 #[repr(C)]
-#[derive(Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone, PartialEq, Debug, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchInfoEventData {
     /// Branch identifier.

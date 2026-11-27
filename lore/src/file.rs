@@ -45,7 +45,9 @@ use crate::util::convert_user_paths;
 
 /// Arguments for retrieving file information (size, hash, staged status).
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(info_local)]
 pub struct LoreFileInfoArgs {
     /// Array of paths
@@ -69,7 +71,6 @@ pub struct LoreFileInfoArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -114,7 +115,9 @@ async fn info_impl(
 
 /// Arguments for diffing files between two revisions.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(diff_local)]
 pub struct LoreFileDiffArgs {
     /// An array of paths
@@ -144,7 +147,6 @@ pub struct LoreFileDiffArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -197,7 +199,9 @@ async fn diff_impl(
 
 /// Arguments for clearing all metadata associated with a file.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(metadata_clear_local)]
 pub struct LoreFileMetadataClearArgs {
     /// Which file to clear metadata for
@@ -215,7 +219,6 @@ pub struct LoreFileMetadataClearArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -250,7 +253,9 @@ fn metadata_clear_local(
 
 /// Arguments for retrieving a single metadata value for a file by key and revision.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(metadata_get_local)]
 pub struct LoreFileMetadataGetArgs {
     /// Revision to get metadata for
@@ -272,7 +277,6 @@ pub struct LoreFileMetadataGetArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -312,7 +316,9 @@ fn metadata_get_local(
 
 /// Arguments for listing all metadata key/value pairs for a file at a revision.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(metadata_list_local)]
 pub struct LoreFileMetadataListArgs {
     /// What to list metadata for
@@ -332,7 +338,6 @@ pub struct LoreFileMetadataListArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -367,7 +372,9 @@ fn metadata_list_local(
 
 /// Arguments for setting metadata key/value pairs on one or more files.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(metadata_set_local)]
 pub struct LoreFileMetadataSetArgs {
     /// An array of paths
@@ -393,7 +400,6 @@ pub struct LoreFileMetadataSetArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 pub fn metadata_set(
@@ -474,7 +480,9 @@ async fn metadata_set_impl(
 
 /// Arguments for staging one or more files for the next commit.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(stage_local)]
 pub struct LoreFileStageArgs {
     /// An array of paths
@@ -520,7 +528,6 @@ pub struct LoreFileStageArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -568,7 +575,9 @@ fn stage_local(
 
 /// Arguments for staging one or more files as merge resolutions.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(stage_merge_local)]
 pub struct LoreFileStageMergeArgs {
     /// Paths to files to stage as merge
@@ -586,7 +595,6 @@ pub struct LoreFileStageMergeArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -624,7 +632,9 @@ fn stage_merge_local(
 
 /// Arguments for staging a file move from one path to another.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(stage_move_local)]
 pub struct LoreFileStageMoveArgs {
     /// Original path of file
@@ -644,7 +654,6 @@ pub struct LoreFileStageMoveArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -694,7 +703,9 @@ fn stage_move_local(
 
 /// Arguments for marking files dirty in the staged state (add/modify/delete inferred from filesystem).
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(dirty_local)]
 pub struct LoreFileDirtyArgs {
     /// An array of paths
@@ -725,7 +736,9 @@ fn dirty_local(
 
 /// Arguments for marking a file dirty-moved (relocates the staged node, no filesystem checks).
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(dirty_move_local)]
 pub struct LoreFileDirtyMoveArgs {
     /// Original path of file
@@ -762,7 +775,9 @@ fn dirty_move_local(
 
 /// Arguments for marking a file dirty-copied (creates a new staged destination node, no filesystem checks).
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(dirty_copy_local)]
 pub struct LoreFileDirtyCopyArgs {
     /// Source path of file
@@ -801,7 +816,9 @@ fn dirty_copy_local(
 
 /// Arguments for removing one or more files from the staged changeset.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(unstage_local)]
 pub struct LoreFileUnstageArgs {
     /// An array of paths
@@ -819,7 +836,6 @@ pub struct LoreFileUnstageArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -860,7 +876,9 @@ fn unstage_local(
 /// Arguments for resetting files to a revision, optionally deleting what the revision does not
 /// hold.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(reset_local)]
 pub struct LoreFileResetArgs {
     /// Pointer to an array of paths
@@ -884,7 +902,6 @@ pub struct LoreFileResetArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -930,7 +947,9 @@ fn reset_local(
 
 /// Arguments for resetting files to the last merged revision on a branch.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(reset_to_last_merged_local)]
 pub struct LoreFileResetToLastMergedArgs {
     /// Pointer to an array of paths
@@ -955,7 +974,6 @@ pub struct LoreFileResetToLastMergedArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1006,7 +1024,9 @@ fn reset_to_last_merged_local(
 
 /// Arguments for writing a file to a destination by path/revision or by address.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(write_local)]
 pub struct LoreFileWriteArgs {
     /// Address of data to write; takes precedence over `path` when non-empty
@@ -1030,7 +1050,6 @@ pub struct LoreFileWriteArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1118,7 +1137,9 @@ async fn write_impl(
 
 /// Arguments for permanently removing a file or address from repository history.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(obliterate_local)]
 pub struct LoreFileObliterateArgs {
     /// Address of data to obliterate; takes precedence over `path` when non-empty
@@ -1138,7 +1159,6 @@ pub struct LoreFileObliterateArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1193,7 +1213,9 @@ async fn obliterate_impl(
 
 /// Arguments for dumping the binary content of a file by path or address.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(dump_local)]
 pub struct LoreFileDumpArgs {
     /// Address of data to dump; takes precedence over `path` when non-empty
@@ -1213,7 +1235,6 @@ pub struct LoreFileDumpArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1258,7 +1279,9 @@ async fn dump_impl(
 
 /// Arguments for computing the hash and size of one or more files.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(hash_local)]
 pub struct LoreFileHashArgs {
     /// An array of paths
@@ -1276,7 +1299,6 @@ pub struct LoreFileHashArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1313,7 +1335,9 @@ async fn hash_impl(
 
 /// Arguments for retrieving the revision history of a specific file.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(history_local)]
 pub struct LoreFileHistoryArgs {
     /// A path to a file
@@ -1342,7 +1366,6 @@ pub struct LoreFileHistoryArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1380,7 +1403,9 @@ fn history_local(
 
 /// Arguments for attributing the lines of a file to the revisions that last changed them.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(audit_local)]
 pub struct LoreFileAuditArgs {
     /// A path to a file
@@ -1420,7 +1445,6 @@ pub struct LoreFileAuditArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///

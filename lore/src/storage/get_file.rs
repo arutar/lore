@@ -63,7 +63,15 @@ use crate::storage::store::StoreInternal;
 /// One `get_file` item — read content at `(partition, address)` and
 /// write it to the file at `path`.
 #[repr(C)]
-#[derive(Clone, PartialEq, Default, ValidateText, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Clone,
+    PartialEq,
+    Default,
+    ValidateText,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 pub struct LoreStorageGetFileItem {
     /// Caller-chosen id echoed back in `GET_ITEM_COMPLETE`
     pub id: u64,
@@ -101,7 +109,16 @@ impl core::fmt::Debug for LoreStorageGetFileItem {
 
 /// Arguments for `lore_storage_get_file`.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(get_file_local)]
 pub struct LoreStorageGetFileArgs {
     /// Open storage handle
@@ -190,7 +207,7 @@ async fn resolve_get_file_item(
         return Err(invalid_item("item has an empty path"));
     }
     if item.address.hash == Hash::default() {
-        write_all_to_file(Path::new(path_str), bytes::Bytes::new(), false)
+        write_all_to_file(Path::new(path_str), bytes::Bytes::new(), false, false)
             .await
             .internal("writing the empty file for a zero-hash item")?;
         return Ok(());

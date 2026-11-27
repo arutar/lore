@@ -13,7 +13,9 @@ use futures::StreamExt;
 use futures::stream;
 use futures::stream::FuturesUnordered;
 use lore_base::error::RevisionNotFound;
+use lore_base::error::SlowDown;
 use lore_base::lore_spawn;
+use lore_base::retry::Retry;
 use lore_base::types::BranchMetadata;
 use lore_error_set::prelude::*;
 use lore_storage::CopyOutcome;
@@ -34,12 +36,10 @@ use crate::branch;
 use crate::branch::BranchLatestStatus;
 use crate::errors::*;
 use crate::event;
-use crate::event::EventError;
 use crate::find;
 use crate::fragment;
 use crate::history;
 use crate::immutable;
-use crate::interface::LoreError;
 use crate::interface::LoreGlobalArgs;
 use crate::interface::LoreString;
 use crate::layer;
@@ -64,7 +64,7 @@ use crate::util::serde::u8_as_bool;
 
 /// Data for the event sent when a branch push starts.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchPushEventData {
     /// The remote being pushed to.
@@ -99,7 +99,7 @@ pub struct LoreBranchPushEventData {
 
 /// Data for the event sent before a revision's parent is rewritten during push.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchPushRevisionUpdateBeginEventData {
     /// The repository being pushed.
@@ -116,7 +116,7 @@ pub struct LoreBranchPushRevisionUpdateBeginEventData {
 
 /// Data for the event sent after a revision's parent is rewritten during push.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchPushRevisionUpdateEndEventData {
     /// The repository being pushed.
@@ -129,7 +129,7 @@ pub struct LoreBranchPushRevisionUpdateEndEventData {
 
 /// Data for the event sent before fragments are transferred during push.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchPushFragmentBeginEventData {
     /// The repository being pushed.
@@ -144,7 +144,7 @@ pub struct LoreBranchPushFragmentBeginEventData {
 
 /// Data for the event sent as fragments are transferred during push.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchPushFragmentProgressEventData {
     /// The repository being pushed.
@@ -163,7 +163,7 @@ pub struct LoreBranchPushFragmentProgressEventData {
 
 /// Data for the event sent after fragments are transferred during push.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchPushFragmentEndEventData {
     /// The repository being pushed.
@@ -187,7 +187,16 @@ pub struct LoreBranchPushFragmentEndEventData {
 /// deduplicated, copied or put, unless the push ended before it was reached.
 #[repr(C)]
 #[derive(
-    Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, bitcode::Encode, bitcode::Decode,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Debug,
+    Serialize,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchPushStatsEventData {
@@ -201,7 +210,7 @@ pub struct LoreBranchPushStatsEventData {
 
 /// Data for the event sent before a branch is created on the remote.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchPushBranchCreateBeginEventData {
     /// The repository the branch is created in.
@@ -214,7 +223,7 @@ pub struct LoreBranchPushBranchCreateBeginEventData {
 
 /// Data for the event sent after a branch is created on the remote.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchPushBranchCreateEndEventData {
     /// The repository being pushed.
@@ -227,7 +236,7 @@ pub struct LoreBranchPushBranchCreateEndEventData {
 
 /// Data for the event sent before a revision is pushed to the remote.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchPushRevisionPushBeginEventData {
     /// The repository being pushed.
@@ -242,7 +251,7 @@ pub struct LoreBranchPushRevisionPushBeginEventData {
 
 /// Data for the event sent when the remote assigns a pushed revision a new identity.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchPushRevisionPushUpdateEventData {
     /// The repository being pushed.
@@ -259,7 +268,7 @@ pub struct LoreBranchPushRevisionPushUpdateEventData {
 
 /// Data for the event sent after a revision is pushed to the remote.
 #[repr(C)]
-#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(Clone, PartialEq, Serialize, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoreBranchPushRevisionPushEndEventData {
     /// The repository that was pushed.
@@ -281,6 +290,7 @@ pub struct LoreBranchPushRevisionPushEndEventData {
 
 #[error_set]
 pub enum PushError {
+    Cancelled,
     LinkPinsDiverge,
     NodeNotFound,
     LinkNotFound,
@@ -427,30 +437,6 @@ fn push_run_from(globals: &LoreGlobalArgs, options: &PushOptions) -> PushRun {
         fast_forward_merge: options.fast_forward_merge,
         mounts: MountPolicy::Push,
         expected_local_latest: None,
-    }
-}
-
-impl EventError for PushError {
-    fn translated(&self) -> LoreError {
-        match self {
-            PushError::Disconnected(_) => LoreError::Connection,
-            PushError::SlowDown(_) => LoreError::SlowDown,
-            PushError::Oversized(_) => LoreError::Oversized,
-            PushError::FileNotFound(_) => LoreError::FileNotFound,
-            PushError::NotFound(_)
-            | PushError::LayerNotFound(_)
-            | PushError::RevisionNotFound(_) => LoreError::NotFound,
-            PushError::AddressNotFound(_) => LoreError::AddressNotFound,
-            PushError::PayloadNotFound(_) => LoreError::PayloadNotFound,
-            PushError::InvalidPath(_) | PushError::InvalidArguments(_) => {
-                LoreError::InvalidArguments
-            }
-            _ => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
     }
 }
 
@@ -703,7 +689,8 @@ pub async fn push_branch(
 }
 
 /// Fails the push where the remote lacks a revision of another repository that a revision `target`
-/// pushes links, or refuses the caller that repository, before anything is pushed.
+/// pushes links, or refuses the caller that repository, before anything is pushed. A pin the plan
+/// holds is not asked about.
 ///
 /// The linked revisions are asked about a linked repository at a time, each repository's once,
 /// through the storage sessions of its context, in queries of the remote's batch size. A revision
@@ -715,8 +702,8 @@ async fn check_links_on_remote(target: &PushTarget) -> Result<(), PushError> {
         .revisions
         .iter()
         .flat_map(|pushed| &pushed.links)
-        .filter(|link| !link.signature.is_zero())
         .map(|link| (link.repository, link.signature))
+        .filter(|pin| !pin.1.is_zero() && !target.plan.held_links.contains(pin))
         .collect();
     linked.sort_unstable();
     linked.dedup();
@@ -837,6 +824,12 @@ struct TargetPlan {
     /// What the peer answered for the latest revision of each branch a line of the plan is on,
     /// so that each branch is asked about once.
     peer_latest: Vec<(BranchId, Hash)>,
+    /// The links, by linked repository and pinned revision, of the revisions of the peer the plan
+    /// starts from: each of `peer_latest`, and where the branch diverged, the first parent of the
+    /// oldest local revision, each unless the plan pushes it. A revision reaches the peer only
+    /// after the revisions its links pin, so these need no push or check. A pin held after a
+    /// revision linking it was scanned leaves the target that revision joined in place.
+    held_links: HashSet<(RepositoryId, Hash)>,
 }
 
 impl TargetPlan {
@@ -1013,7 +1006,7 @@ async fn plan_requests(collection: &mut TargetCollection, force: bool) -> Result
 
 /// Join the links of the pushing repository's current revision at the latest revision of the
 /// branch each resolves to, so that what was committed in a linked repository since the last
-/// revision naming it is pushed too.
+/// revision naming it is pushed too. A latest revision the root's plan holds is left out.
 async fn join_latest_links(collection: &mut TargetCollection) -> Result<(), PushError> {
     let Some(root) = collection.targets.first() else {
         return Ok(());
@@ -1032,7 +1025,8 @@ async fn join_latest_links(collection: &mut TargetCollection) -> Result<(), Push
         let link_latest = branch::load_latest(link_repository.clone(), link_branch)
             .await
             .unwrap_or_default();
-        if link_latest.is_zero() {
+        let held = &collection.targets[0].plan.held_links;
+        if link_latest.is_zero() || held.contains(&(link.repository, link_latest)) {
             continue;
         }
         join_target(
@@ -1155,7 +1149,7 @@ async fn place_pending(target: &mut PushTarget, force: bool) -> Result<(), PushE
 }
 
 /// Extend `target`'s plan to `revision`, which `line` reaches from its latest revision through
-/// first parents, newest first.
+/// first parents, newest first, holding the pins of each peer latest revision it learns of.
 async fn extend_plan(
     target: &mut PushTarget,
     revision: Hash,
@@ -1184,6 +1178,7 @@ async fn extend_plan(
     let (local, merges) = read_history(&target.repository, line).await?;
     let mut visited = plan.pushed.clone();
     visited.extend(line.iter().copied());
+    let known = plan.peer_latest.len();
     let divergent = collect_divergent_history(
         &target.repository,
         &plan.remote,
@@ -1195,13 +1190,15 @@ async fn extend_plan(
     for added in divergent.into_iter().rev().chain(local.into_iter().rev()) {
         plan.add(added);
     }
+    hold_remote_links(&target.repository, plan, known, Hash::default()).await;
     plan.local_history += line.len();
     target.latest = revision;
     Ok(())
 }
 
 /// Add the line of `revision`, a revision of `revision_branch`, to `target`'s plan, back to what
-/// the peer holds of that branch, or to the target's latest revision when the peer holds none.
+/// the peer holds of that branch, or to the target's latest revision when the peer holds none,
+/// holding the pins of the peer's latest revision of that branch.
 async fn upload_line(
     target: &mut PushTarget,
     revision: Hash,
@@ -1209,6 +1206,7 @@ async fn upload_line(
 ) -> Result<(), PushError> {
     lore_debug!("Revision {revision} is on branch {revision_branch}, uploading its line");
     let plan = &mut target.plan;
+    let known = plan.peer_latest.len();
     let peer_latest = peer_latest_for_branch(
         plan.remote.clone(),
         target.repository.id,
@@ -1234,19 +1232,22 @@ async fn upload_line(
             );
         }
     }
+    hold_remote_links(&target.repository, plan, known, Hash::default()).await;
     Ok(())
 }
 
 /// Join the links of the revisions `target`'s plan gained since its last scan, newest first, each
-/// to the target of the branch it resolves to.
+/// to the target of the branch it resolves to, leaving out the pins the plan holds.
 ///
 /// Newest first, a target is requested at the newest revision linked, so that the older ones are
 /// in its plan rather than placed against it.
+#[lore_macro::test_pub]
 async fn scan_target(collection: &mut TargetCollection, target: usize) {
     let scanning = &mut collection.targets[target];
     let branch = scanning.branch;
     let start = scanning.scanned;
     scanning.scanned = scanning.plan.revisions.len();
+    let held = &scanning.plan.held_links;
     let links: Vec<(Hash, LinkReference)> = scanning.plan.revisions[start..]
         .iter_mut()
         .rev()
@@ -1256,7 +1257,9 @@ async fn scan_target(collection: &mut TargetCollection, target: usize) {
                 .into_iter()
                 .map(move |link| (revision, link))
         })
-        .filter(|(_, link)| !link.signature.is_zero())
+        .filter(|(_, link)| {
+            !link.signature.is_zero() && !held.contains(&(link.repository, link.signature))
+        })
         .collect();
 
     for (holder, link) in links {
@@ -1980,10 +1983,20 @@ async fn plan_target(
         revisions: vec![],
         pushed: HashSet::new(),
         peer_latest: vec![(branch, created_latest)],
+        held_links: HashSet::new(),
     };
     if remote_latest == latest {
+        hold_remote_links(repository, &mut plan, 0, Hash::default()).await;
         return Ok(plan);
     }
+
+    let fork = match local_history.last() {
+        Some(&oldest) if plan.diverged => State::deserialize(repository.clone(), oldest)
+            .await
+            .forward::<PushError>("deserializing the oldest local revision")?
+            .parent_self(),
+        _ => Hash::default(),
+    };
 
     if local_history.is_empty() && !latest.is_zero() && force {
         local_history.push(latest);
@@ -2001,7 +2014,47 @@ async fn plan_target(
     for revision in divergent.into_iter().rev().chain(local.into_iter().rev()) {
         plan.add(revision);
     }
+    hold_remote_links(repository, &mut plan, 0, fork).await;
     Ok(plan)
+}
+
+/// Add to `plan`'s held links the links of each revision of `plan.peer_latest` from position `from`
+/// on and of `fork`, revisions of `repository` the peer holds, where the plan doesn't push it. A
+/// revision that can't be read holds none, so its links are pushed or checked.
+#[lore_macro::test_pub]
+async fn hold_remote_links(
+    repository: &Arc<RepositoryContext>,
+    plan: &mut TargetPlan,
+    from: usize,
+    fork: Hash,
+) {
+    let mut held: Vec<Hash> = plan.peer_latest[from..]
+        .iter()
+        .map(|&(_, latest)| latest)
+        .collect();
+    if !held.contains(&fork) {
+        held.push(fork);
+    }
+    for revision in held {
+        if revision.is_zero() || plan.pushes(revision) {
+            continue;
+        }
+        let state = match State::deserialize(repository.clone(), revision).await {
+            Ok(state) => state,
+            Err(err) => {
+                lore_debug!("Not holding the links of revision {revision}: {err}");
+                continue;
+            }
+        };
+        match revision_links(repository, &state).await {
+            Ok(links) => plan.held_links.extend(
+                links
+                    .into_iter()
+                    .map(|link| (link.repository, link.signature)),
+            ),
+            Err(err) => lore_debug!("Not holding the links of revision {revision}: {err}"),
+        }
+    }
 }
 
 /// What a target's push keeps from one revision to the next.
@@ -2767,6 +2820,12 @@ pub const RETRY_START_DURATION: u64 = 100;
 pub const RETRY_MAX_DURATION: u64 = 10_000;
 pub const RETRY_MAX_ATTEMPTS: usize = 10;
 
+/// Maximum number of rounds a fragment query waits while the peer throttles it, including rounds
+/// that answered some batches. Beyond this limit, the query fails with the peer's `SlowDown`, so a
+/// peer that keeps answering a little at a time cannot hold a query in back-off indefinitely.
+#[lore_macro::test_pub]
+const MAX_THROTTLED_ROUNDS: usize = 50;
+
 /// What the peer answered about the fragments a push is about to send, split by what it takes to
 /// register each one.
 ///
@@ -2793,6 +2852,11 @@ impl PushQueryResult {
     /// fragment total in the push progress events.
     pub fn len(&self) -> usize {
         self.absent.len() + self.copyable.len()
+    }
+
+    /// How many addresses the peer has answered, whatever the answer.
+    fn answered(&self) -> usize {
+        self.absent.len() + self.copyable.len() + self.present.len()
     }
 }
 
@@ -2822,91 +2886,16 @@ pub(crate) async fn push_query(
 
     let address_count = addresses.len();
     let slots = execution_context().push_budget().queries.clone();
-
-    let mut tasks = JoinSet::new();
-    let mut remain = addresses;
-
-    let mut failure = None;
-    let mut queried = PushQueryResult::default();
-    let mut retry =
+    let retry =
         crate::util::time::retry(RETRY_START_DURATION, RETRY_MAX_DURATION, RETRY_MAX_ATTEMPTS);
-    let max_batch_size = if let Some(max_batch_size) = max_batch_size
-        && max_batch_size > 0
-    {
-        max_batch_size
-    } else {
-        1000
-    };
-
-    fn handle_join_result(
-        result: Result<(Vec<Address>, Result<Bytes, ProtocolError>), JoinError>,
-        remain: &mut Vec<Address>,
-        queried: &mut PushQueryResult,
-    ) -> Result<(), PushError> {
-        let (mut batch, result) = result.internal("query task panicked")?;
-        match result {
-            Ok(result) => {
-                classify_query_batch(&batch, &result, queried);
-                Ok(())
-            }
-            Err(ProtocolError::SlowDown(_)) => {
-                remain.append(&mut batch);
-                Ok(())
-            }
-            err => err
-                .map(|_| ())
-                .forward::<PushError>("querying server for existing fragments"),
+    let queried = query_batches(addresses, max_batch_size, slots, retry, move |batch| {
+        let storage = storage.clone();
+        async move {
+            let result = storage.query(batch.as_slice()).await;
+            (batch, result)
         }
-    }
-
-    while !remain.is_empty() {
-        while !remain.is_empty() && failure.is_none() {
-            let Ok(slot) = slots.clone().acquire_owned().await else {
-                failure = Some(PushError::internal("query slots closed"));
-                break;
-            };
-            let mut batch = remain.split_off(remain.len().saturating_sub(max_batch_size));
-
-            let storage = storage.clone();
-            lore_spawn!(tasks, async move {
-                let _slot = slot;
-                batch.sort_unstable();
-                batch.dedup();
-
-                let result = storage.query(batch.as_slice()).await;
-                (batch, result)
-            });
-
-            while failure.is_none()
-                && let Some(result) = tasks.try_join_next()
-            {
-                failure = handle_join_result(result, remain.as_mut(), &mut queried).err();
-            }
-        }
-
-        while let Some(result) = tasks.join_next().await {
-            if failure.is_none() {
-                failure = handle_join_result(result, remain.as_mut(), &mut queried).err();
-            }
-        }
-
-        if let Some(failure) = failure {
-            return Err(failure);
-        }
-
-        if !remain.is_empty() && !retry.wait().await {
-            return Err(PushError::internal(
-                "Failed to query server for existing fragments",
-            ));
-        }
-    }
-
-    queried.absent.sort_unstable();
-    queried.absent.dedup();
-    queried.copyable.sort_unstable();
-    queried.copyable.dedup();
-    queried.present.sort_unstable();
-    queried.present.dedup();
+    })
+    .await?;
 
     stats.deduplicated(queried.present.len() as u64);
 
@@ -2917,6 +2906,125 @@ pub(crate) async fn push_query(
         queried.copyable.len(),
         queried.present.len()
     );
+
+    Ok(queried)
+}
+
+/// Ask the peer which of `addresses` it holds, in batches of up to `max_batch_size`, each holding
+/// one of `slots` while it is in flight. A batch the peer throttles is held until the next back-off
+/// from `retry`.
+///
+/// `query` answers one sorted, de-duplicated batch, handing the batch back with the peer's
+/// statuses for it.
+#[lore_macro::test_pub]
+async fn query_batches<Query, Answer>(
+    addresses: Vec<Address>,
+    max_batch_size: Option<usize>,
+    slots: Arc<Semaphore>,
+    mut retry: Retry,
+    query: Query,
+) -> Result<PushQueryResult, PushError>
+where
+    Query: Fn(Vec<Address>) -> Answer + Send + Sync + 'static,
+    Answer: Future<Output = (Vec<Address>, Result<Bytes, ProtocolError>)> + Send,
+{
+    let query = Arc::new(query);
+    let mut throttled_rounds = 0;
+    let mut tasks = JoinSet::new();
+    let mut remain = addresses;
+    let mut throttled = Vec::new();
+    let mut throttle = None;
+
+    let mut failure = None;
+    let mut queried = PushQueryResult::default();
+    let max_batch_size = if let Some(max_batch_size) = max_batch_size
+        && max_batch_size > 0
+    {
+        max_batch_size
+    } else {
+        1000
+    };
+
+    fn handle_join_result(
+        result: Result<(Vec<Address>, Result<Bytes, ProtocolError>), JoinError>,
+        throttled: &mut Vec<Address>,
+        throttle: &mut Option<ProtocolError>,
+        queried: &mut PushQueryResult,
+    ) -> Result<(), PushError> {
+        let (mut batch, result) = result.internal("query task panicked")?;
+        match result {
+            Ok(result) => {
+                classify_query_batch(&batch, &result, queried);
+                Ok(())
+            }
+            // Held until the next back-off, so the peer is not sent this batch again before then.
+            Err(error @ ProtocolError::SlowDown(_)) => {
+                throttled.append(&mut batch);
+                *throttle = Some(error);
+                Ok(())
+            }
+            err => err
+                .map(|_| ())
+                .forward::<PushError>("querying server for existing fragments"),
+        }
+    }
+
+    while !remain.is_empty() {
+        let answered_before = queried.answered();
+        while !remain.is_empty() && failure.is_none() {
+            let Ok(slot) = slots.clone().acquire_owned().await else {
+                failure = Some(PushError::internal("query slots closed"));
+                break;
+            };
+            let mut batch = remain.split_off(remain.len().saturating_sub(max_batch_size));
+
+            let query = query.clone();
+            lore_spawn!(tasks, async move {
+                let _slot = slot;
+                batch.sort_unstable();
+                batch.dedup();
+                query(batch).await
+            });
+
+            while failure.is_none()
+                && let Some(result) = tasks.try_join_next()
+            {
+                failure =
+                    handle_join_result(result, &mut throttled, &mut throttle, &mut queried).err();
+            }
+        }
+
+        while let Some(result) = tasks.join_next().await {
+            if failure.is_none() {
+                failure =
+                    handle_join_result(result, &mut throttled, &mut throttle, &mut queried).err();
+            }
+        }
+
+        if let Some(failure) = failure {
+            return Err(failure);
+        }
+
+        if let Some(error) = throttle.take() {
+            // A round with any answered batch restores the back-off's attempts, so its limit
+            // counts consecutive rounds that answered nothing.
+            if queried.answered() > answered_before {
+                retry.reset_attempts();
+            }
+            throttled_rounds += 1;
+            if throttled_rounds > MAX_THROTTLED_ROUNDS || !retry.wait().await {
+                return Err(error).forward::<PushError>("querying server for existing fragments");
+            }
+            remain.append(&mut throttled);
+        }
+    }
+
+    queried.absent.sort_unstable();
+    queried.absent.dedup();
+    queried.copyable.sort_unstable();
+    queried.copyable.dedup();
+    queried.present.sort_unstable();
+    queried.present.dedup();
 
     Ok(queried)
 }
@@ -3089,7 +3197,7 @@ async fn push_fragments_within(
             immutable::store_raw_remote_retry(storage.clone(), address, fragment, Some(payload))
                 .await
                 .map_err(|err| {
-                    if err.is_disconnected() || is_refusal(&err) {
+                    if err.is_disconnected() || err.is_slow_down() || is_refusal(&err) {
                         err.forward("putting fragment to remote")
                     } else {
                         PushError::internal_with_context(err, "putting fragment to remote")
@@ -3251,11 +3359,14 @@ async fn failed_mount_push(
             line,
         );
     }
+    let mut err = err;
+    if repository.is_link() && is_refusal(&err) {
+        err.push_context(crate::link::unreachable(repository.id));
+    }
     let line = format!(
         "Failed to push the {} at {} (branch {}): {err}",
         name.kind, name.path, name.branch
     );
-    let mut err = err;
     err.push_context(context);
     (err, line)
 }

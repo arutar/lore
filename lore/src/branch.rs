@@ -22,7 +22,7 @@ use lore_revision::link;
 use lore_revision::lore::BranchId;
 use lore_revision::lore::execution_context;
 use lore_revision::lore_debug;
-use lore_revision::lore_error;
+use lore_revision::lore_warn;
 use lore_revision::metadata::MetadataInherit;
 use lore_revision::metadata::branch::BranchMetadataError;
 use lore_revision::repository;
@@ -38,7 +38,9 @@ use crate::interface::LoreString;
 use crate::util::path_messages;
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(create_local)]
 /// Arguments for creating a new branch with the given name and category.
 pub struct LoreBranchCreateArgs {
@@ -61,7 +63,6 @@ pub struct LoreBranchCreateArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -114,7 +115,9 @@ fn create_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(info_local)]
 /// Arguments for retrieving branch metadata (name, id, category, protection status).
 pub struct LoreBranchInfoArgs {
@@ -135,7 +138,6 @@ pub struct LoreBranchInfoArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -176,7 +178,9 @@ fn info_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(diff_local)]
 /// Arguments for diffing two branches, reporting changed and conflicting files.
 pub struct LoreBranchDiffArgs {
@@ -201,7 +205,6 @@ pub struct LoreBranchDiffArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -242,7 +245,9 @@ fn diff_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(list_local)]
 /// Arguments for listing the branches of the repository.
 pub struct LoreBranchListArgs {
@@ -262,7 +267,6 @@ pub struct LoreBranchListArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -296,7 +300,9 @@ fn list_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(merge_start_local)]
 /// Arguments for merging a source branch into the current branch.
 pub struct LoreBranchMergeStartArgs {
@@ -331,7 +337,6 @@ pub struct LoreBranchMergeStartArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -405,7 +410,9 @@ fn merge_start_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(merge_abort_local)]
 /// Arguments for aborting an in-progress branch merge.
 pub struct LoreBranchMergeAbortArgs {
@@ -426,7 +433,6 @@ pub struct LoreBranchMergeAbortArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -484,7 +490,9 @@ fn merge_abort_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(merge_conflicts_list_local)]
 /// Arguments for listing the conflicts an open merge holds.
 pub struct LoreBranchMergeConflictsListArgs {}
@@ -500,7 +508,6 @@ pub struct LoreBranchMergeConflictsListArgs {}
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -533,7 +540,9 @@ fn merge_conflicts_list_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(merge_unresolve_local)]
 /// Arguments for marking resolved merge paths as unresolved again.
 pub struct LoreBranchMergeUnresolveArgs {
@@ -552,7 +561,6 @@ pub struct LoreBranchMergeUnresolveArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -587,7 +595,9 @@ fn merge_unresolve_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(merge_into_local)]
 /// Arguments for merging the current branch's staged changes into a target branch.
 pub struct LoreBranchMergeIntoArgs {
@@ -618,7 +628,6 @@ pub struct LoreBranchMergeIntoArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -688,7 +697,9 @@ fn merge_into_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(merge_restart_local)]
 /// Arguments for re-applying merge conflict resolution for the given paths.
 pub struct LoreBranchMergeRestartArgs {
@@ -707,7 +718,6 @@ pub struct LoreBranchMergeRestartArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -743,7 +753,9 @@ fn merge_restart_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(merge_resolve_local)]
 /// Arguments for marking conflicted paths as resolved.
 pub struct LoreBranchMergeResolveArgs {
@@ -762,7 +774,6 @@ pub struct LoreBranchMergeResolveArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -797,7 +808,9 @@ fn merge_resolve_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(merge_resolve_mine_local)]
 /// Arguments for resolving conflicts by accepting the local ("mine") version.
 pub struct LoreBranchMergeResolveMineArgs {
@@ -816,7 +829,6 @@ pub struct LoreBranchMergeResolveMineArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -851,7 +863,9 @@ fn merge_resolve_mine_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(merge_resolve_theirs_local)]
 /// Arguments for resolving conflicts by accepting the incoming ("theirs") version.
 pub struct LoreBranchMergeResolveTheirsArgs {
@@ -870,7 +884,6 @@ pub struct LoreBranchMergeResolveTheirsArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -905,7 +918,9 @@ fn merge_resolve_theirs_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(push_local)]
 /// Arguments for pushing a branch and its revisions to the remote.
 pub struct LoreBranchPushArgs {
@@ -926,7 +941,6 @@ pub struct LoreBranchPushArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -991,7 +1005,9 @@ async fn push_impl(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(switch_local)]
 /// Arguments for switching the working directory to a different branch or revision.
 pub struct LoreBranchSwitchArgs {
@@ -1016,7 +1032,6 @@ pub struct LoreBranchSwitchArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1069,7 +1084,9 @@ fn switch_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(protect_local)]
 /// Arguments for applying write protection to a branch.
 pub struct LoreBranchProtectArgs {
@@ -1088,7 +1105,6 @@ pub struct LoreBranchProtectArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1124,7 +1140,9 @@ fn protect_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(unprotect_local)]
 /// Arguments for removing write protection from a branch.
 pub struct LoreBranchUnprotectArgs {
@@ -1143,7 +1161,6 @@ pub struct LoreBranchUnprotectArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1179,7 +1196,9 @@ fn unprotect_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(archive_local)]
 /// Arguments for archiving a branch locally and (unless local mode) on the remote.
 pub struct LoreBranchArchiveArgs {
@@ -1201,6 +1220,9 @@ pub struct LoreBranchArchiveArgs {
 /// archived is not an error. Any other remote failure, such as a missing
 /// authorization, fails the call.
 ///
+/// The current branch is refused with `DeleteCurrent`. A layer or link that fails to archive
+/// the branch is logged as a warning naming its repository, and the call does not fail for it.
+///
 /// # Events
 ///
 /// ## Standard Events
@@ -1210,7 +1232,6 @@ pub struct LoreBranchArchiveArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1241,86 +1262,75 @@ fn archive_local(
     )
 }
 
+#[lore_macro::test_pub]
 async fn archive_impl(
     repository: Arc<RepositoryContext>,
     args: LoreBranchArchiveArgs,
 ) -> Result<(), BranchError> {
-    let execution = execution_context();
-
     let branch = branch::resolve(repository.clone(), args.branch.as_str()).await?;
 
     let layer_scope =
         CascadeScope::new(&args.layer, args.include_layers, "layer", "include_layers")?;
     let link_scope = CascadeScope::new(&args.link, args.include_links, "link", "include_links")?;
 
-    let mut local_fail = false;
-
-    // Make sure branch is not current
-    let mut local_current = false;
+    // `branch::delete` refuses the current branch too, but the remote archive and the cascade
+    // would still run after it, so the refusal comes first.
     if let Ok((_revision, current_branch)) =
         lore_revision::instance::load_current_anchor_boxed(&repository).await
         && current_branch == branch.id
     {
-        lore_error!("Cannot archive the current branch");
-        execution
-            .dispatcher
-            .send_error(BranchError::from(lore_base::error::DeleteCurrent {
-                branch: branch.id.to_string(),
-            }));
-        local_fail = true;
-        local_current = true;
-    }
-
-    if !local_fail {
-        // Archive branch
-        lore_debug!("Attempt archive of local branch");
-        if let Err(err) = branch::delete(repository.clone(), branch.id).await {
-            execution.dispatcher.send_error(err);
-            local_fail = true;
-        }
-    }
-
-    let mut remote_fail = None;
-
-    if !local_current && !execution_context().globals().local() {
-        // Archive remote branch
-        lore_debug!("Attempt archive of remote branch");
-        let remote_archive = match repository
-            .remote()
-            .await
-            .forward::<BranchError>("Failed to connect to remote")
-        {
-            Ok(remote) => branch::delete_remote(remote, repository.id, branch.id).await,
-            Err(err) => Err(err),
-        };
-
-        match remote_archive {
-            Ok(()) => (),
-            Err(err) if err.is_no_remote() || err.is_branch_not_found() => {
-                lore_debug!("No remote branch to archive: {err}");
-            }
-            Err(err) => remote_fail = Some(err),
-        }
-    }
-
-    // Runs even when the outer archive failed, so that a repeat of a partially
-    // applied archive still converges on the layers and links.
-    if !local_current {
-        archive_layers(repository.clone(), branch.id, layer_scope).await?;
-        archive_links(repository, branch.id, link_scope).await?;
-    }
-
-    if local_fail {
-        return Err(BranchError::from(lore_base::error::BranchNotFound {
+        return Err(BranchError::from(lore_base::error::DeleteCurrent {
             branch: branch.id.to_string(),
         }));
     }
 
-    if let Some(err) = remote_fail {
-        return Err(err);
-    }
+    lore_debug!("Attempt archive of local branch");
+    let local_archive = branch::delete(repository.clone(), branch.id).await;
 
-    Ok(())
+    let remote_archive = if execution_context().globals().local() {
+        Ok(())
+    } else {
+        archive_on_remote(&repository, branch.id).await
+    };
+
+    // Runs even when the outer archive failed, so that a repeat of a partially
+    // applied archive still converges on the layers and links.
+    let cascade = match archive_layers(repository.clone(), branch.id, layer_scope).await {
+        Ok(()) => archive_links(repository, branch.id, link_scope).await,
+        Err(err) => Err(err),
+    };
+
+    // The local failure takes precedence over the remote's, and both over the cascade's.
+    local_archive?;
+    remote_archive?;
+    cascade
+}
+
+/// Archives `branch` on the remote of `repository`. A repository with no remote, or whose remote
+/// does not have the branch, has nothing to archive there.
+async fn archive_on_remote(
+    repository: &RepositoryContext,
+    branch: BranchId,
+) -> Result<(), BranchError> {
+    lore_debug!(
+        "Attempt archive of branch {branch} on the remote of {}",
+        repository.id
+    );
+    let archive = match repository
+        .remote()
+        .await
+        .forward::<BranchError>("Failed to connect to remote")
+    {
+        Ok(remote) => branch::delete_remote(remote, repository.id, branch).await,
+        Err(err) => Err(err),
+    };
+    match archive {
+        Err(err) if err.is_no_remote() || err.is_branch_not_found() => {
+            lore_debug!("No remote branch to archive: {err}");
+            Ok(())
+        }
+        archive => archive,
+    }
 }
 
 /// A layer or link is a separate repository owning its own branch lifecycle, and
@@ -1381,7 +1391,8 @@ async fn archive_layers(
         }
     };
 
-    archive_in_repositories(layers, branch).await
+    archive_in_repositories(layers, branch).await;
+    Ok(())
 }
 
 async fn archive_links(
@@ -1405,40 +1416,40 @@ async fn archive_links(
         ],
     };
 
-    archive_in_repositories(links, branch).await
+    archive_in_repositories(links, branch).await;
+    Ok(())
 }
 
-/// A repository that never had the branch answers `NOT_FOUND`, which is the
-/// cascade converging rather than a failure, so it is not reported.
-async fn archive_in_repositories(
-    repositories: Vec<Arc<RepositoryContext>>,
-    branch: BranchId,
-) -> Result<(), BranchError> {
-    let execution = execution_context();
-    let archive_remote = !execution.globals().local();
+/// A repository that never had the branch, or has no remote, has nothing to archive, which is the
+/// cascade converging rather than a failure, so it is not reported. Any other failure is a
+/// warning naming the repository: the outer archive stands.
+async fn archive_in_repositories(repositories: Vec<Arc<RepositoryContext>>, branch: BranchId) {
+    let archive_remote = !execution_context().globals().local();
 
     for repository in repositories {
         lore_debug!("Attempt archive of branch in {}", repository.id);
         if let Err(err) = branch::delete(repository.clone(), branch).await
             && !err.is_branch_not_found()
         {
-            execution.dispatcher.send_error(err);
+            lore_warn!(
+                "Failed to archive branch {branch} in repository {}: {err}",
+                repository.id
+            );
         }
 
-        if archive_remote
-            && let Ok(remote) = repository.remote().await
-            && let Err(err) = branch::delete_remote(remote, repository.id, branch).await
-            && !err.is_branch_not_found()
-        {
-            execution.dispatcher.send_error(err);
+        if archive_remote && let Err(err) = archive_on_remote(&repository, branch).await {
+            lore_warn!(
+                "Failed to archive branch {branch} on the remote of repository {}: {err}",
+                repository.id
+            );
         }
     }
-
-    Ok(())
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(reset_local)]
 /// Arguments for resetting a branch's local LATEST pointer to a specific revision.
 pub struct LoreBranchResetArgs {
@@ -1459,7 +1470,6 @@ pub struct LoreBranchResetArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1505,7 +1515,9 @@ async fn reset_impl(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug, Clone, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode, lore_macro::WireSchema,
+)]
 #[handler(latest_list_local)]
 /// Arguments for listing a branch's LATEST revision history.
 pub struct LoreBranchLatestListArgs {
@@ -1526,7 +1538,6 @@ pub struct LoreBranchLatestListArgs {
 /// | Event | Description |
 /// |-------|-------------|
 /// | [`LoreEvent::Log`](crate::interface::LoreEvent::Log) | Diagnostic messages throughout execution |
-/// | [`LoreEvent::Error`](crate::interface::LoreEvent::Error) | Emitted for a non-fatal error during the operation |
 /// | [`LoreEvent::Complete`](crate::interface::LoreEvent::Complete) | Always emitted at the end; `status` is `0` on success or the error code on failure |
 /// | [`LoreEvent::End`](crate::interface::LoreEvent::End) | Always emitted after `Complete` to signal callback termination |
 ///
@@ -1572,7 +1583,16 @@ async fn latest_list_impl(
 // --- Branch metadata commands ---
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(metadata_get_local)]
 /// Arguments for retrieving branch metadata (one key or all).
 pub struct LoreBranchMetadataGetArgs {
@@ -1654,7 +1674,16 @@ fn metadata_get_local(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(metadata_set_local)]
 /// Arguments for setting one or more key-value pairs on branch metadata.
 pub struct LoreBranchMetadataSetArgs {
@@ -1734,7 +1763,16 @@ async fn metadata_set_impl(
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Default, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Default,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(metadata_clear_local)]
 /// Arguments for removing keys from branch metadata.
 pub struct LoreBranchMetadataClearArgs {

@@ -1766,9 +1766,15 @@ file, and the mount serves one that holds the revision's content from the store 
 file a commit stores. A recorded time stands only for content read after no write could still carry
 that time, and only for the revision the mount serves, and a file returns to the store only while
 it still shows the time that was read, so no write racing a status, a stage or a commit is missed.
-It holds a link as the link's node alone, so nothing at or below a link is a change of its working
-tree, and nothing of a link is written through it: a merge bringing one, or a link's update or
-removal, changes the node.
+It holds a link as the link's node, and serves the link read-only with the content of the revision
+it pins, read from the linked repository at the pin the staged state holds, or the current
+revision's where nothing is staged, as an SWFS instance serves it
+([ADR-00036](../developing/decisions/00036-swfs-serve-links-and-layers.md)). A link whose pin cannot
+be read is served empty. Nothing at or below a link is a change of its working tree, and nothing of
+a link is written through it: a command changing a link, as a merge bringing one or a link's update,
+removal or reset does, places the node or takes it away, and the mount serves the change at once,
+where an ordinary instance writes it. A link a command would place where local changes stand is
+refused unless forced.
 
 #### 15.3 Paths into the dirty set
 
@@ -2316,10 +2322,13 @@ The check has time and work limits and reports when it cannot complete. Remote e
 stops when it encounters more than 10,000 branches, before collecting the rest of the listing. It covers the target
 repository's active branches, not archived branches or every other repository that links into
 it. Offline checks cannot establish remote impact. Branch listing deliberately omits unreadable
-branch metadata and reports a zero latest revision when that pointer cannot be read. The remote
-inspection warns that impact for omitted branches is unknown, and reports unknown impact for
-branches with a zero latest revision because it cannot distinguish an empty branch from a read
-failure. Concurrent pushes can change latest pointers after inspection; absence of a known
+branch metadata and reports a zero latest revision when that pointer cannot be read. The server
+reads a listing eventually consistently, so a branch created or archived about a second before
+the listing can be missing from it or still in it, and a latest revision can be out of date. With
+`include_deleted`, a live branch whose name entry the read missed is listed as deleted. The
+remote inspection warns that impact for omitted branches is unknown, and reports unknown impact
+for branches with a zero latest revision because it cannot distinguish an empty branch from a
+read failure. Concurrent pushes can change latest pointers after inspection; absence of a known
 impact warning is not a guarantee of cloneability. Zero-context structural targets report
 unknown impact instead of being classified as unreferenced. Direct storage/admin RPC callers
 do not run this revision-layer check.
@@ -2390,7 +2399,9 @@ The `MutableStore` trait exposes a narrow API: `load`, `store`, `cas`, `list`, e
 taking a typed key. The `cas` (compare-and-swap) operation is what gives Lore atomic
 state transitions (§9.4); every backend must implement it correctly. A key holds zero
 when it's absent: a `cas` from zero creates the key, and a `cas` or `store` to zero
-removes it and leaves no entry behind.
+removes it and leaves no entry behind. Each backend marks the key type in the key it
+keeps, in a place of its own, and `stored_typed_key` returns a key in the form that
+backend's `list` reports it.
 
 Lore ships with:
 
@@ -2643,7 +2654,11 @@ A parent may link one repository at several paths, each mount exposing another f
 it. The mounts share one pin, branch and flags ([ADR-00043](../developing/decisions/00043-one-pin-per-linked-repository.md)):
 `link add` of a repository the parent already links takes the pin of its other mounts, and
 `link update` and a commit through any one mount move every mount together, as unstaging
-an update does in the top-level repository.
+an update does in the top-level repository. A stage, an unstage or a dirty walk through several
+mounts works on one state of the repository per parent, and pins it at each mount holding a
+change and each mount already on its uncommitted revision; the others keep the committed pin
+until the commit moves them. A commit that fails before it stores the parent's latest moves
+each linked branch it moved back, so a push publishes only revisions a parent pins.
 
 A branch create also reaches nested links, so the repositories those link to get the
 branch too, up to the link depth limit of 8. It follows three rules:
@@ -2676,10 +2691,12 @@ back to a repository the merge is already inside is left out. A repository sever
 is merged once, and every one of them pins the result. That needs the links to pin it at one
 revision on one branch, and its merge to be free of conflicts; otherwise the merge is refused
 before it writes anything. A link the merged branch adds to such a repository is still merged on
-its own. A commit commits a staged linked revision only a merge staged once for all the links
-pinning it, which therefore take one per-link message. Before it writes anything, it refuses
-changes made in the working tree under several links to one repository, two staged revisions of
-one repository on one branch, and a commit of one of the links alone.
+its own. A commit commits a staged linked revision once for all the links pinning it, which
+therefore take one per-link message, reading the working tree under every mount of it the
+repository holding them has. Before it writes anything, it refuses two staged revisions of one
+repository on one branch, and changes made in the working tree under links to one repository that
+different repositories hold. A repository mounts each folder of a linked repository once, so the
+working tree holds each linked file at one path.
 
 A link's row, its pin, the branch it follows, its flags and the folder it mounts, is merged
 three ways against the common ancestor. A row only the merged branch changed lands whole. A
@@ -2698,8 +2715,8 @@ By default, committing and merging in Lore cascade through the parent and any li
 repositories that have changes. Two operations are scoped to a single link:
 
 - *Link-scoped committing.* `commit --link <path>` commits staged changes in one
-  linked repository only, advancing that link's pin in the parent's staged state
-  without touching the parent's other links or content. The parent itself is not
+  linked repository only, under every mount of it, advancing the pin of every mount in
+  the parent's staged state without touching the parent's other links or content. The parent itself is not
   committed; the new pin shows up in the parent's next revision. This is useful when
   resolving conflicts in one linked repository, or when making incremental progress
   on a link before committing at the parent level.

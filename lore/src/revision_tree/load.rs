@@ -17,10 +17,8 @@ use lore_base::types::Partition;
 use lore_error_set::prelude::*;
 use lore_macro::LoreArgs;
 use lore_revision::errors::StateErrors;
-use lore_revision::event::EventError;
 use lore_revision::event::LoreEvent;
 use lore_revision::event::revision_tree::LoreRevisionTreeLoadedEventData;
-use lore_revision::interface::LoreError;
 use lore_revision::state::State;
 
 use crate::call::no_repository_call;
@@ -36,7 +34,17 @@ use crate::storage::handle::LoreStore;
 
 /// Arguments for `lore_revision_tree_load`.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, LoreArgs, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    LoreArgs,
+    bitcode::Encode,
+    bitcode::Decode,
+    lore_macro::WireSchema,
+)]
 #[handler(load_impl)]
 pub struct LoreRevisionTreeLoadArgs {
     /// Open storage handle the revision tree is loaded against
@@ -54,22 +62,6 @@ enum LoadError {
     AddressNotFound,
     PayloadNotFound,
     NotFound,
-}
-
-impl EventError for LoadError {
-    fn translated(&self) -> LoreError {
-        match self {
-            LoadError::InvalidArguments(_) => LoreError::InvalidArguments,
-            LoadError::AddressNotFound(_) => LoreError::AddressNotFound,
-            LoadError::PayloadNotFound(_) => LoreError::PayloadNotFound,
-            LoadError::NotFound(_) => LoreError::NotFound,
-            LoadError::Internal(_) => LoreError::Internal,
-        }
-    }
-
-    fn inner(&self) -> String {
-        self.to_string()
-    }
 }
 
 /// Map `State::deserialize` errors to the load verb's error surface. The
@@ -109,9 +101,9 @@ fn withdraw_if_parent_closed(store: LoreStore, revision_tree: LoreRevisionTree) 
 /// Open a memory-based revision tree handle on the given `(store, repository, revision_hash)`.
 ///
 /// On success the caller receives `LORE_EVENT_REVISION_TREE_LOADED` carrying
-/// the new handle id before `Complete {status: 0}`. On failure, one
-/// `LORE_EVENT_ERROR` fires followed by `Complete {status: 1}` and no
-/// handle is registered.
+/// the new handle id before `Complete {status: 0}`. On failure, `Complete`
+/// carries the error code in `status` and the full detail in its `error` field,
+/// and no handle is registered.
 pub fn load(
     globals: LoreGlobalArgs,
     args: LoreRevisionTreeLoadArgs,

@@ -17,6 +17,7 @@ use crate::repository::RepositoryContext;
 
 #[error_set]
 pub enum HistoryError {
+    Cancelled,
     AddressNotFound,
     Disconnected,
     InvalidArguments,
@@ -62,8 +63,6 @@ pub enum HistoryError {
     FileNotFound,
     MissingIdentity,
 }
-
-impl crate::event::EventError for HistoryError {}
 
 /// How a round takes a line further.
 enum Step {
