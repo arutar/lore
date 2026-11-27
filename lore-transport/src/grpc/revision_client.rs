@@ -378,7 +378,7 @@ impl RevisionService {
                     match self.client.clone().branch_push(request.clone()).await {
                         Ok(response) => break response.into_inner(),
                         Err(status) => {
-                            handle_error_as(&mut retry, status, branch_push_error).await?
+                            handle_error_as(&mut retry, status, branch_push_error).await?;
                         }
                     }
                 }
